@@ -1,0 +1,13 @@
+# Host-plane contribution only. The model-facing consumer belongs in a user-owned agent preset.
+- insert:
+    - id: dsh-computer-use-host
+      name: "dsh-computer-use/host"
+      config:
+        screenshotMaxDimension: 1920
+        screenshotMaxBytes: 12000000
+        commandTimeoutMs: 30000
+        graceMs: 2000
+        actionDelayMs: 40
+        maxAccessibilityNodes: 300
+        maxAccessibilityDepth: 6
+        maxAccessibilityBytes: 1000000
