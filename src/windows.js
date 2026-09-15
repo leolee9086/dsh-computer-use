@@ -1,9 +1,11 @@
 import { Buffer } from 'node:buffer';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { ComputerUseError, unsupported } from './errors.js';
-import { assertFinitePoint, pngDimensions } from './geometry.js';
+import { assertFinitePoint } from './geometry.js';
 
 const KEY_CODES = {
   alt: 0x12,
@@ -40,6 +42,7 @@ $payload = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64St
 $nativeSource = @'
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
@@ -52,6 +55,17 @@ namespace DshComputer {
     public int height;
     public RectValue(int x, int y, int width, int height) {
       this.x = x; this.y = y; this.width = width; this.height = height;
+    }
+  }
+
+  public sealed class WindowValue {
+    public long id;
+    public string title;
+    public int processId;
+    public string application;
+    public RectValue bounds;
+    public WindowValue(long id, string title, int processId, string application, RectValue bounds) {
+      this.id = id; this.title = title; this.processId = processId; this.application = application; this.bounds = bounds;
     }
   }
 
@@ -80,8 +94,21 @@ namespace DshComputer {
     [DllImport("user32.dll", SetLastError = true)] public static extern uint SendInput(uint count, INPUT[] inputs, int size);
     [DllImport("user32.dll", SetLastError = true)] public static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll", SetLastError = true)] public static extern bool GetWindowRect(IntPtr handle, out RECT rect);
+    [DllImport("user32.dll", SetLastError = true)] public static extern bool IsWindowVisible(IntPtr handle);
+    [DllImport("user32.dll", SetLastError = true)] public static extern bool IsIconic(IntPtr handle);
+    [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Unicode)] public static extern int GetWindowText(IntPtr handle, StringBuilder text, int maxCount);
+    [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Unicode)] public static extern int GetWindowTextLength(IntPtr handle);
+    public delegate bool EnumWindowsProc(IntPtr handle, IntPtr parameter);
+    [DllImport("user32.dll", SetLastError = true)] public static extern bool EnumWindows(EnumWindowsProc callback, IntPtr parameter);
     [DllImport("user32.dll", SetLastError = true)] public static extern bool SetForegroundWindow(IntPtr handle);
+    [DllImport("user32.dll", SetLastError = true)] public static extern bool BringWindowToTop(IntPtr handle);
+    [DllImport("user32.dll", SetLastError = true)] public static extern IntPtr SetFocus(IntPtr handle);
+    [DllImport("user32.dll", SetLastError = true)] public static extern bool IsWindow(IntPtr handle);
+    [DllImport("user32.dll", SetLastError = true)] public static extern uint GetWindowThreadProcessId(IntPtr handle, IntPtr processId);
+    [DllImport("user32.dll", SetLastError = true, EntryPoint = "GetWindowThreadProcessId")] public static extern uint GetWindowThreadProcessIdWithProcess(IntPtr handle, out uint processId);
+    [DllImport("user32.dll", SetLastError = true)] public static extern bool AttachThreadInput(uint attachThreadId, uint attachToThreadId, bool attach);
     [DllImport("user32.dll", SetLastError = true)] public static extern bool ShowWindow(IntPtr handle, int command);
+    [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
     [DllImport("user32.dll", SetLastError = true)] public static extern bool SetProcessDPIAware();
     [DllImport("user32.dll", SetLastError = true)] public static extern bool SetProcessDpiAwarenessContext(IntPtr value);
 
@@ -113,6 +140,10 @@ namespace DshComputer {
       return LEFTUP;
     }
 
+    public static void Move(int x, int y) {
+      if (!SetCursorPos(x, y)) throw new InvalidOperationException("SetCursorPos failed");
+    }
+
     public static void Click(int x, int y, string button, int count) {
       if (!SetCursorPos(x, y)) throw new InvalidOperationException("SetCursorPos failed");
       for (int i = 0; i < count; i++) {
@@ -125,15 +156,22 @@ namespace DshComputer {
       if (!SetCursorPos(fromX, fromY)) throw new InvalidOperationException("SetCursorPos failed");
       mouse_event(LEFTDOWN, 0, 0, 0, IntPtr.Zero);
       try {
-        if (durationMs > 0) Thread.Sleep(durationMs);
-        if (!SetCursorPos(toX, toY)) throw new InvalidOperationException("SetCursorPos failed");
+        var duration = Math.Max(0, Math.Min(10000, durationMs));
+        var steps = Math.Max(1, Math.Min(120, (int)Math.Ceiling(duration / 16.0)));
+        for (var index = 1; index <= steps; index++) {
+          var fraction = index / (double)steps;
+          var x = (int)Math.Round(fromX + (toX - fromX) * fraction);
+          var y = (int)Math.Round(fromY + (toY - fromY) * fraction);
+          if (duration > 0) Thread.Sleep((int)Math.Round(duration / (double)steps));
+          if (!SetCursorPos(x, y)) throw new InvalidOperationException("SetCursorPos failed");
+        }
       } finally {
         mouse_event(LEFTUP, 0, 0, 0, IntPtr.Zero);
       }
     }
 
     public static void Scroll(int x, int y, int deltaX, int deltaY) {
-      SetCursorPos(x, y);
+      if (!SetCursorPos(x, y)) throw new InvalidOperationException("SetCursorPos failed");
       if (deltaY != 0) mouse_event(WHEEL, 0, 0, unchecked((uint)deltaY), IntPtr.Zero);
       if (deltaX != 0) mouse_event(HWHEEL, 0, 0, unchecked((uint)deltaX), IntPtr.Zero);
     }
@@ -166,10 +204,80 @@ namespace DshComputer {
       return new RectValue(rect.Left, rect.Top, rect.Right - rect.Left, rect.Bottom - rect.Top);
     }
 
-    public static bool FocusWindow(long rawHandle) {
+    static string WindowTitle(IntPtr handle) {
+      var length = GetWindowTextLength(handle);
+      if (length < 1) return "";
+      var text = new StringBuilder(length + 1);
+      GetWindowText(handle, text, text.Capacity);
+      return text.ToString();
+    }
+
+    static bool BoundsEqual(RECT rect, RectValue expected) {
+      return expected != null
+        && rect.Left == expected.x && rect.Top == expected.y
+        && rect.Right - rect.Left == expected.width && rect.Bottom - rect.Top == expected.height;
+    }
+
+    public static bool WindowMatches(long rawHandle, int expectedProcessId, string expectedTitle, RectValue expectedBounds) {
       var handle = new IntPtr(rawHandle);
+      if (!IsWindow(handle) || !IsWindowVisible(handle) || IsIconic(handle)) return false;
+      uint processId;
+      if (GetWindowThreadProcessIdWithProcess(handle, out processId) == 0 || processId != (uint)expectedProcessId) return false;
+      if (WindowTitle(handle) != expectedTitle) return false;
+      RECT rect;
+      return GetWindowRect(handle, out rect) && BoundsEqual(rect, expectedBounds);
+    }
+
+    public static List<WindowValue> VisibleWindows() {
+      var windows = new List<WindowValue>();
+      if (!EnumWindows((handle, ignored) => {
+        if (!IsWindowVisible(handle) || IsIconic(handle)) return true;
+        var title = WindowTitle(handle);
+        if (String.IsNullOrEmpty(title)) return true;
+        RECT rect;
+        if (!GetWindowRect(handle, out rect) || rect.Right <= rect.Left || rect.Bottom <= rect.Top) return true;
+        uint processId;
+        if (GetWindowThreadProcessIdWithProcess(handle, out processId) == 0 || processId == 0 || processId > Int32.MaxValue) return true;
+        var application = "";
+        try { application = Process.GetProcessById((int)processId).ProcessName; } catch { }
+        windows.Add(new WindowValue(handle.ToInt64(), title, (int)processId, application,
+          new RectValue(rect.Left, rect.Top, rect.Right - rect.Left, rect.Bottom - rect.Top)));
+        return true;
+      }, IntPtr.Zero)) throw new InvalidOperationException("EnumWindows failed");
+      return windows;
+    }
+
+    public static bool FocusWindow(long rawHandle, int expectedProcessId, string expectedTitle, RectValue expectedBounds) {
+      var handle = new IntPtr(rawHandle);
+      if (!WindowMatches(rawHandle, expectedProcessId, expectedTitle, expectedBounds)) return false;
       ShowWindow(handle, 9);
-      return SetForegroundWindow(handle);
+      if (SetForegroundWindow(handle) && GetForegroundWindow() == handle) {
+        return WindowMatches(rawHandle, expectedProcessId, expectedTitle, expectedBounds);
+      }
+
+      // Windows foreground-lock rules can reject a valid window. Temporarily join
+      // the caller with the foreground and target input queues, then verify focus.
+      var currentThread = GetCurrentThreadId();
+      var foreground = GetForegroundWindow();
+      var foregroundThread = foreground == IntPtr.Zero ? 0 : GetWindowThreadProcessId(foreground, IntPtr.Zero);
+      var targetThread = GetWindowThreadProcessId(handle, IntPtr.Zero);
+      var attachedForeground = false;
+      var attachedTarget = false;
+      try {
+        if (foregroundThread != 0 && foregroundThread != currentThread) {
+          attachedForeground = AttachThreadInput(currentThread, foregroundThread, true);
+        }
+        if (targetThread != 0 && targetThread != currentThread && targetThread != foregroundThread) {
+          attachedTarget = AttachThreadInput(currentThread, targetThread, true);
+        }
+        BringWindowToTop(handle);
+        SetForegroundWindow(handle);
+        SetFocus(handle);
+        return GetForegroundWindow() == handle && WindowMatches(rawHandle, expectedProcessId, expectedTitle, expectedBounds);
+      } finally {
+        if (attachedTarget) AttachThreadInput(currentThread, targetThread, false);
+        if (attachedForeground) AttachThreadInput(currentThread, foregroundThread, false);
+      }
     }
 
     public static long ForegroundWindow() { return GetForegroundWindow().ToInt64(); }
@@ -182,7 +290,7 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
 function Write-ComputerResult($value) {
-  [Console]::Out.Write(($value | ConvertTo-Json -Depth 64 -Compress))
+  [Console]::Out.Write((ConvertTo-Json -InputObject $value -Depth 64 -Compress))
 }
 
 switch ($payload.kind) {
@@ -193,51 +301,9 @@ switch ($payload.kind) {
     Write-ComputerResult @($screens)
     break
   }
-  'screenshot' {
-    $selected = $null
-    if ($null -ne $payload.displayId -and $payload.displayId -ne '') {
-      $selected = [System.Windows.Forms.Screen]::AllScreens | Where-Object { $_.DeviceName -eq $payload.displayId } | Select-Object -First 1
-      if ($null -eq $selected) { throw "display '$($payload.displayId)' was not found" }
-      $bounds = $selected.Bounds
-      $selectedId = $selected.DeviceName
-    } else {
-      $bounds = [System.Windows.Forms.SystemInformation]::VirtualScreen
-      $selectedId = $null
-    }
-    $source = New-Object System.Drawing.Bitmap -ArgumentList @($bounds.Width, $bounds.Height)
-    $graphics = [System.Drawing.Graphics]::FromImage($source)
-    try {
-      $graphics.CopyFromScreen($bounds.X, $bounds.Y, 0, 0, $source.Size)
-    } finally {
-      $graphics.Dispose()
-    }
-    $target = $source
-    try {
-      $maxDimension = [int]$payload.maxDimension
-      if ($source.Width -gt $maxDimension -or $source.Height -gt $maxDimension) {
-        $scale = [Math]::Min($maxDimension / [double]$source.Width, $maxDimension / [double]$source.Height)
-        $scaledWidth = [Math]::Max(1, [int][Math]::Round($source.Width * $scale))
-        $scaledHeight = [Math]::Max(1, [int][Math]::Round($source.Height * $scale))
-        $target = New-Object System.Drawing.Bitmap -ArgumentList @($scaledWidth, $scaledHeight)
-        $scaledGraphics = [System.Drawing.Graphics]::FromImage($target)
-        try { $scaledGraphics.DrawImage($source, 0, 0, $scaledWidth, $scaledHeight) } finally { $scaledGraphics.Dispose() }
-      }
-      $stream = New-Object System.IO.MemoryStream
-      try {
-        $target.Save($stream, [System.Drawing.Imaging.ImageFormat]::Png)
-        $bytes = $stream.ToArray()
-        if ($bytes.Length -gt [int]$payload.maxBytes) { throw "captured PNG exceeds configured screenshotMaxBytes" }
-        Write-ComputerResult @{ png = [System.Convert]::ToBase64String($bytes); width = $target.Width; height = $target.Height; displayId = $selectedId; sourceBounds = @{ x = $bounds.X; y = $bounds.Y; width = $bounds.Width; height = $bounds.Height } }
-      } finally { $stream.Dispose() }
-    } finally {
-      if ($target -ne $source) { $target.Dispose() }
-      $source.Dispose()
-    }
-    break
-  }
   'action' {
     switch ($payload.action.kind) {
-      'move' { [DshComputer.Native]::SetCursorPos([int]$payload.action.x, [int]$payload.action.y) | Out-Null }
+      'move' { [DshComputer.Native]::Move([int]$payload.action.x, [int]$payload.action.y) }
       'click' { [DshComputer.Native]::Click([int]$payload.action.x, [int]$payload.action.y, [string]$payload.action.button, [int]$payload.action.clickCount) }
       'drag' { [DshComputer.Native]::Drag([int]$payload.action.fromX, [int]$payload.action.fromY, [int]$payload.action.toX, [int]$payload.action.toY, [int]$payload.action.durationMs) }
       'scroll' { [DshComputer.Native]::Scroll([int]$payload.action.x, [int]$payload.action.y, [int]$payload.action.deltaX, [int]$payload.action.deltaY) }
@@ -251,20 +317,15 @@ switch ($payload.kind) {
   }
   'windows' {
     $foreground = [DshComputer.Native]::ForegroundWindow()
-    $items = @()
-    Get-Process | ForEach-Object {
-      try {
-        if ($_.MainWindowHandle -ne [IntPtr]::Zero -and $_.MainWindowTitle) {
-          $bounds = [DshComputer.Native]::WindowBounds($_.MainWindowHandle.ToInt64())
-          $items += @{ id = $_.MainWindowHandle.ToInt64().ToString(); title = $_.MainWindowTitle; processId = $_.Id; application = $_.ProcessName; focused = ($_.MainWindowHandle.ToInt64() -eq $foreground); bounds = $bounds }
-        }
-      } catch { }
-    }
-    Write-ComputerResult @($items)
+    $items = @([DshComputer.Native]::VisibleWindows() | ForEach-Object {
+      @{ id = $_.id.ToString(); title = $_.title; processId = $_.processId; application = $_.application; focused = ($_.id -eq $foreground); bounds = @{ x = $_.bounds.x; y = $_.bounds.y; width = $_.bounds.width; height = $_.bounds.height } }
+    })
+    Write-ComputerResult $items
     break
   }
   'focus' {
-    if (-not [DshComputer.Native]::FocusWindow([int64]$payload.id)) { throw "SetForegroundWindow rejected the requested window" }
+    $expectedBounds = New-Object -TypeName DshComputer.RectValue -ArgumentList @([int]$payload.bounds.x, [int]$payload.bounds.y, [int]$payload.bounds.width, [int]$payload.bounds.height)
+    if (-not [DshComputer.Native]::FocusWindow([int64]$payload.id, [int]$payload.processId, [string]$payload.title, $expectedBounds)) { throw "the requested window no longer matches its listed identity or foreground focus was rejected" }
     Write-ComputerResult @{ ok = $true }
     break
   }
@@ -275,6 +336,28 @@ switch ($payload.kind) {
     $maxNodes = [int]$payload.maxNodes
     $maxDepth = [int]$payload.maxDepth
     $walker = [System.Windows.Automation.TreeWalker]::ControlViewWalker
+    function Get-AccessibilityElementId($element) {
+      try {
+        $runtimeId = @($element.GetRuntimeId())
+        if ($runtimeId.Count -gt 0) { return 'uia:' + ($runtimeId -join ',') }
+      } catch { }
+      return $null
+    }
+    function Supports-AccessibilityPattern($element, $pattern) {
+      try {
+        [void]$element.GetCurrentPattern($pattern)
+        return $true
+      } catch { return $false }
+    }
+    function Find-AccessibilityApplicationRoot($element) {
+      $candidate = $element
+      while ($null -ne $candidate) {
+        try { $candidateCurrent = $candidate.Current } catch { break }
+        if ($candidateCurrent.ControlType -eq [System.Windows.Automation.ControlType]::Window) { return $candidate }
+        try { $candidate = $walker.GetParent($candidate) } catch { $candidate = $null }
+      }
+      return $element
+    }
     function Convert-AccessibilityNode($element, [int]$depth) {
       if ($null -eq $element -or $count -ge $maxNodes) { return $null }
       try { $current = $element.Current } catch { return $null }
@@ -284,7 +367,16 @@ switch ($payload.kind) {
         $rectangle = $current.BoundingRectangle
         if (-not $rectangle.IsEmpty) { $bounds = @{ x = [int][Math]::Round($rectangle.X); y = [int][Math]::Round($rectangle.Y); width = [int][Math]::Round($rectangle.Width); height = [int][Math]::Round($rectangle.Height) } }
       } catch { }
-      $node = [ordered]@{ role = $current.ControlType.ProgrammaticName.Replace('ControlType.', ''); name = $current.Name; enabled = $current.IsEnabled; focused = $current.HasKeyboardFocus; children = @() }
+      $patterns = @()
+      if (Supports-AccessibilityPattern $element ([System.Windows.Automation.InvokePattern]::Pattern)) { $patterns += 'invoke' }
+      if (Supports-AccessibilityPattern $element ([System.Windows.Automation.ValuePattern]::Pattern)) { $patterns += 'value' }
+      if (Supports-AccessibilityPattern $element ([System.Windows.Automation.TogglePattern]::Pattern)) { $patterns += 'toggle' }
+      if (Supports-AccessibilityPattern $element ([System.Windows.Automation.ExpandCollapsePattern]::Pattern)) { $patterns += 'expand_collapse' }
+      if (Supports-AccessibilityPattern $element ([System.Windows.Automation.SelectionItemPattern]::Pattern)) { $patterns += 'selection_item' }
+      if (Supports-AccessibilityPattern $element ([System.Windows.Automation.ScrollItemPattern]::Pattern)) { $patterns += 'scroll_item' }
+      $node = [ordered]@{ role = $current.ControlType.ProgrammaticName.Replace('ControlType.', ''); name = $current.Name; automation_id = $current.AutomationId; class_name = $current.ClassName; process_id = $current.ProcessId; enabled = $current.IsEnabled; focused = $current.HasKeyboardFocus; focusable = $current.IsKeyboardFocusable; offscreen = $current.IsOffscreen; patterns = @($patterns); children = @() }
+      $elementId = Get-AccessibilityElementId $element
+      if ($null -ne $elementId) { $node.element_id = $elementId }
       if ($null -ne $bounds) { $node.bounds = $bounds }
       if ($depth -lt $maxDepth -and $count -lt $maxNodes) {
         try { $child = $walker.GetFirstChild($element) } catch { $child = $null }
@@ -296,11 +388,89 @@ switch ($payload.kind) {
       }
       return $node
     }
-    $root = [System.Windows.Automation.AutomationElement]::FocusedElement
-    if ($null -eq $root) { $root = [System.Windows.Automation.AutomationElement]::RootElement }
+    $focused = [System.Windows.Automation.AutomationElement]::FocusedElement
+    if ($null -eq $focused) { $focused = [System.Windows.Automation.AutomationElement]::RootElement }
+    $root = Find-AccessibilityApplicationRoot $focused
     $tree = Convert-AccessibilityNode $root 0
     if ($null -eq $tree) { throw 'UI Automation returned no accessible root' }
     Write-ComputerResult $tree
+    break
+  }
+  'accessibility-action' {
+    Add-Type -AssemblyName UIAutomationClient
+    Add-Type -AssemblyName UIAutomationTypes
+    $elementId = [string]$payload.action.elementId
+    if ($elementId -notmatch '^uia:-?\d+(,-?\d+)*$') { throw 'accessibility element id is invalid' }
+    $processId = [int]$payload.action.processId
+    if ($processId -lt 1) { throw 'accessibility action process id is invalid' }
+    $maxCandidates = [int]$payload.action.maxCandidates
+    if ($maxCandidates -lt 1) { throw 'accessibility action search bound is invalid' }
+    [int[]]$runtimeId = @($elementId.Substring(4).Split(',') | ForEach-Object { [int]$_ })
+    $walker = [System.Windows.Automation.TreeWalker]::ControlViewWalker
+    $desktopRoot = [System.Windows.Automation.AutomationElement]::RootElement
+    $searchRoot = $desktopRoot
+    $focused = [System.Windows.Automation.AutomationElement]::FocusedElement
+    $ancestor = $focused
+    while ($null -ne $ancestor) {
+      try { $ancestorCurrent = $ancestor.Current } catch { break }
+      if ($ancestorCurrent.ProcessId -eq $processId) { $searchRoot = $ancestor }
+      try { $ancestor = $walker.GetParent($ancestor) } catch { $ancestor = $null }
+    }
+    $element = $null
+    $scanned = 0
+    $node = $searchRoot
+    while ($null -ne $node -and $scanned -lt $maxCandidates) {
+      try { $current = $node.Current } catch { $current = $null }
+      if ($null -ne $current -and ($node -ne $desktopRoot -or $searchRoot -ne $desktopRoot)) {
+        $scanned += 1
+        if ($current.ProcessId -eq $processId) {
+          try { $candidateRuntimeId = @($node.GetRuntimeId()) } catch { $candidateRuntimeId = @() }
+          if ($candidateRuntimeId.Count -eq $runtimeId.Count) {
+            $matches = $true
+            for ($part = 0; $part -lt $runtimeId.Count; $part += 1) {
+              if ($candidateRuntimeId[$part] -ne $runtimeId[$part]) { $matches = $false; break }
+            }
+            if ($matches) { $element = $node; break }
+          }
+        }
+      }
+      $child = $null
+      try { $child = $walker.GetFirstChild($node) } catch { $child = $null }
+      if ($null -ne $child) {
+        $node = $child
+        continue
+      }
+      while ($null -ne $node) {
+        if ($node -eq $searchRoot) { $node = $null; break }
+        $sibling = $null
+        try { $sibling = $walker.GetNextSibling($node) } catch { $sibling = $null }
+        if ($null -ne $sibling) { $node = $sibling; break }
+        try { $node = $walker.GetParent($node) } catch { $node = $null }
+      }
+    }
+    if ($null -eq $element) { throw 'UI Automation element is no longer available within the configured search bound' }
+    $current = $element.Current
+    if ([string]$payload.action.automationId -and $current.AutomationId -ne [string]$payload.action.automationId) { throw 'UI Automation element automation id changed after observation' }
+    if ([string]$payload.action.name -and $current.Name -ne [string]$payload.action.name) { throw 'UI Automation element name changed after observation' }
+    if ([string]$payload.action.className -and $current.ClassName -ne [string]$payload.action.className) { throw 'UI Automation element class changed after observation' }
+    if ([string]$payload.action.role -and $current.ControlType.ProgrammaticName.Replace('ControlType.', '') -ne [string]$payload.action.role) { throw 'UI Automation element role changed after observation' }
+    switch ([string]$payload.action.kind) {
+      'invoke' { ([System.Windows.Automation.InvokePattern]($element.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern))).Invoke() }
+      'focus' { $element.SetFocus() }
+      'set_value' {
+        $pattern = [System.Windows.Automation.ValuePattern]($element.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern))
+        if ($pattern.Current.IsReadOnly) { throw 'UI Automation value pattern is read-only' }
+        $pattern.SetValue([string]$payload.action.value)
+      }
+      'toggle' { ([System.Windows.Automation.TogglePattern]($element.GetCurrentPattern([System.Windows.Automation.TogglePattern]::Pattern))).Toggle() }
+      'expand' { ([System.Windows.Automation.ExpandCollapsePattern]($element.GetCurrentPattern([System.Windows.Automation.ExpandCollapsePattern]::Pattern))).Expand() }
+      'collapse' { ([System.Windows.Automation.ExpandCollapsePattern]($element.GetCurrentPattern([System.Windows.Automation.ExpandCollapsePattern]::Pattern))).Collapse() }
+      'select' { ([System.Windows.Automation.SelectionItemPattern]($element.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern))).Select() }
+      'scroll_into_view' { ([System.Windows.Automation.ScrollItemPattern]($element.GetCurrentPattern([System.Windows.Automation.ScrollItemPattern]::Pattern))).ScrollIntoView() }
+      default { throw "unsupported accessibility action '$($payload.action.kind)'" }
+    }
+    if ([int]$payload.action.delayMs -gt 0) { Start-Sleep -Milliseconds ([int]$payload.action.delayMs) }
+    Write-ComputerResult @{ ok = $true }
     break
   }
   default { throw "unsupported computer helper operation '$($payload.kind)'" }
@@ -334,6 +504,146 @@ function numericBounds(raw) {
     throw new ComputerUseError('Windows helper returned invalid desktop bounds');
   }
   return { x: raw.x, y: raw.y, width: raw.width, height: raw.height };
+}
+
+/* ------------------------------------------------------------------ */
+/* 原生截图 helper（dsh-screen.exe，Rust）                              */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 原生截图 helper（dsh-screen.exe，Rust）的路径。
+ *
+ * 为什么截图专门做一个原生 exe：
+ *   1. 不必为每次截图付一次 powershell.exe 的启动代价
+ *   2. 屏幕几何与像素读取在强类型代码里，不会再出现「脚本层属性取到 null 却一路算下去」
+ *   3. 可以自行决定 ROP、裁剪与缩放，不受脚本层表达能力限制
+ *
+ * **没有 helper 就报错，不回退 PowerShell。**
+ * 保留两条实现会让两边都难以维护、测试也覆盖不到，而且用户不知道自己实际在用哪个 ——
+ * 那种「静默降级」是伪兼容，不如直接说清楚缺什么。
+ */
+let resolvedHelperPath;
+let helperProbeDone = false;
+
+function resolveHelperPath(config) {
+  if (helperProbeDone) return resolvedHelperPath;
+  helperProbeDone = true;
+
+  const here = dirname(fileURLToPath(import.meta.url));
+  const override = typeof config?.nativeHelperPath === 'string' && config.nativeHelperPath.length > 0
+    ? config.nativeHelperPath
+    : undefined;
+  const candidates = [
+    override,
+    // 开发期：仓库里 cargo 的输出目录
+    join(here, '..', 'native', 'target', 'release', 'dsh-screen.exe'),
+    // 发布期：跟包一起分发的预编译产物
+    join(here, '..', 'native', 'release', 'dsh-screen.exe'),
+    join(here, '..', 'bin', 'dsh-screen.exe'),
+  ].filter((value) => typeof value === 'string');
+
+  for (const candidate of candidates) {
+    try {
+      if (existsSync(candidate)) {
+        resolvedHelperPath = candidate;
+        return resolvedHelperPath;
+      }
+    } catch {
+      // 权限或路径长度问题：当作这个候选不存在，继续试下一个
+    }
+  }
+  resolvedHelperPath = undefined;
+  return resolvedHelperPath;
+}
+
+/** helper 找不到时给出可操作的错误信息（而不是静默换实现） */
+function requireHelperPath(config) {
+  const helperPath = resolveHelperPath(config);
+  if (helperPath === undefined) {
+    throw new ComputerUseError(
+      'dsh-screen native helper is not available; build it with `cargo build --release` in native/ '
+      + 'or point config.nativeHelperPath at the executable',
+    );
+  }
+  return helperPath;
+}
+
+/** 调原生 helper 的某个子命令，payload 走 stdin（base64(UTF8 JSON)），结果解析为 JSON */
+async function runNativeHelper(runner, helperPath, args, payload, signal, maxBytes) {
+  const encode = (value) => Buffer.from(JSON.stringify(value), 'utf8').toString('base64');
+  return runner.runJson([helperPath, ...args], {
+    signal,
+    stdoutMaxBytes: maxBytes ?? 8 * 1024 * 1024,
+    // 截图走文件模式，stdout 只回小 JSON，所以这里的上限不需要很大
+    stdin: payload === undefined ? undefined : encode(payload),
+  });
+}
+
+/**
+ * 用原生 helper 抓一张图。
+ *
+ * 关键设计：**PNG 走文件，不走 stdout**。
+ * 让 helper 把 base64 PNG 打在 stdout 上会长时间不返回（大块数据塞进管道，读取方状态不明），
+ * 所以这里始终传 `--out`，stdout 只回一个很小的 JSON（宽高、真实区域、字节数）。
+ */
+async function nativeScreenshot(runner, config, request, signal) {
+  // 没有 helper 就抛错。不回退 PowerShell：两条实现都要维护、测试覆盖不到，
+  // 而且用户不知道自己实际在用哪个 —— 那是伪兼容，不如直接说清缺什么。
+  const helperPath = requireHelperPath(config);
+
+  const directory = await mkdtemp(join(tmpdir(), 'dsh-computer-use-shot-'));
+  const pngPath = join(directory, 'shot.png');
+  try {
+    const payload = {
+      maxDimension: config.screenshotMaxDimension,
+      maxBytes: config.screenshotMaxBytes,
+    };
+    if (request.displayId !== undefined && request.displayId !== null) payload.displayId = request.displayId;
+    if (request.region !== undefined && request.region !== null) payload.region = request.region;
+    if (request.scale !== undefined && request.scale !== null) payload.scale = request.scale;
+
+    const meta = await runNativeHelper(
+      runner, helperPath, ['screenshot', '--out', pngPath], payload, signal,
+      config.screenshotMaxBytes,
+    );
+    if (meta === null || typeof meta !== 'object' || typeof meta.path !== 'string') {
+      throw new ComputerUseError('native screenshot helper returned invalid metadata');
+    }
+    const data = await readFile(meta.path);
+    if (data.byteLength > config.screenshotMaxBytes) {
+      throw new ComputerUseError('desktop screenshot exceeds configured screenshotMaxBytes');
+    }
+    return {
+      data,
+      mediaType: 'image/png',
+      width: Number(meta.width),
+      height: Number(meta.height),
+      sourceBounds: numericBounds(meta.sourceBounds),
+      capturedAt: Date.now(),
+      ...(typeof meta.displayId === 'string' ? { displayId: meta.displayId } : {}),
+    };
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+}
+
+function listedWindowTarget(raw) {
+  if (raw === null || typeof raw !== 'object'
+    || typeof raw.id !== 'string' || !/^-?\d+$/.test(raw.id)
+    || !Number.isInteger(raw.processId) || raw.processId < 1
+    || typeof raw.title !== 'string' || raw.title.length === 0
+    || raw.bounds === null || typeof raw.bounds !== 'object'
+    || !Number.isFinite(raw.bounds.x) || !Number.isFinite(raw.bounds.y)
+    || !Number.isFinite(raw.bounds.width) || !Number.isFinite(raw.bounds.height)
+    || raw.bounds.width < 1 || raw.bounds.height < 1) {
+    throw new ComputerUseError('Windows focus requires a listed native window record');
+  }
+  return {
+    id: raw.id,
+    processId: raw.processId,
+    title: raw.title,
+    bounds: { x: raw.bounds.x, y: raw.bounds.y, width: raw.bounds.width, height: raw.bounds.height },
+  };
 }
 
 function keyCode(key) {
@@ -374,6 +684,36 @@ function actionPayload(action, delayMs) {
   }
 }
 
+function accessibilityActionPayload(action, delayMs, maxCandidates) {
+  if (action === null || typeof action !== 'object') throw new ComputerUseError('accessibility action is invalid');
+  const allowed = ['invoke', 'focus', 'set_value', 'toggle', 'expand', 'collapse', 'select', 'scroll_into_view'];
+  if (!allowed.includes(action.kind)) throw new ComputerUseError(`unsupported accessibility action '${action.kind}'`);
+  if (typeof action.elementId !== 'string' || !/^uia:-?\d+(,-?\d+)*$/.test(action.elementId)) {
+    throw new ComputerUseError('accessibility element id is invalid');
+  }
+  const element = action.element;
+  if (element === null || typeof element !== 'object' || !Number.isInteger(element.process_id) || element.process_id < 1) {
+    throw new ComputerUseError('accessibility action requires an element with a positive process_id');
+  }
+  if (!Number.isInteger(maxCandidates) || maxCandidates < 1) throw new ComputerUseError('accessibility action search bound is invalid');
+  const payload = {
+    kind: action.kind,
+    elementId: action.elementId,
+    processId: element.process_id,
+    automationId: typeof element.automation_id === 'string' ? element.automation_id : '',
+    name: typeof element.name === 'string' ? element.name : '',
+    className: typeof element.class_name === 'string' ? element.class_name : '',
+    role: typeof element.role === 'string' ? element.role : '',
+    maxCandidates,
+    delayMs,
+  };
+  if (action.kind === 'set_value') {
+    if (typeof action.value !== 'string') throw new ComputerUseError('accessibility set_value requires a string value');
+    payload.value = action.value;
+  }
+  return payload;
+}
+
 export class WindowsComputer {
   constructor(runner, config) {
     this.runner = runner;
@@ -412,27 +752,9 @@ export class WindowsComputer {
   }
 
   async screenshot(request, signal) {
-    const response = await this.run({
-      kind: 'screenshot',
-      displayId: request.displayId ?? null,
-      maxDimension: this.config.screenshotMaxDimension,
-      maxBytes: this.config.screenshotMaxBytes,
-    }, signal, Math.ceil(this.config.screenshotMaxBytes * 1.4) + 4096);
-    if (typeof response?.png !== 'string') throw new ComputerUseError('Windows helper returned no screenshot bytes');
-    const data = Buffer.from(response.png, 'base64');
-    if (data.byteLength > this.config.screenshotMaxBytes) {
-      throw new ComputerUseError('desktop screenshot exceeds configured screenshotMaxBytes');
-    }
-    const dimensions = pngDimensions(data);
-    return {
-      data,
-      mediaType: 'image/png',
-      width: dimensions.width,
-      height: dimensions.height,
-      sourceBounds: numericBounds(response.sourceBounds),
-      capturedAt: Date.now(),
-      ...(typeof response.displayId === 'string' ? { displayId: response.displayId } : {}),
-    };
+    // 截图一律走原生 helper（dsh-screen.exe）。
+    // 早先的实现用 PowerShell 脚本抓屏，已经移除：见 nativeScreenshot 上方的说明。
+    return nativeScreenshot(this.runner, this.config, request, signal);
   }
 
   async perform(action, signal) {
@@ -452,9 +774,9 @@ export class WindowsComputer {
     }));
   }
 
-  async focusWindow(id, signal) {
-    if (!/^-?\d+$/.test(id)) throw new ComputerUseError('window id is invalid');
-    await this.run({ kind: 'focus', id }, signal);
+  async focusWindow(rawTarget, signal) {
+    const target = listedWindowTarget(rawTarget);
+    await this.run({ kind: 'focus', ...target }, signal);
   }
 
   async accessibilitySnapshot(signal) {
@@ -464,5 +786,12 @@ export class WindowsComputer {
       maxDepth: this.config.maxAccessibilityDepth,
     }, signal, this.config.maxAccessibilityBytes);
     return result;
+  }
+
+  async performAccessibility(action, signal) {
+    await this.run({
+      kind: 'accessibility-action',
+      action: accessibilityActionPayload(action, this.config.actionDelayMs, this.config.maxAccessibilityActionCandidates),
+    }, signal, this.config.maxAccessibilityBytes);
   }
 }

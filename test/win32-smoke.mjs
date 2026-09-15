@@ -24,7 +24,13 @@ const computer = new WindowsComputer(runner, {
   maxAccessibilityNodes: 32,
   maxAccessibilityDepth: 3,
   maxAccessibilityBytes: 1_000_000,
+  maxAccessibilityActionCandidates: 5_000,
 });
+
+function nodeCount(node) {
+  if (node === null || typeof node !== 'object') return 0;
+  return 1 + (Array.isArray(node.children) ? node.children.reduce((total, child) => total + nodeCount(child), 0) : 0);
+}
 
 const [displays, screenshot, windows, accessibility] = await Promise.all([
   computer.listDisplays(),
@@ -43,8 +49,11 @@ console.log(JSON.stringify({
   },
   windows: windows.slice(0, 5),
   accessibility: {
+    elementId: accessibility.element_id,
     role: accessibility.role,
     name: accessibility.name,
+    patterns: accessibility.patterns,
+    nodes: nodeCount(accessibility),
     children: accessibility.children?.length ?? 0,
   },
 }, null, 2));

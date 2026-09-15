@@ -25,6 +25,7 @@ class UnsupportedComputer {
   async listWindows() { return this.unavailable(); }
   async focusWindow() { return this.unavailable(); }
   async accessibilitySnapshot() { return this.unavailable(); }
+  async performAccessibility() { return this.unavailable(); }
 }
 
 export function createPlatformDriver(runner, config) {

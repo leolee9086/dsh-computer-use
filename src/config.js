@@ -9,6 +9,7 @@ const DEFAULTS = Object.freeze({
   maxAccessibilityNodes: 300,
   maxAccessibilityDepth: 6,
   maxAccessibilityBytes: 1_000_000,
+  maxAccessibilityActionCandidates: 5_000,
 });
 
 function positiveInteger(raw, key) {
@@ -40,6 +41,7 @@ export function resolveHostConfig(raw = {}) {
     maxAccessibilityNodes: positiveInteger(raw, 'maxAccessibilityNodes'),
     maxAccessibilityDepth: positiveInteger(raw, 'maxAccessibilityDepth'),
     maxAccessibilityBytes: positiveInteger(raw, 'maxAccessibilityBytes'),
+    maxAccessibilityActionCandidates: positiveInteger(raw, 'maxAccessibilityActionCandidates'),
   });
 }
 

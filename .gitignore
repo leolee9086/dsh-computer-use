@@ -2,3 +2,12 @@ node_modules/
 coverage/
 .DS_Store
 *.log
+__pycache__/
+*.pyc
+
+# Rust 构建缓存：体积很大（~170MB）且完全可由源码重建，绝不入库
+native/target/
+
+# 原生 helper 的调试产物
+native/out/
+*.tgz

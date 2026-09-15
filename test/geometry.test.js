@@ -19,6 +19,14 @@ test('mapScreenshotPoint reverses attachment downscaling and origin offset', () 
   assert.deepEqual(point, { x: -920, y: 1580 });
 });
 
+test('mapScreenshotPoint clamps in-range fractional pixels to native bounds', () => {
+  const point = mapScreenshotPoint({
+    image: { width: 100, height: 50 },
+    sourceBounds: { x: 10, y: 20, width: 100, height: 50 },
+  }, 99.9, 49.9);
+  assert.deepEqual(point, { x: 109, y: 69 });
+});
+
 test('mapScreenshotPoint rejects coordinates outside the attached image', () => {
   assert.throws(() => mapScreenshotPoint({
     image: { width: 100, height: 100 },

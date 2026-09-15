@@ -6,10 +6,12 @@ test('host config has stable deployment defaults', () => {
   const config = resolveHostConfig();
   assert.equal(config.screenshotMaxDimension, hostConfigDefaults.screenshotMaxDimension);
   assert.equal(config.maxAccessibilityNodes, hostConfigDefaults.maxAccessibilityNodes);
+  assert.equal(config.maxAccessibilityActionCandidates, hostConfigDefaults.maxAccessibilityActionCandidates);
   assert.equal(Object.isFrozen(config), true);
 });
 
 test('host config rejects unsafe numeric values', () => {
   assert.throws(() => resolveHostConfig({ screenshotMaxBytes: 0 }), /positive integer/);
+  assert.throws(() => resolveHostConfig({ maxAccessibilityActionCandidates: 0 }), /positive integer/);
   assert.throws(() => resolveHostConfig({ actionDelayMs: -1 }), /non-negative integer/);
 });

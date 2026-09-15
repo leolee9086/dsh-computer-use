@@ -1,7 +1,15 @@
-# Host-plane contribution only. The model-facing consumer belongs in a user-owned agent preset.
+# One installable bundle activates the provider and its model-facing consumers.
+# The rows use separate ids so profile layers can override their config without
+# creating or editing an agent preset.
+#
+# The bare-package row (name: "dsh-computer-use") is the bundle's main entry
+# (exports["."] → src/index.js, which re-exports the host plugin) AND the
+# browser-scan anchor: package.json declares dsh.client.platform=web with
+# exports["./client"], so src/client.js joins __DSH_BOOT__. The host row keeps
+# its original id so existing profile-layer config overrides stay valid.
 - insert:
     - id: dsh-computer-use-host
-      name: "dsh-computer-use/host"
+      name: "dsh-computer-use"
       config:
         screenshotMaxDimension: 1920
         screenshotMaxBytes: 12000000
@@ -11,3 +19,17 @@
         maxAccessibilityNodes: 300
         maxAccessibilityDepth: 6
         maxAccessibilityBytes: 1000000
+        maxAccessibilityActionCandidates: 5000
+
+    - id: dsh-computer-use-tool
+      name: "dsh-computer-use/tool"
+      config:
+        observeApproval: ask
+        controlApproval: ask
+        maxObservationAgeMs: 120000
+        maxObservationsPerAgent: 8
+        maxSemanticSnapshots: 8
+        maxSemanticMatches: 20
+
+    - id: dsh-computer-use-prompt
+      name: "dsh-computer-use/prompt"

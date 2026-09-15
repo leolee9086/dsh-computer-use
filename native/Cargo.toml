@@ -1,0 +1,43 @@
+[package]
+name = "dsh-screen"
+version = "0.1.0"
+edition = "2021"
+description = "Native screen capture helper for dsh-computer-use: display enumeration and region capture with GDI"
+
+# 这是给 dsh-computer-use 用的原生 helper。
+# 为什么不做成 Node 原生 addon（N-API）：
+#   1) 独立 exe 不需要 node-gyp / MSVC 构建链，出问题好排查（直接跑它看输出）
+#   2) 崩溃隔离：截图崩了不会把宿主 DSH 进程一起带走
+#   3) 各平台可以各自用最合适的实现，宿主侧只认一套 JSON 协议
+# 通信协议与原先的 PowerShell helper 保持一致（stdin 收 base64(UTF8 JSON)，stdout 出 JSON），
+# 这样宿主侧的 src/windows.js 只需换掉「怎么启动 helper」，其余逻辑不动。
+
+[[bin]]
+name = "dsh-screen"
+path = "src/main.rs"
+
+[dependencies]
+# windows crate：只勾选真正用到的模块（其余不编译，产物小、编译快）。
+# 踩过的坑，写在这省得下次重犯：
+#   - EnumDisplayMonitors / GetMonitorInfoW / MONITORINFO / HMONITOR / CAPTUREBLT
+#     全都在 Win32::Graphics::Gdi，**不在** WindowsAndMessaging
+#     （最初就是按名字猜到了 WindowsAndMessaging，编译器才报 unresolved import）
+#   - SetProcessDPIAware 在 Win32::UI::HiDpi，feature 名就是 Win32_UI_HiDpi
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_UI_HiDpi",
+] }
+# image：只用 PNG 编码器与缩放。自己写 PNG 编码不划算（要处理 zlib/filter）。
+# 注意：0.25.10 起 MSRV 是 rustc 1.88。本机工具链已升到 1.98，用 ^0.25 即可；
+# 若在旧工具链上构建失败，先 rustup update stable，不要靠钉旧版本绕过。
+image = { version = "0.25", default-features = false, features = ["png"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
