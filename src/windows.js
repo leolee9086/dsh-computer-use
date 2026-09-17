@@ -228,6 +228,52 @@ namespace DshComputer {
       return GetWindowRect(handle, out rect) && BoundsEqual(rect, expectedBounds);
     }
 
+    // Identity-only check: handle, owning process, title. Deliberately NOT the bounds --
+    // a window that moved between listing and acting is still the same window.
+    public static bool WindowMatchesIdentity(long rawHandle, int expectedProcessId, string expectedTitle) {
+      var handle = new IntPtr(rawHandle);
+      if (!IsWindow(handle) || !IsWindowVisible(handle) || IsIconic(handle)) return false;
+      uint processId;
+      if (GetWindowThreadProcessIdWithProcess(handle, out processId) == 0 || processId != (uint)expectedProcessId) return false;
+      return WindowTitle(handle) == expectedTitle;
+    }
+
+    // Raise a window identified by handle/process/title, without comparing its listed bounds.
+    // Needed before injecting keyboard input: this process's own startup console window takes
+    // the foreground, and SendInput only reaches the foreground window.
+    public static bool FocusWindowByIdentity(long rawHandle, int expectedProcessId, string expectedTitle) {
+      var handle = new IntPtr(rawHandle);
+      if (!WindowMatchesIdentity(rawHandle, expectedProcessId, expectedTitle)) return false;
+      ShowWindow(handle, 9);
+      if (SetForegroundWindow(handle) && GetForegroundWindow() == handle) {
+        return WindowMatchesIdentity(rawHandle, expectedProcessId, expectedTitle);
+      }
+
+      // Windows foreground-lock rules can reject a valid request. Temporarily join the caller
+      // with the foreground and target input queues, then verify the result.
+      var currentThread = GetCurrentThreadId();
+      var foreground = GetForegroundWindow();
+      var foregroundThread = foreground == IntPtr.Zero ? 0 : GetWindowThreadProcessId(foreground, IntPtr.Zero);
+      var targetThread = GetWindowThreadProcessId(handle, IntPtr.Zero);
+      var attachedForeground = false;
+      var attachedTarget = false;
+      try {
+        if (foregroundThread != 0 && foregroundThread != currentThread) {
+          attachedForeground = AttachThreadInput(currentThread, foregroundThread, true);
+        }
+        if (targetThread != 0 && targetThread != currentThread && targetThread != foregroundThread) {
+          attachedTarget = AttachThreadInput(currentThread, targetThread, true);
+        }
+        BringWindowToTop(handle);
+        SetForegroundWindow(handle);
+        SetFocus(handle);
+        return GetForegroundWindow() == handle && WindowMatchesIdentity(rawHandle, expectedProcessId, expectedTitle);
+      } finally {
+        if (attachedTarget) AttachThreadInput(currentThread, targetThread, false);
+        if (attachedForeground) AttachThreadInput(currentThread, foregroundThread, false);
+      }
+    }
+
     public static List<WindowValue> VisibleWindows() {
       var windows = new List<WindowValue>();
       if (!EnumWindows((handle, ignored) => {
@@ -302,6 +348,14 @@ switch ($payload.kind) {
     break
   }
   'action' {
+    if ($null -ne $payload.focus) {
+      # Take the foreground back before injecting. This process starts with a console window
+      # that grabs the foreground, and SendInput only reaches whatever is foreground.
+      # Pointer actions are unaffected: they inject at coordinates, not at the focus.
+      if (-not [DshComputer.Native]::FocusWindowByIdentity([int64]$payload.focus.handle, [int]$payload.focus.processId, [string]$payload.focus.title)) {
+        throw "could not raise the target window before the action"
+      }
+    }
     switch ($payload.action.kind) {
       'move' { [DshComputer.Native]::Move([int]$payload.action.x, [int]$payload.action.y) }
       'click' { [DshComputer.Native]::Click([int]$payload.action.x, [int]$payload.action.y, [string]$payload.action.button, [int]$payload.action.clickCount) }
@@ -601,6 +655,9 @@ async function nativeScreenshot(runner, config, request, signal) {
     if (request.displayId !== undefined && request.displayId !== null) payload.displayId = request.displayId;
     if (request.region !== undefined && request.region !== null) payload.region = request.region;
     if (request.scale !== undefined && request.scale !== null) payload.scale = request.scale;
+    // 指名窗口时把「提到前台」一并交给 helper：聚焦与抓屏必须在同一次进程调用里完成，
+    // 否则第二次 spawn 冒出来的控制台窗口会盖住刚聚焦好的目标（见 captureWindow 的说明）。
+    if (request.focus !== undefined && request.focus !== null) payload.focus = request.focus;
 
     const meta = await runNativeHelper(
       runner, helperPath, ['screenshot', '--out', pngPath], payload, signal,
@@ -758,7 +815,11 @@ export class WindowsComputer {
   }
 
   async perform(action, signal) {
-    await this.run({ kind: 'action', action: actionPayload(action, this.config.actionDelayMs) }, signal);
+    const payload = { kind: 'action', action: actionPayload(action, this.config.actionDelayMs) };
+    // 键盘注入只认前台窗口，而本进程（经 DSH 的 Windows runner）启动时就会弹出一个控制台窗口
+    // 并把前台抢走 —— 所以必须在动作进程内把目标窗口抢回来，注入才落得到正确的地方。
+    if (action.focus !== undefined && action.focus !== null) payload.focus = action.focus;
+    await this.run(payload, signal);
   }
 
   async listWindows(signal) {
@@ -777,6 +838,28 @@ export class WindowsComputer {
   async focusWindow(rawTarget, signal) {
     const target = listedWindowTarget(rawTarget);
     await this.run({ kind: 'focus', ...target }, signal);
+  }
+
+  /**
+   * 聚焦窗口并按它**聚焦之后**的实际边界截图——聚焦与抓屏在同一次原生调用内完成。
+   *
+   * 为什么必须挤成一次：宿主每 spawn 一次子进程，Windows 就可能把宿主所在的控制台窗口
+   * 提到前台（dsh-subprocess-local 的 Windows runner 启动路径没有 windowsHide）。
+   * 分成两次调用时，第二次启动冒出来的控制台窗口会正好盖在刚被提到前面的目标上，
+   * 截回来的就是那个控制台。合成一次后，弹窗只发生在进程启动那一刻，
+   * 紧接着 helper 把目标提到前台把它盖住，再抓屏拿到的就是目标本身。
+   *
+   * 聚焦只校验身份（句柄 + 进程 + 标题），**不比对列表时刻的旧边界**：
+   * 窗口被移动过并不代表换了一个窗口；边界由 helper 在聚焦之后实时读出并回报。
+   */
+  async captureWindow(rawTarget, request, signal) {
+    const target = listedWindowTarget(rawTarget);
+    return nativeScreenshot(this.runner, this.config, {
+      displayId: undefined,
+      region: null,
+      scale: request?.scale ?? null,
+      focus: { handle: target.id, processId: target.processId, title: target.title },
+    }, signal);
   }
 
   async accessibilitySnapshot(signal) {

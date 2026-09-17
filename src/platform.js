@@ -21,6 +21,7 @@ class UnsupportedComputer {
 
   async listDisplays() { return this.unavailable(); }
   async screenshot() { return this.unavailable(); }
+  async captureWindow() { return this.unavailable(); }
   async perform() { return this.unavailable(); }
   async listWindows() { return this.unavailable(); }
   async focusWindow() { return this.unavailable(); }

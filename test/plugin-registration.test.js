@@ -187,3 +187,38 @@ test('Full access does not override an explicit computer control deny', async ()
   }, async () => ({ kind: 'allow' }));
   assert.deepEqual(result, { kind: 'deny', reason: 'dsh-computer-use configuration denies desktop control' });
 });
+
+// 指名窗口的截图会先把该窗口提到前台，所以它必须按控制类审批 ——
+// 否则"观测"这一档就成了绕过控制策略的后门。
+test('a window-targeted screenshot is classified as desktop control', async () => {
+  let listener;
+  const context = {
+    get() { return undefined; },
+    tools: {
+      register() { return () => {}; },
+      guard() { return () => {}; },
+    },
+    on(name, callback) {
+      if (name === 'tools/pre-execute') listener = callback;
+      return () => {};
+    },
+    inject(_names, callback) { callback(this); },
+    attachments: { saveImage: async () => ({}) },
+  };
+  applyTools(context, {
+    observeApproval: 'allow',
+    controlApproval: 'deny',
+    maxObservationAgeMs: 120_000,
+    maxObservationsPerAgent: 8,
+  });
+  const next = async () => ({ kind: 'allow' });
+  const agent = { session: {} };
+  assert.deepEqual(
+    await listener({ name: 'computer_screenshot', arguments: {}, agent }, next),
+    { kind: 'allow' },
+  );
+  assert.deepEqual(
+    await listener({ name: 'computer_screenshot', arguments: { window_id: 'window-1' }, agent }, next),
+    { kind: 'deny', reason: 'dsh-computer-use configuration denies desktop control' },
+  );
+});

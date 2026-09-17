@@ -59,6 +59,16 @@ function toolContext() {
         capturedAt: Date.now(),
       };
     },
+    // 指名窗口的截图走这条路：聚焦与截图在宿主侧是同一次调用，
+    // 返回的 sourceBounds 是**聚焦之后**实时读到的边界，不是列表时刻的旧值。
+    async captureWindow(target, request) {
+      calls.push({ kind: 'capture_window', target, request });
+      return {
+        data: pngBytes(),
+        sourceBounds: { x: 100, y: 200, width: 300, height: 150 },
+        capturedAt: Date.now(),
+      };
+    },
     async accessibilitySnapshot() { return semanticTree; },
     async perform(action) { calls.push(action); },
     async listWindows() { return [{ id: 'native-41', title: 'Example Window', processId: 99, bounds: { x: 0, y: 0, width: 100, height: 50 }, focused: true }]; },
@@ -149,6 +159,41 @@ test('semantic tools bind element actions to fresh image and accessibility obser
     operation: 'invoke',
   }, exec), /was consumed by a successful desktop action/);
   assert.equal(calls.length, 1);
+});
+
+test('computer_screenshot(window_id) raises that window and captures it in one step', async () => {
+  const { ctx, tools, calls } = toolContext();
+  applyTools(ctx, {
+    observeApproval: 'allow',
+    controlApproval: 'allow',
+    maxObservationAgeMs: 120_000,
+    maxObservationsPerAgent: 8,
+    maxSemanticSnapshots: 8,
+    maxSemanticMatches: 20,
+  });
+  const exec = { agent };
+  const screenshot = toolByName(tools, 'computer_screenshot');
+
+  const listed = JSON.parse(await toolByName(tools, 'computer_windows').execute({ operation: 'list' }, exec));
+  const windowId = listed.windows[0].id;
+
+  const capture = await screenshot.execute({ window_id: windowId }, exec);
+  assert.equal(capture.window.id, windowId);
+  assert.equal(capture.window.title, 'Example Window');
+  // 边界来自聚焦之后的实时读取，只有走 captureWindow 才拿得到这组值。
+  assert.deepEqual(capture.source_bounds, { x: 100, y: 200, width: 300, height: 150 });
+  assert.equal(calls.filter((call) => call.kind === 'capture_window').length, 1);
+
+  // 模型可见文本必须说明这张图是"把该窗口提到前台"换来的。
+  const rendered = screenshot.output.render({}, capture);
+  assert.equal(rendered[0].type, 'text');
+  assert.match(rendered[0].text, /Raised for this capture: "Example Window"/);
+
+  // window_id 是独立形态：不能再叠加区域或显示器。
+  await assert.rejects(
+    () => screenshot.execute({ window_id: windowId, x: 1, y: 1, width: 10, height: 10 }, exec),
+    /window_id captures that window on its own/,
+  );
 });
 
 test('control actions consume their screenshot evidence and window focus consumes all evidence', async () => {

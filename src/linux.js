@@ -321,6 +321,14 @@ export class LinuxComputer {
     }
   }
 
+  /**
+   * 按窗口截图需要"按区域截图"，而 Linux 后端目前只能抓整个虚拟桌面。
+   * 这里明确报错，而不是静默交回一张整屏图——那会让调用方以为自己拿到的是那个窗口。
+   */
+  async captureWindow() {
+    throw unsupported('capturing one window requires region capture, which the Linux backend does not provide yet');
+  }
+
   async accessibilitySnapshot(signal) {
     return this.runAtspi({
       kind: 'snapshot',

@@ -251,8 +251,12 @@ function contentHash(data) {
 function observationText(value) {
   const xScale = value.source_bounds.width / value.image.width;
   const yScale = value.source_bounds.height / value.image.height;
+  // 指名窗口的截图会把它提到前台，这件事对模型是可见事实，不是实现细节。
+  const raised = value.window === undefined
+    ? ''
+    : `Raised for this capture: "${value.window.title}" (${value.window.id}).\n`;
   return `<computer-screenshot id="${value.screenshot_id}">
-${value.image.mediaType} attachment: ${value.image.width}x${value.image.height} px; SHA-256: ${value.content_hash}.
+${raised}${value.image.mediaType} attachment: ${value.image.width}x${value.image.height} px; SHA-256: ${value.content_hash}.
 Native source bounds: x=${value.source_bounds.x}, y=${value.source_bounds.y}, width=${value.source_bounds.width}, height=${value.source_bounds.height}.
 Use image coordinates with this exact screenshot id for click, drag, or scroll. Coordinate scale: x=${xScale.toFixed(4)}, y=${yScale.toFixed(4)}.
 </computer-screenshot>`;
@@ -286,6 +290,12 @@ function screenshotSchema() {
             properties: { width: { type: 'number' }, height: { type: 'number' } },
           },
         },
+      },
+      window: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['id', 'title'],
+        properties: { id: { type: 'string' }, title: { type: 'string' }, application: { type: 'string' } },
       },
     },
   };
@@ -323,7 +333,16 @@ function imageTool(name, description, parameters, execute) {
 }
 
 function isObservationExecution(exec) {
-  if (OBSERVATION_TOOLS.has(exec.name)) return true;
+  if (OBSERVATION_TOOLS.has(exec.name)) {
+    // 指名窗口的截图会先把该窗口提到前台，那是有后果的控制动作，按控制类审批。
+    // 不带 window_id 的截图仍然是纯观测。
+    if (exec.name === 'computer_screenshot'
+      && exec.arguments !== null
+      && typeof exec.arguments === 'object'
+      && !Array.isArray(exec.arguments)
+      && exec.arguments.window_id !== undefined) return false;
+    return true;
+  }
   return exec.name === 'computer_windows'
     && exec.arguments !== null
     && typeof exec.arguments === 'object'
@@ -427,7 +446,10 @@ export function apply(ctx, rawConfig) {
   ctx.inject(['attachments'], (nested) => {
     registerTool(nested.tools, imageTool(
       'computer_screenshot',
-      'Capture the desktop, a display, or one region as a model-visible image. Use its returned screenshot_id for coordinate actions, and capture again after any consequential action.',
+      'Capture the desktop, a display, one region, or one named native window as a model-visible image. '
+      + 'Passing window_id raises that window and captures it in a single step, so a window hidden behind others is still captured correctly; '
+      + 'that form moves the foreground and therefore counts as desktop control. '
+      + 'Use the returned screenshot_id for coordinate actions, and capture again after any consequential action.',
       {
         type: 'object',
         additionalProperties: false,
@@ -438,6 +460,7 @@ export function apply(ctx, rawConfig) {
           width: { type: 'number', description: 'Optional capture region width in pixels (>= 1).' },
           height: { type: 'number', description: 'Optional capture region height in pixels (>= 1).' },
           scale: { type: 'number', description: 'Optional zoom factor applied after cropping (1 = native pixels, 2 = magnified 2x). Useful for reading small text; the image is still capped by the configured max dimension.' },
+          window_id: { type: 'string', description: 'Optional window_id from computer_windows. Raises that window to the foreground and captures the bounds it actually has at that moment, in one step — use it to capture a specific window even when it is covered. Give it alone (no x/y/width/height and no display_id).' },
         },
       },
       async (rawArgs, exec) => {
@@ -445,19 +468,50 @@ export function apply(ctx, rawConfig) {
         const displayId = optionalNonBlankString(args, 'display_id');
         const region = optionalRegion(args);
         const scale = optionalFiniteNumber(args, 'scale');
+        const windowId = optionalNonBlankString(args, 'window_id');
         if (scale !== undefined && scale <= 0) throw new Error('scale must be greater than 0');
+        if (windowId !== undefined && (region !== undefined || displayId !== undefined)) {
+          throw new Error('window_id captures that window on its own; drop x, y, width, height and display_id');
+        }
         await assertImageCapableRoute(nested, exec);
         // Pass explicit nulls rather than undefined: the backend payload crosses a JSON
         // boundary, and null is the unambiguous "not requested" marker there.
-        const capture = await computer(nested).screenshot({
-          displayId,
-          region: region ?? null,
-          scale: scale ?? null,
-        }, exec.signal);
+        let capture;
+        let capturedWindow;
+        // 指名窗口时一并记住它的原生身份：键盘类动作要先把它抢回前台再注入，
+        // 否则按键会落到「动作自己 spawn 出来的控制台窗口」上（那个窗口会抢走前台）。
+        let capturedFocus;
+        if (windowId === undefined) {
+          capture = await computer(nested).screenshot({
+            displayId,
+            region: region ?? null,
+            scale: scale ?? null,
+          }, exec.signal);
+        } else {
+          const record = freshWindow(observations, exec, windowId, config);
+          capture = await computer(nested).captureWindow(
+            record.nativeWindow,
+            { scale: scale ?? null },
+            exec.signal,
+          );
+          // 聚焦改变了前台，此前所有截图、语义快照与窗口记录都不再可信。
+          // 这里在写入本次截图之前消耗：新截图本身仍然可用。
+          consumeAllObservations(observations, exec);
+          capturedWindow = {
+            id: windowId,
+            title: record.window.title,
+            ...(typeof record.window.application === 'string' ? { application: record.window.application } : {}),
+          };
+          capturedFocus = {
+            handle: record.nativeWindow.id,
+            processId: record.nativeWindow.processId,
+            title: record.nativeWindow.title,
+          };
+        }
         const attachment = await nested.attachments.saveImage({
           data: capture.data,
           mediaType: 'image/png',
-          name: 'desktop-screenshot.png',
+          name: capturedWindow === undefined ? 'desktop-screenshot.png' : 'window-screenshot.png',
         });
         const stored = await nested.attachments.readImage(attachment, exec.signal);
         if (!(stored.data instanceof Uint8Array)) throw new Error('attachment provider returned invalid screenshot bytes');
@@ -469,6 +523,7 @@ export function apply(ctx, rawConfig) {
           sourceBounds: capture.sourceBounds,
           image: stored.ref,
           contentHash: hash,
+          ...(capturedFocus === undefined ? {} : { focus: capturedFocus }),
         }, config.maxObservationsPerAgent);
         return {
           screenshot_id: screenshotId,
@@ -476,6 +531,7 @@ export function apply(ctx, rawConfig) {
           content_hash: hash,
           source_bounds: capture.sourceBounds,
           image: stored.ref,
+          ...(capturedWindow === undefined ? {} : { window: capturedWindow }),
         };
       },
     ));
@@ -572,9 +628,10 @@ export function apply(ctx, rawConfig) {
     async (rawArgs, exec) => {
       const args = object(rawArgs);
       const screenshotId = requiredString(args, 'screenshot_id');
-      freshObservation(observations, exec, screenshotId, config);
+      // 这张图若是指名窗口截的，就带上那个窗口的身份：动作进程要先把它抢回前台再注入按键。
+      const focus = freshObservation(observations, exec, screenshotId, config).focus;
       const text = requiredString(args, 'text');
-      await computer(ctx).perform({ kind: 'type', text }, exec.signal);
+      await computer(ctx).perform({ kind: 'type', text, focus }, exec.signal);
       consumeAllObservations(observations, exec);
       return `Typed ${text.length} characters using ${screenshotId}. Capture a new screenshot before the next consequential action.`;
     },
@@ -591,11 +648,11 @@ export function apply(ctx, rawConfig) {
     async (rawArgs, exec) => {
       const args = object(rawArgs);
       const screenshotId = requiredString(args, 'screenshot_id');
-      freshObservation(observations, exec, screenshotId, config);
+      const focus = freshObservation(observations, exec, screenshotId, config).focus;
       const key = requiredString(args, 'key');
       const modifiers = arrayOfStrings(args, 'modifiers');
       if (modifiers.some((modifier) => !['alt', 'control', 'meta', 'shift'].includes(modifier))) throw new Error('modifiers contains an unsupported key');
-      await computer(ctx).perform({ kind: 'key', key, modifiers }, exec.signal);
+      await computer(ctx).perform({ kind: 'key', key, modifiers, focus }, exec.signal);
       consumeAllObservations(observations, exec);
       return `Sent ${[...modifiers, key].join('+')} using ${screenshotId}. Capture a new screenshot before the next consequential action.`;
     },

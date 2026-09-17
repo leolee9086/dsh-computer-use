@@ -23,13 +23,20 @@ use std::process::ExitCode;
 
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
-use windows::Win32::Foundation::{BOOL, LPARAM, RECT, TRUE};
+use windows::Win32::Foundation::{BOOL, FALSE, HWND, LPARAM, RECT, TRUE};
 use windows::Win32::Graphics::Gdi::{
     BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, EnumDisplayMonitors,
     GetDC, GetDIBits, GetMonitorInfoW, GetPixel, ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER,
     BI_RGB, CLR_INVALID, DIB_RGB_COLORS, HBITMAP, HDC, HMONITOR, MONITORINFO, ROP_CODE,
 };
+use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
 use windows::Win32::UI::HiDpi::{SetProcessDpiAwareness, PROCESS_PER_MONITOR_DPI_AWARE};
+use windows::Win32::UI::Input::KeyboardAndMouse::SetFocus;
+use windows::Win32::UI::WindowsAndMessaging::{
+    BringWindowToTop, GetForegroundWindow, GetWindowRect, GetWindowTextLengthW, GetWindowTextW,
+    GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible, SetForegroundWindow, ShowWindow,
+    SW_RESTORE,
+};
 
 /* ------------------------------ 通信协议 ------------------------------ */
 
@@ -46,6 +53,26 @@ struct ScreenshotRequest {
     max_dimension: Option<i64>,
     #[serde(default)]
     max_bytes: Option<i64>,
+    /// 指名窗口：先把该窗口提到前台，再按它**聚焦之后**的实际边界截图。
+    /// 为什么必须和截图挤在同一次进程调用里，见 `focus_window` 的说明。
+    #[serde(default)]
+    focus: Option<FocusTarget>,
+}
+
+/// 「提到前台再截图」的目标窗口。
+///
+/// 只带身份信息（句柄 + 所属进程 + 标题），**故意不带边界**：
+/// 边界是这次调用要**读出来**的结果，不是拿来做校验的输入。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FocusTarget {
+    /// 原生窗口句柄。
+    /// 宿主侧一律以**十进制字符串**传递：HWND 在 64 位 Windows 上是指针宽度，
+    /// 走 JS 的 number 会在超过 2^53 时丢精度，所以字符串是这条链路上既有的约定
+    /// （`computer_windows` 返回的窗口记录里它同样是字符串）。
+    handle: String,
+    process_id: i32,
+    title: String,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize)]
@@ -211,6 +238,121 @@ fn find_display(id: &str) -> Result<DisplayInfo, String> {
 fn trace(label: &str) {
     if std::env::var_os("DSH_SCREEN_DEBUG").is_some() {
         let _ = writeln!(std::io::stderr(), "[dsh-screen] {label}");
+    }
+}
+
+/* ------------------------------ 窗口聚焦 ------------------------------ */
+
+/// 把窗口提到前台，并返回它**聚焦之后**的实际边界。
+///
+/// 只校验身份（句柄有效 + 属于该进程 + 标题一致），**不比对调用方手里的旧边界**：
+/// 窗口在这中间被移动过并不代表换了一个窗口，而边界本来就该是这里「读出来的结果」。
+///
+/// 为什么这件事必须和截图挤在**同一次进程调用**里：
+/// 宿主每 spawn 一次子进程，Windows 就可能把宿主所在的控制台窗口提到前台
+/// （dsh-subprocess-local 的 Windows runner 启动路径没有 windowsHide）。
+/// 若「聚焦」和「截图」分成两次调用，第二次启动时冒出来的控制台窗口
+/// 会正好盖在刚被提到前面的目标上，截回来的就是那个控制台。
+/// 合成一次之后，弹窗只发生在进程启动那一刻，紧接着目标被提到前台把它盖住，
+/// 再抓屏拿到的就是目标本身。
+fn focus_window(target: &FocusTarget) -> Result<Region, String> {
+    unsafe {
+        let handle_value: i64 = target
+            .handle
+            .parse()
+            .map_err(|_| format!("窗口句柄不是合法的十进制整数：{}", target.handle))?;
+        let handle = HWND(handle_value as *mut core::ffi::c_void);
+        if !matches_window(handle, target) {
+            return Err("目标窗口已不存在或身份不符（句柄 / 进程 / 标题）".into());
+        }
+
+        // SW_RESTORE：最小化的窗口光靠 SetForegroundWindow 抬不起来
+        let _ = ShowWindow(handle, SW_RESTORE);
+        if !(SetForegroundWindow(handle).as_bool() && GetForegroundWindow() == handle) {
+            // Windows 的前台锁会拒绝合法请求：临时把本线程接入前台线程与目标线程的
+            // 输入队列，再试一次（与宿主侧 PowerShell 实现同样的手法）。
+            let current = GetCurrentThreadId();
+            let foreground = GetForegroundWindow();
+            let foreground_thread = if foreground.0.is_null() {
+                0
+            } else {
+                GetWindowThreadProcessId(foreground, None)
+            };
+            let target_thread = GetWindowThreadProcessId(handle, None);
+
+            let mut attached_foreground = false;
+            let mut attached_target = false;
+            if foreground_thread != 0 && foreground_thread != current {
+                attached_foreground = AttachThreadInput(current, foreground_thread, TRUE).as_bool();
+            }
+            if target_thread != 0 && target_thread != current && target_thread != foreground_thread {
+                attached_target = AttachThreadInput(current, target_thread, TRUE).as_bool();
+            }
+
+            let _ = BringWindowToTop(handle);
+            let _ = SetForegroundWindow(handle);
+            let _ = SetFocus(handle);
+
+            if attached_target {
+                let _ = AttachThreadInput(current, target_thread, FALSE);
+            }
+            if attached_foreground {
+                let _ = AttachThreadInput(current, foreground_thread, FALSE);
+            }
+        }
+
+        if GetForegroundWindow() != handle {
+            return Err("未能把目标窗口提到前台".into());
+        }
+        if !matches_window(handle, target) {
+            return Err("目标窗口在聚焦过程中发生了变化".into());
+        }
+
+        let mut rect = RECT::default();
+        GetWindowRect(handle, &mut rect).map_err(|e| format!("读取窗口边界失败：{e}"))?;
+        let bounds = Region {
+            x: rect.left,
+            y: rect.top,
+            width: rect.right - rect.left,
+            height: rect.bottom - rect.top,
+        };
+        if bounds.width < 1 || bounds.height < 1 {
+            return Err("目标窗口的边界为空".into());
+        }
+
+        // 刚被提到前台的窗口要等 DWM 合成一帧才会体现在屏幕像素里，
+        // 立刻抓屏有可能抓到它「还没画上去」的位置。
+        std::thread::sleep(std::time::Duration::from_millis(120));
+        Ok(bounds)
+    }
+}
+
+/// 身份校验：句柄有效、可见、未最小化、属于指定进程、标题一致。
+fn matches_window(handle: HWND, target: &FocusTarget) -> bool {
+    unsafe {
+        if !IsWindow(handle).as_bool()
+            || !IsWindowVisible(handle).as_bool()
+            || IsIconic(handle).as_bool()
+        {
+            return false;
+        }
+        let mut process_id: u32 = 0;
+        if GetWindowThreadProcessId(handle, Some(&mut process_id)) == 0 {
+            return false;
+        }
+        if process_id != target.process_id as u32 {
+            return false;
+        }
+        let length = GetWindowTextLengthW(handle);
+        if length < 1 {
+            return target.title.is_empty();
+        }
+        let mut buffer = vec![0u16; (length + 1) as usize];
+        let written = GetWindowTextW(handle, &mut buffer);
+        if written < 1 {
+            return target.title.is_empty();
+        }
+        String::from_utf16_lossy(&buffer[..written as usize]) == target.title
     }
 }
 
@@ -484,7 +626,14 @@ fn read_request(flags: &std::collections::HashMap<String, String>) -> Result<Scr
     let trimmed = raw.trim();
     let mut request: ScreenshotRequest = if trimmed.is_empty() {
         // 允许完全不传 stdin（全部参数走 argv）
-        ScreenshotRequest { display_id: None, region: None, scale: None, max_dimension: None, max_bytes: None }
+        ScreenshotRequest {
+            display_id: None,
+            region: None,
+            scale: None,
+            max_dimension: None,
+            max_bytes: None,
+            focus: None,
+        }
     } else {
         let decoded = base64::engine::general_purpose::STANDARD
             .decode(trimmed)
@@ -522,7 +671,7 @@ fn read_request(flags: &std::collections::HashMap<String, String>) -> Result<Scr
 /// 文件模式：PNG 直接写进 `--out`，stdout 只回小 JSON。
 /// 这是宿主应该用的模式 —— 大块二进制不进管道，从根上避开挂死。
 fn screenshot_to_files(flags: &std::collections::HashMap<String, String>) -> ExitCode {
-    let request = match read_request(flags) {
+    let mut request = match read_request(flags) {
         Ok(r) => r,
         Err(e) => return fail(e),
     };
@@ -530,6 +679,21 @@ fn screenshot_to_files(flags: &std::collections::HashMap<String, String>) -> Exi
         Some(p) => p.clone(),
         None => return fail("文件模式需要 --out <png 路径>"),
     };
+
+    // 指名窗口：先把窗口提到前台，再拿**它此刻的边界**当截图区域。
+    // 顺序不能反 —— 边界必须是聚焦之后读出来的，否则窗口被移动过就会截错地方。
+    if let Some(target) = request.focus.clone() {
+        match focus_window(&target) {
+            Ok(bounds) => {
+                trace(&format!(
+                    "F 已把窗口提到前台，实时边界 {}x{} @ ({}, {})",
+                    bounds.width, bounds.height, bounds.x, bounds.y
+                ));
+                request.region = Some(bounds);
+            }
+            Err(e) => return fail(e),
+        }
+    }
 
     let response = match capture(&request) {
         Ok(r) => r,
