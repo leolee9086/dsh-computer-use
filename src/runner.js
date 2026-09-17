@@ -56,8 +56,12 @@ export class ManagedRunner {
     const linked = mergeAbortSignal(options.signal, this.config.commandTimeoutMs);
     // 允许调用方给子进程喂 stdin（原生 helper 用它传请求参数）。
     // 默认仍是 'ignore'：多数平台命令用不到 stdin，忽略掉最省事也更安全。
+    // 批式 stdin 的字段名必须是 `data`：DSH 的 SubprocessStdinMode 是
+    // 'ignore' | 'pipe' | { data: string }，实现侧执行 stdin.end(stdinMode.data)。
+    // 写成 { text } 时 data 是 undefined —— 管道被立刻关闭，子进程读到空输入，
+    // payload 被静默丢掉（截图参数 region / display_id / scale 会全部不生效）。
     const stdinOption = typeof options.stdin === 'string'
-      ? { text: options.stdin }
+      ? { data: options.stdin }
       : options.stdin !== undefined && options.stdin !== null
         ? options.stdin
         : 'ignore';

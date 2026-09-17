@@ -14,6 +14,11 @@ window.__ModuleLoader__.load({
 		var module = { exports: {} };
 		var exports = module.exports;
 		Object.defineProperty(exports, Symbol.toStringTag, { value: "Module" });
+		// ⚠ 本文件全程必须用小写 react.*:
+		// ModuleLoader 的 require 表只提供 "react",浏览器里没有全局 React 对象。
+		// 写成大写 React.* 会在渲染时抛 ReferenceError,整张工具卡(乃至整条工具消息)
+		// 直接不显示——比不美化更糟。参照 dsh-tool-websearch / dsh-zhihu-tools 的
+		// 客户端半边,它们同样是 let react = require("react") + 小写调用。
 		let react = require("react");
 
 		const inject = ["slots"];
@@ -80,10 +85,10 @@ window.__ModuleLoader__.load({
 			const block = props.block;
 			const atts = imageAttachments(block);
 			const loadImage = props.loadImage;
-			const [urls, setUrls] = React.useState([]);
-			const [err, setErr] = React.useState("");
-			const [loading, setLoading] = React.useState(true);
-			React.useEffect(() => {
+			const [urls, setUrls] = react.useState([]);
+			const [err, setErr] = react.useState("");
+			const [loading, setLoading] = react.useState(true);
+			react.useEffect(() => {
 				let alive = true;
 				if (atts.length === 0) { setLoading(false); return undefined; }
 				if (typeof loadImage !== "function") {
@@ -103,25 +108,25 @@ window.__ModuleLoader__.load({
 			// 运行中的调用没有 content:只显示占位行,不猜结果。
 			let bodyChildren;
 			if (err) {
-				bodyChildren = React.createElement("div", { style: S.error }, "图片读取失败: " + err);
+				bodyChildren = react.createElement("div", { style: S.error }, "图片读取失败: " + err);
 			} else if (loading && atts.length > 0) {
-				bodyChildren = React.createElement("div", { style: S.hint }, "正在加载图片…");
+				bodyChildren = react.createElement("div", { style: S.hint }, "正在加载图片…");
 			} else if (atts.length === 0) {
-				bodyChildren = React.createElement("pre", { style: S.mono }, "（本次调用未返回图片）");
+				bodyChildren = react.createElement("pre", { style: S.mono }, "（本次调用未返回图片）");
 			} else {
-				bodyChildren = atts.map((att, i) => React.createElement("img", {
+				bodyChildren = atts.map((att, i) => react.createElement("img", {
 					key: String(i) + String(att.attachmentId || ""),
 					src: urls[i], alt: att.name || "desktop screenshot", style: S.img,
 				}));
 			}
-			return React.createElement(
+			return react.createElement(
 				"div", { style: S.shell },
-				React.createElement(
+				react.createElement(
 					"div", { style: S.head },
-					React.createElement("span", { style: S.icon }, "图"),
-					React.createElement("span", { style: S.title }, "computer_screenshot"),
+					react.createElement("span", { style: S.icon }, "图"),
+					react.createElement("span", { style: S.title }, "computer_screenshot"),
 				),
-				React.createElement("div", { style: S.body }, bodyChildren),
+				react.createElement("div", { style: S.body }, bodyChildren),
 			);
 		}
 
