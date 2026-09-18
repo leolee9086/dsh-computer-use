@@ -27,7 +27,7 @@ use windows::Win32::Foundation::{BOOL, FALSE, HWND, LPARAM, RECT, TRUE};
 use windows::Win32::Graphics::Gdi::{
     BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, EnumDisplayMonitors,
     GetDC, GetDIBits, GetMonitorInfoW, GetPixel, ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER,
-    BI_RGB, CLR_INVALID, DIB_RGB_COLORS, HBITMAP, HDC, HMONITOR, MONITORINFO, ROP_CODE,
+    BI_RGB, CLR_INVALID, DIB_RGB_COLORS, HBITMAP, HDC, HMONITOR, MONITORINFO, MONITORINFOEXW, ROP_CODE,
 };
 use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
 use windows::Win32::UI::HiDpi::{SetProcessDpiAwareness, PROCESS_PER_MONITOR_DPI_AWARE};
@@ -142,11 +142,10 @@ struct RawDisplay {
     bounds: RECT,
 }
 
-fn device_name(handle: isize) -> String {
-    // DISPLAY_DEVICE.DeviceName 是 [u16; 32]，但 Win32 的 MONITORINFOEXW.szDevice
-    // 同样足够。这里用 EnumDisplayMonitors + MONITORINFOEXW 更直接；
-    // 为减少依赖，改从 handle 合成一个稳定 id（见下），设备名仅做展示。
-    format!("\\\\?\\DISPLAY{handle}")
+/// 把 Win32 里以 NUL 结尾的定长 UTF-16 缓冲转成 String。
+fn utf16_z(raw: &[u16]) -> String {
+    let end = raw.iter().position(|&unit| unit == 0).unwrap_or(raw.len());
+    String::from_utf16_lossy(&raw[..end])
 }
 
 unsafe extern "system" fn monitor_enum_proc(
@@ -156,16 +155,21 @@ unsafe extern "system" fn monitor_enum_proc(
     data: LPARAM,
 ) -> BOOL {
     let out = &mut *(data.0 as *mut Vec<RawDisplay>);
-    let mut info = MONITORINFO {
-        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+    let mut info = MONITORINFOEXW {
+        monitorInfo: MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFOEXW>() as u32,
+            ..Default::default()
+        },
         ..Default::default()
     };
-    if GetMonitorInfoW(monitor, &mut info).as_bool() {
+    if GetMonitorInfoW(monitor, &mut info.monitorInfo).as_bool() {
         out.push(RawDisplay {
-            // MONITORINFO 不含设备名，这里用显示器句柄的数值做稳定标识：
-            // 在同一次系统会话里它稳定，且足以区分多屏 —— 而宿主只需要「能指回同一块屏」。
-            device: device_name(monitor.0 as isize),
-            bounds: info.rcMonitor,
+            // 用系统给的设备名（`\\.\DISPLAY1`），不再从 HMONITOR 合成 id。
+            // 理由：宿主侧 computer_status 走的是另一套枚举（PowerShell），返回的就是设备名。
+            // 两边必须说同一种 id —— 早先那版合成 `\\?\DISPLAY<handle>`，
+            // 结果就是 display_id 从 computer_status 拿到后传给截图，必然「找不到显示器」。
+            device: utf16_z(&info.szDevice),
+            bounds: info.monitorInfo.rcMonitor,
         });
     }
     TRUE

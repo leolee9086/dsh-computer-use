@@ -21,6 +21,15 @@
 
 ### 修复
 
+- **`computer_screenshot` 的 `display_id` 从加入起就没工作过**：两套显示器枚举各说各话 ——
+  `computer_status` 走的是 PowerShell 分支（`src/windows.js` 的 `{ kind: 'displays' }`），返回
+  `\\.\DISPLAY1`（Windows 标准设备名）；而截图走的原生 helper 从 HMONITOR **合成**了一个 id
+  （`\\?\DISPLAY<handle>`），`find_display()` 又是精确匹配 —— 于是从 `computer_status` 拿到的
+  id 传过去，**必然**报「找不到显示器」。之前的验证只覆盖了 `region` + `scale`
+  （它们和 `display_id` 走同一条 payload 通道，所以那条通道"看起来"是通的），把这条路径漏了。
+  现在原生改用 `MONITORINFOEXW.szDevice`，id 直接就是 `\\.\DISPLAY1`，与另一套天然一致。
+  实测：`display_id="\\.\DISPLAY1"` → 1920×1080，`sourceBounds = {-1920, 0, 1920, 1080}`。
+
 - **`computer_screenshot` 的整条工具消息在 GUI 里不显示**：`src/client.js` 全程用大写 `React.*`，
   而该模块只定义了 `let react = require("react")`，渲染时抛 `ReferenceError`，整张工具卡连带整条消息一起消失。
   现已统一为小写并加注释（`3f5da40` 引入）。
