@@ -1,25 +1,50 @@
-# dsh-screen —— 原生截图 helper
+# dsh-screen —— 原生桌面 helper
 
-`dsh-computer-use` 的 Windows 截图后端。一个单文件 exe（约 390KB），不依赖 PowerShell、不依赖运行时。
+`dsh-computer-use` 的 Windows 后端。一个单文件 exe（约 610KB），不依赖脚本解释器、不依赖运行时。
 
-**为什么截图要单独做一个原生程序：**
+**为什么这些能力要做成原生程序：**
 
-1. **省掉每次截图的进程启动代价** —— 原先每次都要起一次 `powershell.exe`，那是这条路径最大的固定开销
-2. **屏幕几何与像素读取在强类型代码里** —— 不再出现「脚本层属性取到 null 却一路算下去」这类只在运行时才暴露的问题
-3. **能自己决定 ROP、裁剪与缩放** —— 不受脚本层表达能力限制
+1. **省掉每次动作的进程启动代价** —— 原先每次都要起一次 `powershell.exe`，那是这条路径最大的固定开销
+2. **系统调用写在强类型代码里** —— 不再出现「脚本层属性取到 null 却一路算下去」这类只在运行时才暴露的问题
+3. **能自己决定 ROP、裁剪、缩放与输入标志** —— 不受脚本层表达能力限制
 
 ## 通信协议
 
-与原先的 PowerShell helper 保持一致，所以宿主侧只需换「怎么启动 helper」，其余逻辑不动。
+命令走 argv，请求体走 stdin（`base64(UTF-8 JSON)`），结果走 stdout（压缩 JSON）。
+
+> **需要请求体的命令必须喂 stdin。** 不喂它会一直等下去（协议是先读请求体再干活），
+> 表现就是调用方挂住不返回。
 
 ```
 dsh-screen list-displays
-  → stdout: [{"id":"...","name":"...","primary":false,"bounds":{"x":..,"y":..,"width":..,"height":..}}]
+  → stdout: [{"id":"…","name":"…","primary":false,"bounds":{…}}]
+
+dsh-screen list-windows
+  → stdout: [{"id":"…","title":"…","processId":…,"application":"…","focused":false,"bounds":{…}}]
+
+dsh-screen focus-window
+  stdin : {"id":"…","processId":…,"title":"…"}
+  stdout: {"ok":true}
+
+dsh-screen action
+  stdin : {"action":{"kind":"click","x":…,"y":…,"button":"left","clickCount":1,"delayMs":0},"focus":{…}}
+  stdout: {"ok":true}
 
 dsh-screen screenshot --out shot.png
   stdin : base64(UTF-8 JSON) 请求
-  stdout: {"path":"shot.png","width":..,"height":..,"sourceBounds":{...},"bytes":..}
+  stdout: {"path":"shot.png","width":…,"height":…,"sourceBounds":{…},"bytes":…}
+
+dsh-screen find-image
+  stdin : {"templatePng":"<base64>","threshold":…,"tolerance":…,…}
+  stdout: {"found":true,"x":…,"y":…,"score":…,"matchCount":1,"matches":[…]}
 ```
+
+`action` 的六种动作是 `move` / `click` / `drag` / `scroll` / `type` / `key`，
+字段名一律 camelCase，与宿主侧 `actionPayload` 一一对应。带 `focus` 时**先按身份提窗再注入** ——
+两者必须在同一次进程调用里完成，否则第二次 spawn 冒出来的控制台会抢走前台，按键就落错了地方。
+
+`focus-window` 只校验身份（句柄 + 进程 + 标题前缀），**不比对列出时刻的旧边界**：
+窗口被移动过并不代表换了一个窗口，拿旧边界去校验会让一次本该成功的聚焦直接失败。
 
 请求字段（全部可选）：
 

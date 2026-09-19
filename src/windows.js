@@ -1,9 +1,10 @@
 import { Buffer } from 'node:buffer';
 import { existsSync } from 'node:fs';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { loadCSharpFile } from './csharp.js';
 import { ComputerUseError, unsupported } from './errors.js';
 import { assertFinitePoint } from './geometry.js';
 
@@ -33,566 +34,11 @@ for (let code = 0; code < 10; code += 1) KEY_CODES[String(code)] = 0x30 + code;
 for (let code = 1; code <= 12; code += 1) KEY_CODES[`f${code}`] = 0x6f + code;
 Object.freeze(KEY_CODES);
 
-const POWER_SHELL_HELPER = String.raw`
-$ErrorActionPreference = 'Stop'
-[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
-$OutputEncoding = New-Object System.Text.UTF8Encoding($false)
-$payload = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('__PAYLOAD__')) | ConvertFrom-Json
-
-$nativeSource = @'
-using System;
-using System.Collections.Generic;
-using System.Diagnostics;
-using System.Runtime.InteropServices;
-using System.Text;
-using System.Threading;
-
-namespace DshComputer {
-  public sealed class RectValue {
-    public int x;
-    public int y;
-    public int width;
-    public int height;
-    public RectValue(int x, int y, int width, int height) {
-      this.x = x; this.y = y; this.width = width; this.height = height;
-    }
-  }
-
-  public sealed class WindowValue {
-    public long id;
-    public string title;
-    public int processId;
-    public string application;
-    public RectValue bounds;
-    public WindowValue(long id, string title, int processId, string application, RectValue bounds) {
-      this.id = id; this.title = title; this.processId = processId; this.application = application; this.bounds = bounds;
-    }
-  }
-
-  public static class Native {
-    [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X; public int Y; }
-    [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
-    [StructLayout(LayoutKind.Sequential)] public struct MOUSEINPUT {
-      public int dx; public int dy; public uint mouseData; public uint dwFlags; public uint time; public IntPtr dwExtraInfo;
-    }
-    [StructLayout(LayoutKind.Sequential)] public struct KEYBDINPUT {
-      public ushort wVk; public ushort wScan; public uint dwFlags; public uint time; public IntPtr dwExtraInfo;
-    }
-    [StructLayout(LayoutKind.Explicit)] public struct InputUnion {
-      [FieldOffset(0)] public MOUSEINPUT mi;
-      [FieldOffset(0)] public KEYBDINPUT ki;
-    }
-    [StructLayout(LayoutKind.Sequential)] public struct INPUT {
-      public uint type;
-      public InputUnion U;
-    }
-
-    [DllImport("user32.dll", SetLastError = true)] public static extern bool SetCursorPos(int X, int Y);
-    [DllImport("user32.dll", SetLastError = true)] public static extern bool GetCursorPos(out POINT point);
-    [DllImport("user32.dll", SetLastError = true)] public static extern void mouse_event(uint flags, uint dx, uint dy, uint data, IntPtr extraInfo);
-    [DllImport("user32.dll", SetLastError = true)] public static extern void keybd_event(byte vk, byte scan, uint flags, IntPtr extraInfo);
-    [DllImport("user32.dll", SetLastError = true)] public static extern uint SendInput(uint count, INPUT[] inputs, int size);
-    [DllImport("user32.dll", SetLastError = true)] public static extern IntPtr GetForegroundWindow();
-    [DllImport("user32.dll", SetLastError = true)] public static extern bool GetWindowRect(IntPtr handle, out RECT rect);
-    [DllImport("user32.dll", SetLastError = true)] public static extern bool IsWindowVisible(IntPtr handle);
-    [DllImport("user32.dll", SetLastError = true)] public static extern bool IsIconic(IntPtr handle);
-    [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Unicode)] public static extern int GetWindowText(IntPtr handle, StringBuilder text, int maxCount);
-    [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Unicode)] public static extern int GetWindowTextLength(IntPtr handle);
-    public delegate bool EnumWindowsProc(IntPtr handle, IntPtr parameter);
-    [DllImport("user32.dll", SetLastError = true)] public static extern bool EnumWindows(EnumWindowsProc callback, IntPtr parameter);
-    [DllImport("user32.dll", SetLastError = true)] public static extern bool SetForegroundWindow(IntPtr handle);
-    [DllImport("user32.dll", SetLastError = true)] public static extern bool BringWindowToTop(IntPtr handle);
-    [DllImport("user32.dll", SetLastError = true)] public static extern IntPtr SetFocus(IntPtr handle);
-    [DllImport("user32.dll", SetLastError = true)] public static extern bool IsWindow(IntPtr handle);
-    [DllImport("user32.dll", SetLastError = true)] public static extern IntPtr GetWindow(IntPtr handle, uint command);
-    [DllImport("user32.dll", SetLastError = true)] public static extern uint GetWindowThreadProcessId(IntPtr handle, IntPtr processId);
-    [DllImport("user32.dll", SetLastError = true, EntryPoint = "GetWindowThreadProcessId")] public static extern uint GetWindowThreadProcessIdWithProcess(IntPtr handle, out uint processId);
-    [DllImport("user32.dll", SetLastError = true)] public static extern bool AttachThreadInput(uint attachThreadId, uint attachToThreadId, bool attach);
-    [DllImport("user32.dll", SetLastError = true)] public static extern bool ShowWindow(IntPtr handle, int command);
-    [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
-    [DllImport("user32.dll", SetLastError = true)] public static extern bool SetProcessDPIAware();
-    [DllImport("user32.dll", SetLastError = true)] public static extern bool SetProcessDpiAwarenessContext(IntPtr value);
-
-    const uint LEFTDOWN = 0x0002;
-    const uint LEFTUP = 0x0004;
-    const uint RIGHTDOWN = 0x0008;
-    const uint RIGHTUP = 0x0010;
-    const uint MIDDLEDOWN = 0x0020;
-    const uint MIDDLEUP = 0x0040;
-    const uint WHEEL = 0x0800;
-    const uint HWHEEL = 0x01000;
-    const uint KEYEVENTF_KEYUP = 0x0002;
-    const uint KEYEVENTF_UNICODE = 0x0004;
-
-    public static void EnableDpiAwareness() {
-      try { SetProcessDpiAwarenessContext(new IntPtr(-4)); } catch { }
-      try { SetProcessDPIAware(); } catch { }
-    }
-
-    static uint DownFlag(string button) {
-      if (button == "right") return RIGHTDOWN;
-      if (button == "middle") return MIDDLEDOWN;
-      return LEFTDOWN;
-    }
-
-    static uint UpFlag(string button) {
-      if (button == "right") return RIGHTUP;
-      if (button == "middle") return MIDDLEUP;
-      return LEFTUP;
-    }
-
-    public static void Move(int x, int y) {
-      if (!SetCursorPos(x, y)) throw new InvalidOperationException("SetCursorPos failed");
-    }
-
-    public static void Click(int x, int y, string button, int count) {
-      if (!SetCursorPos(x, y)) throw new InvalidOperationException("SetCursorPos failed");
-      for (int i = 0; i < count; i++) {
-        mouse_event(DownFlag(button), 0, 0, 0, IntPtr.Zero);
-        mouse_event(UpFlag(button), 0, 0, 0, IntPtr.Zero);
-      }
-    }
-
-    public static void Drag(int fromX, int fromY, int toX, int toY, int durationMs) {
-      if (!SetCursorPos(fromX, fromY)) throw new InvalidOperationException("SetCursorPos failed");
-      mouse_event(LEFTDOWN, 0, 0, 0, IntPtr.Zero);
-      try {
-        var duration = Math.Max(0, Math.Min(10000, durationMs));
-        var steps = Math.Max(1, Math.Min(120, (int)Math.Ceiling(duration / 16.0)));
-        for (var index = 1; index <= steps; index++) {
-          var fraction = index / (double)steps;
-          var x = (int)Math.Round(fromX + (toX - fromX) * fraction);
-          var y = (int)Math.Round(fromY + (toY - fromY) * fraction);
-          if (duration > 0) Thread.Sleep((int)Math.Round(duration / (double)steps));
-          if (!SetCursorPos(x, y)) throw new InvalidOperationException("SetCursorPos failed");
-        }
-      } finally {
-        mouse_event(LEFTUP, 0, 0, 0, IntPtr.Zero);
-      }
-    }
-
-    public static void Scroll(int x, int y, int deltaX, int deltaY) {
-      if (!SetCursorPos(x, y)) throw new InvalidOperationException("SetCursorPos failed");
-      if (deltaY != 0) mouse_event(WHEEL, 0, 0, unchecked((uint)deltaY), IntPtr.Zero);
-      if (deltaX != 0) mouse_event(HWHEEL, 0, 0, unchecked((uint)deltaX), IntPtr.Zero);
-    }
-
-    public static void TypeText(string text) {
-      var inputs = new List<INPUT>();
-      foreach (char character in text) {
-        inputs.Add(new INPUT { type = 1, U = new InputUnion { ki = new KEYBDINPUT { wVk = 0, wScan = character, dwFlags = KEYEVENTF_UNICODE, time = 0, dwExtraInfo = IntPtr.Zero } } });
-        inputs.Add(new INPUT { type = 1, U = new InputUnion { ki = new KEYBDINPUT { wVk = 0, wScan = character, dwFlags = KEYEVENTF_UNICODE | KEYEVENTF_KEYUP, time = 0, dwExtraInfo = IntPtr.Zero } } });
-      }
-      if (inputs.Count == 0) return;
-      var array = inputs.ToArray();
-      var sent = SendInput((uint)array.Length, array, Marshal.SizeOf(typeof(INPUT)));
-      if (sent != (uint)array.Length) throw new InvalidOperationException("SendInput did not deliver all text input");
-    }
-
-    public static void TapKey(int key, int[] modifiers) {
-      foreach (int modifier in modifiers) keybd_event((byte)modifier, 0, 0, IntPtr.Zero);
-      try {
-        keybd_event((byte)key, 0, 0, IntPtr.Zero);
-        keybd_event((byte)key, 0, KEYEVENTF_KEYUP, IntPtr.Zero);
-      } finally {
-        for (int index = modifiers.Length - 1; index >= 0; index--) keybd_event((byte)modifiers[index], 0, KEYEVENTF_KEYUP, IntPtr.Zero);
-      }
-    }
-
-    public static RectValue WindowBounds(long rawHandle) {
-      RECT rect;
-      if (!GetWindowRect(new IntPtr(rawHandle), out rect)) throw new InvalidOperationException("GetWindowRect failed");
-      return new RectValue(rect.Left, rect.Top, rect.Right - rect.Left, rect.Bottom - rect.Top);
-    }
-
-    static string WindowTitle(IntPtr handle) {
-      var length = GetWindowTextLength(handle);
-      if (length < 1) return "";
-      var text = new StringBuilder(length + 1);
-      GetWindowText(handle, text, text.Capacity);
-      return text.ToString();
-    }
-
-    // 标题按**前缀**比，不做精确等于。
-    // Electron 应用（QQ NT 等）会让本地窗口标题跟着页面标题变 —— 尾部的计数
-    //（"…等 N 个会话"）尤其容易在「列出」和「操作」这两次调用之间变。
-    // 句柄 + 进程已经足以定位窗口，标题只用来防串窗，所以前缀够用。
-    static bool TitleMatches(IntPtr handle, string expectedTitle) {
-      var actual = WindowTitle(handle);
-      if (actual == expectedTitle) return true;
-      var shared = Math.Min(actual.Length, expectedTitle.Length);
-      if (shared < 8) return false;   // 太短的前缀没有辨识力，不能算匹配
-      return actual.Substring(0, shared) == expectedTitle.Substring(0, shared);
-    }
-
-    static bool BoundsEqual(RECT rect, RectValue expected) {
-      return expected != null
-        && rect.Left == expected.x && rect.Top == expected.y
-        && rect.Right - rect.Left == expected.width && rect.Bottom - rect.Top == expected.height;
-    }
-
-    public static bool WindowMatches(long rawHandle, int expectedProcessId, string expectedTitle, RectValue expectedBounds) {
-      var handle = new IntPtr(rawHandle);
-      if (!IsWindow(handle) || !IsWindowVisible(handle) || IsIconic(handle)) return false;
-      uint processId;
-      if (GetWindowThreadProcessIdWithProcess(handle, out processId) == 0 || processId != (uint)expectedProcessId) return false;
-      if (!TitleMatches(handle, expectedTitle)) return false;
-      RECT rect;
-      return GetWindowRect(handle, out rect) && BoundsEqual(rect, expectedBounds);
-    }
-
-    // Identity-only check: handle, owning process, title. Deliberately NOT the bounds --
-    // a window that moved between listing and acting is still the same window.
-    public static bool WindowMatchesIdentity(long rawHandle, int expectedProcessId, string expectedTitle) {
-      var handle = new IntPtr(rawHandle);
-      if (!IsWindow(handle) || !IsWindowVisible(handle) || IsIconic(handle)) return false;
-      uint processId;
-      if (GetWindowThreadProcessIdWithProcess(handle, out processId) == 0 || processId != (uint)expectedProcessId) return false;
-      return TitleMatches(handle, expectedTitle);
-    }
-
-    // Raise a window identified by handle/process/title, without comparing its listed bounds.
-    // Needed before injecting keyboard input: this process's own startup console window takes
-    // the foreground, and SendInput only reaches the foreground window.
-    // 只在「目标确实是前台窗口」时算成功。
-    // 曾试过放宽成「Z-order 最上层也算」——那反而更严也更错：GetWindow(handle, GW_HWNDPREV)
-    // 对 QQ 这类窗口永远非空（它上面总有别的窗口），于是补救路径明明成功了、判据仍然为假。
-    // 这里要回答的是「按键会注入给谁」，而 SendInput 的目标就是前台窗口，所以只能问前台。
-    public static bool IsOnTop(IntPtr handle) {
-      return GetForegroundWindow() == handle;
-    }
-
-    public static bool FocusWindowByIdentity(long rawHandle, int expectedProcessId, string expectedTitle) {
-      var handle = new IntPtr(rawHandle);
-      if (!WindowMatchesIdentity(rawHandle, expectedProcessId, expectedTitle)) return false;
-      ShowWindow(handle, 9);
-      // 判据只能是「目标现在是不是前台」：窗口已经在前台时 SetForegroundWindow 可能返回
-      // false（系统认为没什么可做的），拿返回值当判据就会把「本来就对」判成失败，
-      // 再白跑一趟补救路径。FocusWindow 那份已按同一理由改过 —— 输入类动作走的是这一个。
-      SetForegroundWindow(handle);
-      if (!IsOnTop(handle)) {
-        // 前台锁只认「当前前台进程」或「刚收到过用户输入事件的进程」。一个孤立的
-        // Alt 按下/抬起（不产生字符、不改变任何状态）足以让系统把我们算作"刚收到输入"，
-        // 这把锁就开了 —— 窗口自动化里的通行做法，微软 SetForegroundWindow 的文档
-        // 也把「刚收到用户输入」列为允许改前台的情形。**只在首次失败后发一次。**
-        keybd_event(0x12, 0, 0, 0);   // Alt down
-        keybd_event(0x12, 0, 2, 0);   // Alt up（KEYEVENTF_KEYUP = 2）
-        SetForegroundWindow(handle);
-      }
-      if (IsOnTop(handle)) {
-        return WindowMatchesIdentity(rawHandle, expectedProcessId, expectedTitle);
-      }
-
-      // Windows foreground-lock rules can reject a valid request. Temporarily join the caller
-      // with the foreground and target input queues, then verify the result.
-      var currentThread = GetCurrentThreadId();
-      var foreground = GetForegroundWindow();
-      var foregroundThread = foreground == IntPtr.Zero ? 0 : GetWindowThreadProcessId(foreground, IntPtr.Zero);
-      var targetThread = GetWindowThreadProcessId(handle, IntPtr.Zero);
-      var attachedForeground = false;
-      var attachedTarget = false;
-      try {
-        if (foregroundThread != 0 && foregroundThread != currentThread) {
-          attachedForeground = AttachThreadInput(currentThread, foregroundThread, true);
-        }
-        if (targetThread != 0 && targetThread != currentThread && targetThread != foregroundThread) {
-          attachedTarget = AttachThreadInput(currentThread, targetThread, true);
-        }
-        BringWindowToTop(handle);
-        SetForegroundWindow(handle);
-        SetFocus(handle);
-        return IsOnTop(handle) && WindowMatchesIdentity(rawHandle, expectedProcessId, expectedTitle);
-      } finally {
-        if (attachedTarget) AttachThreadInput(currentThread, targetThread, false);
-        if (attachedForeground) AttachThreadInput(currentThread, foregroundThread, false);
-      }
-    }
-
-    public static List<WindowValue> VisibleWindows() {
-      var windows = new List<WindowValue>();
-      if (!EnumWindows((handle, ignored) => {
-        if (!IsWindowVisible(handle) || IsIconic(handle)) return true;
-        var title = WindowTitle(handle);
-        if (String.IsNullOrEmpty(title)) return true;
-        RECT rect;
-        if (!GetWindowRect(handle, out rect) || rect.Right <= rect.Left || rect.Bottom <= rect.Top) return true;
-        uint processId;
-        if (GetWindowThreadProcessIdWithProcess(handle, out processId) == 0 || processId == 0 || processId > Int32.MaxValue) return true;
-        var application = "";
-        try { application = Process.GetProcessById((int)processId).ProcessName; } catch { }
-        windows.Add(new WindowValue(handle.ToInt64(), title, (int)processId, application,
-          new RectValue(rect.Left, rect.Top, rect.Right - rect.Left, rect.Bottom - rect.Top)));
-        return true;
-      }, IntPtr.Zero)) throw new InvalidOperationException("EnumWindows failed");
-      return windows;
-    }
-
-    public static bool FocusWindow(long rawHandle, int expectedProcessId, string expectedTitle, RectValue expectedBounds) {
-      var handle = new IntPtr(rawHandle);
-      if (!WindowMatches(rawHandle, expectedProcessId, expectedTitle, expectedBounds)) return false;
-      ShowWindow(handle, 9);
-      // 判据只能是「目标现在是不是前台」：窗口已经在前台时 SetForegroundWindow 可能返回
-      // false（系统认为没什么可做的），拿返回值当判据就会把「本来就对」判成失败，
-      // 再白跑一趟补救路径。native 侧的 focus_window 已按同一理由改过 —— 这是同一件事的另一份实现。
-      SetForegroundWindow(handle);
-      if (!IsOnTop(handle)) {
-        // 同 FocusWindowByIdentity：先发一个孤立的 Alt 按下/抬起解开前台锁，再试一次。
-        keybd_event(0x12, 0, 0, 0);   // Alt down
-        keybd_event(0x12, 0, 2, 0);   // Alt up
-        SetForegroundWindow(handle);
-      }
-      if (IsOnTop(handle)) {
-        return WindowMatches(rawHandle, expectedProcessId, expectedTitle, expectedBounds);
-      }
-
-      // Windows foreground-lock rules can reject a valid window. Temporarily join
-      // the caller with the foreground and target input queues, then verify focus.
-      var currentThread = GetCurrentThreadId();
-      var foreground = GetForegroundWindow();
-      var foregroundThread = foreground == IntPtr.Zero ? 0 : GetWindowThreadProcessId(foreground, IntPtr.Zero);
-      var targetThread = GetWindowThreadProcessId(handle, IntPtr.Zero);
-      var attachedForeground = false;
-      var attachedTarget = false;
-      try {
-        if (foregroundThread != 0 && foregroundThread != currentThread) {
-          attachedForeground = AttachThreadInput(currentThread, foregroundThread, true);
-        }
-        if (targetThread != 0 && targetThread != currentThread && targetThread != foregroundThread) {
-          attachedTarget = AttachThreadInput(currentThread, targetThread, true);
-        }
-        BringWindowToTop(handle);
-        SetForegroundWindow(handle);
-        SetFocus(handle);
-        return IsOnTop(handle) && WindowMatches(rawHandle, expectedProcessId, expectedTitle, expectedBounds);
-      } finally {
-        if (attachedTarget) AttachThreadInput(currentThread, targetThread, false);
-        if (attachedForeground) AttachThreadInput(currentThread, foregroundThread, false);
-      }
-    }
-
-    public static long ForegroundWindow() { return GetForegroundWindow().ToInt64(); }
-  }
-}
-'@
-Add-Type -TypeDefinition $nativeSource -Language CSharp
-[DshComputer.Native]::EnableDpiAwareness()
-Add-Type -AssemblyName System.Windows.Forms
-Add-Type -AssemblyName System.Drawing
-
-function Write-ComputerResult($value) {
-  [Console]::Out.Write((ConvertTo-Json -InputObject $value -Depth 64 -Compress))
-}
-
-switch ($payload.kind) {
-  'displays' {
-    $screens = [System.Windows.Forms.Screen]::AllScreens | ForEach-Object {
-      @{ id = $_.DeviceName; name = $_.DeviceName; primary = $_.Primary; bounds = @{ x = $_.Bounds.X; y = $_.Bounds.Y; width = $_.Bounds.Width; height = $_.Bounds.Height } }
-    }
-    Write-ComputerResult @($screens)
-    break
-  }
-  'action' {
-    if ($null -ne $payload.focus) {
-      # Take the foreground back before injecting. This process starts with a console window
-      # that grabs the foreground, and SendInput only reaches whatever is foreground.
-      # Pointer actions are unaffected: they inject at coordinates, not at the focus.
-      if (-not [DshComputer.Native]::FocusWindowByIdentity([int64]$payload.focus.handle, [int]$payload.focus.processId, [string]$payload.focus.title)) {
-        throw "could not raise the target window before the action"
-      }
-    }
-    switch ($payload.action.kind) {
-      'move' { [DshComputer.Native]::Move([int]$payload.action.x, [int]$payload.action.y) }
-      'click' { [DshComputer.Native]::Click([int]$payload.action.x, [int]$payload.action.y, [string]$payload.action.button, [int]$payload.action.clickCount) }
-      'drag' { [DshComputer.Native]::Drag([int]$payload.action.fromX, [int]$payload.action.fromY, [int]$payload.action.toX, [int]$payload.action.toY, [int]$payload.action.durationMs) }
-      'scroll' { [DshComputer.Native]::Scroll([int]$payload.action.x, [int]$payload.action.y, [int]$payload.action.deltaX, [int]$payload.action.deltaY) }
-      'type' { [DshComputer.Native]::TypeText([string]$payload.action.text) }
-      'key' { [DshComputer.Native]::TapKey([int]$payload.action.key, [int[]]$payload.action.modifiers) }
-      default { throw "unsupported action '$($payload.action.kind)'" }
-    }
-    if ([int]$payload.action.delayMs -gt 0) { Start-Sleep -Milliseconds ([int]$payload.action.delayMs) }
-    Write-ComputerResult @{ ok = $true }
-    break
-  }
-  'windows' {
-    $foreground = [DshComputer.Native]::ForegroundWindow()
-    $items = @([DshComputer.Native]::VisibleWindows() | ForEach-Object {
-      @{ id = $_.id.ToString(); title = $_.title; processId = $_.processId; application = $_.application; focused = ($_.id -eq $foreground); bounds = @{ x = $_.bounds.x; y = $_.bounds.y; width = $_.bounds.width; height = $_.bounds.height } }
-    })
-    Write-ComputerResult $items
-    break
-  }
-  'focus' {
-    $expectedBounds = New-Object -TypeName DshComputer.RectValue -ArgumentList @([int]$payload.bounds.x, [int]$payload.bounds.y, [int]$payload.bounds.width, [int]$payload.bounds.height)
-    if (-not [DshComputer.Native]::FocusWindow([int64]$payload.id, [int]$payload.processId, [string]$payload.title, $expectedBounds)) { throw "the requested window no longer matches its listed identity or foreground focus was rejected" }
-    Write-ComputerResult @{ ok = $true }
-    break
-  }
-  'accessibility' {
-    Add-Type -AssemblyName UIAutomationClient
-    Add-Type -AssemblyName UIAutomationTypes
-    $count = 0
-    $maxNodes = [int]$payload.maxNodes
-    $maxDepth = [int]$payload.maxDepth
-    $walker = [System.Windows.Automation.TreeWalker]::ControlViewWalker
-    function Get-AccessibilityElementId($element) {
-      try {
-        $runtimeId = @($element.GetRuntimeId())
-        if ($runtimeId.Count -gt 0) { return 'uia:' + ($runtimeId -join ',') }
-      } catch { }
-      return $null
-    }
-    function Supports-AccessibilityPattern($element, $pattern) {
-      try {
-        [void]$element.GetCurrentPattern($pattern)
-        return $true
-      } catch { return $false }
-    }
-    function Find-AccessibilityApplicationRoot($element) {
-      $candidate = $element
-      while ($null -ne $candidate) {
-        try { $candidateCurrent = $candidate.Current } catch { break }
-        if ($candidateCurrent.ControlType -eq [System.Windows.Automation.ControlType]::Window) { return $candidate }
-        try { $candidate = $walker.GetParent($candidate) } catch { $candidate = $null }
-      }
-      return $element
-    }
-    function Convert-AccessibilityNode($element, [int]$depth) {
-      if ($null -eq $element -or $count -ge $maxNodes) { return $null }
-      try { $current = $element.Current } catch { return $null }
-      $script:count += 1
-      $bounds = $null
-      try {
-        $rectangle = $current.BoundingRectangle
-        if (-not $rectangle.IsEmpty) { $bounds = @{ x = [int][Math]::Round($rectangle.X); y = [int][Math]::Round($rectangle.Y); width = [int][Math]::Round($rectangle.Width); height = [int][Math]::Round($rectangle.Height) } }
-      } catch { }
-      $patterns = @()
-      if (Supports-AccessibilityPattern $element ([System.Windows.Automation.InvokePattern]::Pattern)) { $patterns += 'invoke' }
-      if (Supports-AccessibilityPattern $element ([System.Windows.Automation.ValuePattern]::Pattern)) { $patterns += 'value' }
-      if (Supports-AccessibilityPattern $element ([System.Windows.Automation.TogglePattern]::Pattern)) { $patterns += 'toggle' }
-      if (Supports-AccessibilityPattern $element ([System.Windows.Automation.ExpandCollapsePattern]::Pattern)) { $patterns += 'expand_collapse' }
-      if (Supports-AccessibilityPattern $element ([System.Windows.Automation.SelectionItemPattern]::Pattern)) { $patterns += 'selection_item' }
-      if (Supports-AccessibilityPattern $element ([System.Windows.Automation.ScrollItemPattern]::Pattern)) { $patterns += 'scroll_item' }
-      $node = [ordered]@{ role = $current.ControlType.ProgrammaticName.Replace('ControlType.', ''); name = $current.Name; automation_id = $current.AutomationId; class_name = $current.ClassName; process_id = $current.ProcessId; enabled = $current.IsEnabled; focused = $current.HasKeyboardFocus; focusable = $current.IsKeyboardFocusable; offscreen = $current.IsOffscreen; patterns = @($patterns); children = @() }
-      $elementId = Get-AccessibilityElementId $element
-      if ($null -ne $elementId) { $node.element_id = $elementId }
-      if ($null -ne $bounds) { $node.bounds = $bounds }
-      if ($depth -lt $maxDepth -and $count -lt $maxNodes) {
-        try { $child = $walker.GetFirstChild($element) } catch { $child = $null }
-        while ($null -ne $child -and $count -lt $maxNodes) {
-          $childNode = Convert-AccessibilityNode $child ($depth + 1)
-          if ($null -ne $childNode) { $node.children += $childNode }
-          try { $child = $walker.GetNextSibling($child) } catch { $child = $null }
-        }
-      }
-      return $node
-    }
-    $focused = [System.Windows.Automation.AutomationElement]::FocusedElement
-    if ($null -eq $focused) { $focused = [System.Windows.Automation.AutomationElement]::RootElement }
-    $root = Find-AccessibilityApplicationRoot $focused
-    $tree = Convert-AccessibilityNode $root 0
-    if ($null -eq $tree) { throw 'UI Automation returned no accessible root' }
-    Write-ComputerResult $tree
-    break
-  }
-  'accessibility-action' {
-    Add-Type -AssemblyName UIAutomationClient
-    Add-Type -AssemblyName UIAutomationTypes
-    $elementId = [string]$payload.action.elementId
-    if ($elementId -notmatch '^uia:-?\d+(,-?\d+)*$') { throw 'accessibility element id is invalid' }
-    $processId = [int]$payload.action.processId
-    if ($processId -lt 1) { throw 'accessibility action process id is invalid' }
-    $maxCandidates = [int]$payload.action.maxCandidates
-    if ($maxCandidates -lt 1) { throw 'accessibility action search bound is invalid' }
-    [int[]]$runtimeId = @($elementId.Substring(4).Split(',') | ForEach-Object { [int]$_ })
-    $walker = [System.Windows.Automation.TreeWalker]::ControlViewWalker
-    $desktopRoot = [System.Windows.Automation.AutomationElement]::RootElement
-    $searchRoot = $desktopRoot
-    $focused = [System.Windows.Automation.AutomationElement]::FocusedElement
-    $ancestor = $focused
-    while ($null -ne $ancestor) {
-      try { $ancestorCurrent = $ancestor.Current } catch { break }
-      if ($ancestorCurrent.ProcessId -eq $processId) { $searchRoot = $ancestor }
-      try { $ancestor = $walker.GetParent($ancestor) } catch { $ancestor = $null }
-    }
-    $element = $null
-    $scanned = 0
-    $node = $searchRoot
-    while ($null -ne $node -and $scanned -lt $maxCandidates) {
-      try { $current = $node.Current } catch { $current = $null }
-      if ($null -ne $current -and ($node -ne $desktopRoot -or $searchRoot -ne $desktopRoot)) {
-        $scanned += 1
-        if ($current.ProcessId -eq $processId) {
-          try { $candidateRuntimeId = @($node.GetRuntimeId()) } catch { $candidateRuntimeId = @() }
-          if ($candidateRuntimeId.Count -eq $runtimeId.Count) {
-            $matches = $true
-            for ($part = 0; $part -lt $runtimeId.Count; $part += 1) {
-              if ($candidateRuntimeId[$part] -ne $runtimeId[$part]) { $matches = $false; break }
-            }
-            if ($matches) { $element = $node; break }
-          }
-        }
-      }
-      $child = $null
-      try { $child = $walker.GetFirstChild($node) } catch { $child = $null }
-      if ($null -ne $child) {
-        $node = $child
-        continue
-      }
-      while ($null -ne $node) {
-        if ($node -eq $searchRoot) { $node = $null; break }
-        $sibling = $null
-        try { $sibling = $walker.GetNextSibling($node) } catch { $sibling = $null }
-        if ($null -ne $sibling) { $node = $sibling; break }
-        try { $node = $walker.GetParent($node) } catch { $node = $null }
-      }
-    }
-    if ($null -eq $element) { throw 'UI Automation element is no longer available within the configured search bound' }
-    $current = $element.Current
-    if ([string]$payload.action.automationId -and $current.AutomationId -ne [string]$payload.action.automationId) { throw 'UI Automation element automation id changed after observation' }
-    if ([string]$payload.action.name -and $current.Name -ne [string]$payload.action.name) { throw 'UI Automation element name changed after observation' }
-    if ([string]$payload.action.className -and $current.ClassName -ne [string]$payload.action.className) { throw 'UI Automation element class changed after observation' }
-    if ([string]$payload.action.role -and $current.ControlType.ProgrammaticName.Replace('ControlType.', '') -ne [string]$payload.action.role) { throw 'UI Automation element role changed after observation' }
-    switch ([string]$payload.action.kind) {
-      'invoke' { ([System.Windows.Automation.InvokePattern]($element.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern))).Invoke() }
-      'focus' { $element.SetFocus() }
-      'set_value' {
-        $pattern = [System.Windows.Automation.ValuePattern]($element.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern))
-        if ($pattern.Current.IsReadOnly) { throw 'UI Automation value pattern is read-only' }
-        $pattern.SetValue([string]$payload.action.value)
-      }
-      'toggle' { ([System.Windows.Automation.TogglePattern]($element.GetCurrentPattern([System.Windows.Automation.TogglePattern]::Pattern))).Toggle() }
-      'expand' { ([System.Windows.Automation.ExpandCollapsePattern]($element.GetCurrentPattern([System.Windows.Automation.ExpandCollapsePattern]::Pattern))).Expand() }
-      'collapse' { ([System.Windows.Automation.ExpandCollapsePattern]($element.GetCurrentPattern([System.Windows.Automation.ExpandCollapsePattern]::Pattern))).Collapse() }
-      'select' { ([System.Windows.Automation.SelectionItemPattern]($element.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern))).Select() }
-      'scroll_into_view' { ([System.Windows.Automation.ScrollItemPattern]($element.GetCurrentPattern([System.Windows.Automation.ScrollItemPattern]::Pattern))).ScrollIntoView() }
-      default { throw "unsupported accessibility action '$($payload.action.kind)'" }
-    }
-    if ([int]$payload.action.delayMs -gt 0) { Start-Sleep -Milliseconds ([int]$payload.action.delayMs) }
-    Write-ComputerResult @{ ok = $true }
-    break
-  }
-  default { throw "unsupported computer helper operation '$($payload.kind)'" }
-}
-`;
-
-function commandPayload(payload) {
-  return Buffer.from(JSON.stringify(payload), 'utf8').toString('base64');
-}
-
-function powershellScript(payload) {
-  return POWER_SHELL_HELPER.replace('__PAYLOAD__', commandPayload(payload));
-}
-
-async function withPowerShellFile(source, run) {
-  const directory = await mkdtemp(join(tmpdir(), 'dsh-computer-use-'));
-  const file = join(directory, 'computer.ps1');
-  try {
-    await writeFile(file, source, 'utf8');
-    return await run(file);
-  } finally {
-    await rm(directory, { recursive: true, force: true });
-  }
-}
+/**
+ * UI Automation 需要的程序集 —— 只给**名字**，由 C# 桥（`csharp.js`）解析成 GAC 里的完整路径。
+ * 三个都要：客户端接口、类型定义、以及 `AutomationElement` 依赖的 WPF 基础。
+ */
+const UIA_ASSEMBLIES = ['UIAutomationClient', 'UIAutomationTypes', 'WindowsBase'];
 
 function numericBounds(raw) {
   if (raw === null || typeof raw !== 'object'
@@ -833,20 +279,10 @@ export class WindowsComputer {
     });
   }
 
-  async run(payload, signal, stdoutMaxBytes = this.config.maxAccessibilityBytes) {
-    const shell = await this.runner.requireAny(['pwsh.exe', 'pwsh', 'powershell.exe', 'powershell'], 'Windows desktop automation', signal);
-    return withPowerShellFile(powershellScript(payload), (file) => this.runner.runJson([
-      shell,
-      '-NoLogo',
-      '-NoProfile',
-      '-NonInteractive',
-      '-File',
-      file,
-    ], { signal, stdoutMaxBytes }));
-  }
-
   async listDisplays(signal) {
-    const displays = await this.run({ kind: 'displays' }, signal);
+    const displays = await runNativeHelper(
+      this.runner, requireHelperPath(this.config), ['list-displays'], undefined, signal,
+    );
     if (!Array.isArray(displays)) throw new ComputerUseError('Windows helper returned invalid display metadata');
     return displays.map((display) => ({
       id: String(display.id),
@@ -863,15 +299,17 @@ export class WindowsComputer {
   }
 
   async perform(action, signal) {
-    const payload = { kind: 'action', action: actionPayload(action, this.config.actionDelayMs) };
+    const payload = { action: actionPayload(action, this.config.actionDelayMs) };
     // 键盘注入只认前台窗口，而本进程（经 DSH 的 Windows runner）启动时就会弹出一个控制台窗口
     // 并把前台抢走 —— 所以必须在动作进程内把目标窗口抢回来，注入才落得到正确的地方。
     if (action.focus !== undefined && action.focus !== null) payload.focus = action.focus;
-    await this.run(payload, signal);
+    await runNativeHelper(this.runner, requireHelperPath(this.config), ['action'], payload, signal);
   }
 
   async listWindows(signal) {
-    const windows = await this.run({ kind: 'windows' }, signal);
+    const windows = await runNativeHelper(
+      this.runner, requireHelperPath(this.config), ['list-windows'], undefined, signal,
+    );
     if (!Array.isArray(windows)) throw new ComputerUseError('Windows helper returned invalid window metadata');
     return windows.map((window) => ({
       id: String(window.id),
@@ -885,7 +323,13 @@ export class WindowsComputer {
 
   async focusWindow(rawTarget, signal) {
     const target = listedWindowTarget(rawTarget);
-    await this.run({ kind: 'focus', ...target }, signal);
+    // 只交身份：原生侧不比对列出时刻的旧边界（见原生 focus_window 的说明）——
+    // 传一个用不上的 bounds 只会让读的人以为边界参与校验。
+    await runNativeHelper(this.runner, requireHelperPath(this.config), ['focus-window'], {
+      id: target.id,
+      processId: target.processId,
+      title: target.title,
+    }, signal);
   }
 
   /**
@@ -939,18 +383,20 @@ export class WindowsComputer {
   }
 
   async accessibilitySnapshot(signal) {
-    const result = await this.run({
+    // 走进程内的 C# 桥（edge-js），不再 spawn PowerShell 现场编译 C#。
+    const call = await loadCSharpFile('windows-uia.cs', { references: UIA_ASSEMBLIES });
+    return call({
       kind: 'accessibility',
       maxNodes: this.config.maxAccessibilityNodes,
       maxDepth: this.config.maxAccessibilityDepth,
-    }, signal, this.config.maxAccessibilityBytes);
-    return result;
+    });
   }
 
   async performAccessibility(action, signal) {
-    await this.run({
+    const call = await loadCSharpFile('windows-uia.cs', { references: UIA_ASSEMBLIES });
+    await call({
       kind: 'accessibility-action',
       action: accessibilityActionPayload(action, this.config.actionDelayMs, this.config.maxAccessibilityActionCandidates),
-    }, signal, this.config.maxAccessibilityBytes);
+    });
   }
 }

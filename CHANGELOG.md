@@ -1,5 +1,41 @@
 # 变更记录
 
+## 0.4.0
+
+### 变更
+
+**Windows 后端整合：PowerShell 层整体移除。**
+
+原来 Windows 侧是三层语言混在一起：一段 C# 源码躺在 JS 模板字符串里，由每次 spawn 出来的
+PowerShell 用 `Add-Type` **现场编译**，再由它转发调用；而截图和找图另有一个 Rust helper。
+后果是同一件事有两份实现（提窗判据就是），改一份忘一份；每次动作都要起一个解释器进程，
+它弹出的控制台还会抢走前台。现在按能力分工：
+
+- **能直接调 Win32 的进 Rust**（`native/dsh-screen.exe`）：截图、找图、指针与键盘注入、
+  窗口枚举、提窗、显示器枚举。新增 `action` / `list-windows` / `focus-window` 三个命令，
+  提窗判据收敛到**一处**实现。
+- **必须依赖 .NET 的走 C#，但改为进程内调用**：UI Automation 的语义树与语义动作
+  放进 `src/windows-uia.cs`，由 `src/csharp.js`（通用 C# 桥，基于 edge-js）在 Node 进程内
+  编译并调用 —— 不再 spawn、不再现场编译 C#。
+
+`src/csharp.js` 是**通用桥**：只负责把任意 `.cs` 变成可调用函数（GAC 程序集路径解析、
+编译缓存、并发池化、回调包 Promise），具体能力由 `.cs` 自己按 `input.kind` 分发。
+它**不是**「一个 `.cs` 配一个 js」—— 那样每加一个 C# 能力都要再写一个桥文件。
+
+**为什么池化是必须的**：一个 edge 函数实例不能并发调用，而同一个会话里可能同时有多个
+工具调用在飞。池化保证它们不互相阻塞（实测并发两次 225ms；共用单实例会串行成两倍）。
+
+**从 SAC 项目迁移的做法**：把 edge-cs 的原生 DLL 复制到纯 ASCII 路径，再用
+`EDGE_CS_NATIVE` 指过去（那边的原注释：「解决 Windows 下非 ASCII 字符路径问题」）——
+插件可能被装在 `C:\Users\<中文用户名>\.dsh\...` 下，不这样做每次编译都会失败。
+
+### 移除
+
+- `src/windows.js` 里约 540 行的 `POWER_SHELL_HELPER`（内嵌 C# + PowerShell 脚本）、
+  `commandPayload` / `powershellScript` / `withPowerShellFile`，以及 `WindowsComputer.run()`。
+- 对 `pwsh.exe` 的探测与依赖。**平台限定的 PowerShell 路线不再存在**，
+  并由单测 `Windows backend carries no PowerShell route` 钉住。
+
 ## 0.3.0
 
 ### 新增

@@ -1,24 +1,13 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { execFile, spawn } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { promisify } from 'node:util';
 import { WindowsComputer } from '../src/windows.js';
+import { createRunner } from './win32-runner.mjs';
 
-const execute = promisify(execFile);
-const runner = {
-  async requireAny() { return 'powershell.exe'; },
-  async runJson(argv, options = {}) {
-    const { stdout, stderr } = await execute(argv[0], argv.slice(1), {
-      encoding: 'utf8',
-      maxBuffer: options.stdoutMaxBytes ?? 16 * 1024 * 1024,
-    });
-    if (stderr.trim() !== '') process.stderr.write(stderr);
-    return JSON.parse(stdout);
-  },
-};
+const runner = createRunner();
 
 const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
@@ -190,7 +179,9 @@ try {
   }, null, 2));
 } finally {
   if (Number.isInteger(windowProcess.pid)) {
-    await execute('taskkill', ['/pid', String(windowProcess.pid), '/t', '/f']).catch(() => {});
+    // 用 spawn 而不是 execFile：这里不需要等结果，也不需要捕获输出 —— 共享 runner
+    // 已经把 execFile 那条路换成了 spawn（原生 helper 的请求体要走 stdin）。
+    spawn('taskkill', ['/pid', String(windowProcess.pid), '/t', '/f'], { stdio: 'ignore' }).unref();
   }
   await rm(directory, { recursive: true, force: true });
 }

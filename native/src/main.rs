@@ -19,23 +19,33 @@
 //! 点击/拖拽/滚动的坐标就自动继续正确。
 
 use std::io::{Read, Write};
+use std::path::Path;
 use std::process::ExitCode;
 
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
-use windows::Win32::Foundation::{BOOL, FALSE, HWND, LPARAM, RECT, TRUE};
+use windows::core::PWSTR;
+use windows::Win32::Foundation::{CloseHandle, BOOL, FALSE, HWND, LPARAM, RECT, TRUE};
 use windows::Win32::Graphics::Gdi::{
     BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, EnumDisplayMonitors,
     GetDC, GetDIBits, GetMonitorInfoW, GetPixel, ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER,
     BI_RGB, CLR_INVALID, DIB_RGB_COLORS, HBITMAP, HDC, HMONITOR, MONITORINFO, MONITORINFOEXW, ROP_CODE,
 };
-use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
-use windows::Win32::UI::Input::KeyboardAndMouse::{keybd_event, SetFocus, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, VK_MENU};
+use windows::Win32::System::Threading::{
+    AttachThreadInput, GetCurrentThreadId, OpenProcess, QueryFullProcessImageNameW,
+    PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
+};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    keybd_event, mouse_event, SendInput, SetFocus, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
+    KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN,
+    MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_RIGHTDOWN,
+    MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL, MOUSE_EVENT_FLAGS, VIRTUAL_KEY, VK_MENU,
+};
 use windows::Win32::UI::HiDpi::{SetProcessDpiAwareness, PROCESS_PER_MONITOR_DPI_AWARE};
 use windows::Win32::UI::WindowsAndMessaging::{
-    BringWindowToTop, GetForegroundWindow, GetWindowRect, GetWindowTextLengthW, GetWindowTextW,
-    GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible, SetForegroundWindow, ShowWindow,
-    SW_RESTORE,
+    BringWindowToTop, EnumWindows, GetForegroundWindow, GetWindowRect, GetWindowTextLengthW,
+    GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible, SetCursorPos,
+    SetForegroundWindow, ShowWindow, SW_RESTORE,
 };
 
 /* ------------------------------ 通信协议 ------------------------------ */
@@ -330,6 +340,110 @@ struct FindImageResponse {
     /// 为控制运算量而采用的降采样倍率（1 = 原分辨率）。坐标误差不超过这个值。
     scale: u32,
     elapsed_ms: u64,
+}
+
+/* ------------------------------ 输入注入与窗口 ------------------------------ */
+
+/// `action` 命令的请求：一个动作 + 可选的目标窗口。
+///
+/// 与截图同一套聚焦逻辑：键盘注入只落得到前台窗口，而"提窗 + 注入"必须在**同一次**
+/// 进程调用里完成 —— 分两次时第二次 spawn 冒出来的控制台窗口会抢走前台，
+/// 按键就落到那个控制台去了（实测踩过）。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ActionRequest {
+    #[serde(default)]
+    focus: Option<FocusTarget>,
+    action: ActionSpec,
+}
+
+/// 六种桌面动作。变体名与字段名都按 camelCase 反序列化，
+/// 与 JS 侧 `actionPayload` 构造的 payload 一一对应。
+#[derive(Debug, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+enum ActionSpec {
+    #[serde(rename_all = "camelCase")]
+    Move {
+        x: i32,
+        y: i32,
+        #[serde(default)]
+        delay_ms: i64,
+    },
+    #[serde(rename_all = "camelCase")]
+    Click {
+        x: i32,
+        y: i32,
+        button: String,
+        click_count: i32,
+        #[serde(default)]
+        delay_ms: i64,
+    },
+    #[serde(rename_all = "camelCase")]
+    Drag {
+        from_x: i32,
+        from_y: i32,
+        to_x: i32,
+        to_y: i32,
+        duration_ms: i32,
+        #[serde(default)]
+        delay_ms: i64,
+    },
+    #[serde(rename_all = "camelCase")]
+    Scroll {
+        x: i32,
+        y: i32,
+        delta_x: i32,
+        delta_y: i32,
+        #[serde(default)]
+        delay_ms: i64,
+    },
+    #[serde(rename_all = "camelCase")]
+    Type {
+        text: String,
+        #[serde(default)]
+        delay_ms: i64,
+    },
+    #[serde(rename_all = "camelCase")]
+    Key {
+        key: i32,
+        modifiers: Vec<i32>,
+        #[serde(default)]
+        delay_ms: i64,
+    },
+}
+
+/// 一个可见的顶层窗口。字段与 JS 侧 `listWindows` 的期望一致。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WindowRecord {
+    /// 窗口句柄的十进制字符串 —— JS 侧按字符串传递，避免在 32 位平台上丢精度。
+    id: String,
+    title: String,
+    process_id: u32,
+    /// 进程名（不含 `.exe`）。取不到时是空串，与旧实现的行为一致。
+    application: String,
+    /// 是不是当前前台窗口。
+    focused: bool,
+    bounds: Region,
+}
+
+/// `focus-window` 命令的请求。
+///
+/// 只带身份（句柄 / 进程 / 标题），**不带列出时刻的旧边界** —— 窗口被移动过
+/// 并不代表换了一个窗口，而拿旧边界去校验会让一次本该成功的聚焦直接失败。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FocusRequest {
+    id: String,
+    process_id: i32,
+    title: String,
+}
+
+/// `action` / `focus-window` 这类"做完了"的命令的回执。
+/// 宿主侧只检查调用有没有失败，但 stdout 必须是合法 JSON —— 否则 runJson 解析会报错。
+#[derive(Debug, Serialize)]
+struct ActionOutcome {
+    ok: bool,
 }
 
 /// 从 stdin 读一个 base64(UTF8 JSON) 请求体 —— 与截图那条命令同一套协议。
@@ -827,6 +941,334 @@ fn matches_window(handle: HWND, target: &FocusTarget) -> bool {
     }
 }
 
+/* ------------------------------ 桌面动作 ------------------------------ */
+
+/// `delayMs`：动作**之后**的等待，给界面留出反应时间。
+fn sleep_ms(milliseconds: i64) {
+    if milliseconds > 0 {
+        std::thread::sleep(std::time::Duration::from_millis(milliseconds as u64));
+    }
+}
+
+/// 虚拟键码：宿主侧已经把按键名映射成码，这里只守住取值范围。
+fn virtual_key(code: i32) -> Result<VIRTUAL_KEY, String> {
+    if !(0..=0xFF).contains(&code) {
+        return Err(format!("虚拟键码超出范围：{code}"));
+    }
+    Ok(VIRTUAL_KEY(code as u16))
+}
+
+/// 鼠标键名 →（按下标志, 抬起标志）。
+fn mouse_flags(button: &str) -> Result<(MOUSE_EVENT_FLAGS, MOUSE_EVENT_FLAGS), String> {
+    match button {
+        "left" => Ok((MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP)),
+        "right" => Ok((MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP)),
+        "middle" => Ok((MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP)),
+        other => Err(format!("不支持的鼠标键 '{other}'")),
+    }
+}
+
+/// 指针移到虚拟桌面坐标（多屏时允许负值）。
+fn pointer_move(x: i32, y: i32) -> Result<(), String> {
+    unsafe { SetCursorPos(x, y) }.map_err(|e| format!("SetCursorPos({x}, {y}) 失败：{e}"))
+}
+
+/// 点击：先把指针移到位，再按 `click_count` 次按下 / 抬起。
+fn click_at(x: i32, y: i32, button: &str, click_count: i32) -> Result<(), String> {
+    let (down, up) = mouse_flags(button)?;
+    pointer_move(x, y)?;
+    unsafe {
+        for _ in 0..click_count.max(0) {
+            mouse_event(down, 0, 0, 0, 0);
+            mouse_event(up, 0, 0, 0, 0);
+        }
+    }
+    Ok(())
+}
+
+/// 拖拽：按下左键，在 `duration_ms` 内**分步**插值移动到目标，最后一定抬起左键。
+///
+/// 分步而不是瞬移：画布类程序只认中间的移动轨迹。步数上限 120、时长上限 10 秒。
+/// **无论中途出什么错，左键都必须抬起来** —— 否则整个桌面会一直处于"按住"状态。
+fn drag(from_x: i32, from_y: i32, to_x: i32, to_y: i32, duration_ms: i32) -> Result<(), String> {
+    pointer_move(from_x, from_y)?;
+    unsafe { mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0) };
+    let result = (|| -> Result<(), String> {
+        let duration = duration_ms.clamp(0, 10_000);
+        let steps = ((f64::from(duration) / 16.0).ceil() as i32).clamp(1, 120);
+        let step_delay = duration / steps;
+        for index in 1..=steps {
+            let fraction = f64::from(index) / f64::from(steps);
+            let x = (f64::from(from_x) + f64::from(to_x - from_x) * fraction).round() as i32;
+            let y = (f64::from(from_y) + f64::from(to_y - from_y) * fraction).round() as i32;
+            if step_delay > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(step_delay as u64));
+            }
+            unsafe { SetCursorPos(x, y) }
+                .map_err(|e| format!("拖拽中 SetCursorPos({x}, {y}) 失败：{e}"))?;
+        }
+        Ok(())
+    })();
+    unsafe { mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0) };
+    result
+}
+
+/// 滚轮：指针先移到位，再分别投递纵向 / 横向滚动。
+/// `delta` 单位是 WHEEL_DELTA（120 = 一格），与宿主侧一致。
+fn scroll_at(x: i32, y: i32, delta_x: i32, delta_y: i32) -> Result<(), String> {
+    pointer_move(x, y)?;
+    unsafe {
+        if delta_y != 0 {
+            mouse_event(MOUSEEVENTF_WHEEL, 0, 0, delta_y, 0);
+        }
+        if delta_x != 0 {
+            mouse_event(MOUSEEVENTF_HWHEEL, 0, 0, delta_x, 0);
+        }
+    }
+    Ok(())
+}
+
+/// 一个键盘输入事件（按下或抬起）。
+fn key_input(scan: u16, flags: KEYBD_EVENT_FLAGS) -> INPUT {
+    INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: VIRTUAL_KEY(0),
+                wScan: scan,
+                dwFlags: flags,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    }
+}
+
+/// 用 `KEYEVENTF_UNICODE` 投递文本：不经过键盘布局，中文与符号都能原样送达。
+///
+/// **所有字符拼成一次 `SendInput`**：逐字符调用会给别的输入留下插进字符之间的机会。
+/// 投递数量对不上就报错，不静默吞掉。
+fn type_text(text: &str) -> Result<(), String> {
+    let mut inputs: Vec<INPUT> = Vec::new();
+    for character in text.chars() {
+        // 增补平面字符编码成一对代理，两个 UTF-16 单元都要发。
+        let mut buffer = [0u16; 2];
+        for unit in character.encode_utf16(&mut buffer).iter() {
+            inputs.push(key_input(*unit, KEYEVENTF_UNICODE));
+            inputs.push(key_input(
+                *unit,
+                KEYBD_EVENT_FLAGS(KEYEVENTF_UNICODE.0 | KEYEVENTF_KEYUP.0),
+            ));
+        }
+    }
+    if inputs.is_empty() {
+        return Ok(());
+    }
+    let expected = inputs.len();
+    let sent = unsafe { SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) };
+    if sent as usize != expected {
+        return Err(format!("SendInput 只投递了 {sent} / {expected} 个键盘事件"));
+    }
+    Ok(())
+}
+
+/// 按一下键，前后夹住修饰键。修饰键**逆序**抬起，且无论主键那步成不成功都要抬 ——
+/// 否则会留下一个卡住的 Ctrl。
+fn tap_key(key: i32, modifiers: &[i32]) -> Result<(), String> {
+    let mut pressed: Vec<VIRTUAL_KEY> = Vec::new();
+    let result = (|| -> Result<(), String> {
+        for code in modifiers {
+            let modifier = virtual_key(*code)?;
+            unsafe { keybd_event(modifier.0 as u8, 0, KEYBD_EVENT_FLAGS(0), 0) };
+            pressed.push(modifier);
+        }
+        let vk = virtual_key(key)?;
+        unsafe {
+            keybd_event(vk.0 as u8, 0, KEYBD_EVENT_FLAGS(0), 0);
+            keybd_event(vk.0 as u8, 0, KEYEVENTF_KEYUP, 0);
+        }
+        Ok(())
+    })();
+    for modifier in pressed.iter().rev() {
+        unsafe { keybd_event(modifier.0 as u8, 0, KEYEVENTF_KEYUP, 0) };
+    }
+    result
+}
+
+/// 执行一个动作，六种分支都把 `delay_ms` 放在动作之后等待。
+fn perform_action(spec: &ActionSpec) -> Result<(), String> {
+    match spec {
+        ActionSpec::Move { x, y, delay_ms } => {
+            pointer_move(*x, *y)?;
+            sleep_ms(*delay_ms);
+        }
+        ActionSpec::Click {
+            x,
+            y,
+            button,
+            click_count,
+            delay_ms,
+        } => {
+            click_at(*x, *y, button, *click_count)?;
+            sleep_ms(*delay_ms);
+        }
+        ActionSpec::Drag {
+            from_x,
+            from_y,
+            to_x,
+            to_y,
+            duration_ms,
+            delay_ms,
+        } => {
+            drag(*from_x, *from_y, *to_x, *to_y, *duration_ms)?;
+            sleep_ms(*delay_ms);
+        }
+        ActionSpec::Scroll {
+            x,
+            y,
+            delta_x,
+            delta_y,
+            delay_ms,
+        } => {
+            scroll_at(*x, *y, *delta_x, *delta_y)?;
+            sleep_ms(*delay_ms);
+        }
+        ActionSpec::Type { text, delay_ms } => {
+            type_text(text)?;
+            sleep_ms(*delay_ms);
+        }
+        ActionSpec::Key {
+            key,
+            modifiers,
+            delay_ms,
+        } => {
+            tap_key(*key, modifiers)?;
+            sleep_ms(*delay_ms);
+        }
+    }
+    Ok(())
+}
+
+/// `action` 命令：给了 focus 就先按身份提窗，再执行动作。
+///
+/// 提窗与注入挤在同一次进程调用里 —— 分两次时，第二次 spawn 冒出来的控制台窗口
+/// 会抢走前台，按键就落到控制台去了（实测踩过）。
+fn run_action(request: &ActionRequest) -> Result<(), String> {
+    if let Some(target) = request.focus.as_ref() {
+        focus_window(target)?;
+    }
+    perform_action(&request.action)
+}
+
+/* ------------------------------ 窗口枚举 ------------------------------ */
+
+/// 读窗口标题；取不到就是空串，调用方按"没有标题"处理。
+fn window_title(handle: HWND) -> String {
+    unsafe {
+        let length = GetWindowTextLengthW(handle);
+        if length < 1 {
+            return String::new();
+        }
+        let mut buffer = vec![0u16; length as usize + 1];
+        let written = GetWindowTextW(handle, &mut buffer);
+        if written < 1 {
+            return String::new();
+        }
+        utf16_z(&buffer[..written as usize])
+    }
+}
+
+/// 进程名（不含扩展名）。取不到就返回空串：这只是给模型看的提示信息，
+/// 不值得为它让整次枚举失败。
+fn process_name(process_id: u32) -> String {
+    unsafe {
+        let Ok(handle) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, process_id) else {
+            return String::new();
+        };
+        let mut buffer = [0u16; 512];
+        let mut size = buffer.len() as u32;
+        let queried =
+            QueryFullProcessImageNameW(handle, PROCESS_NAME_WIN32, PWSTR(buffer.as_mut_ptr()), &mut size);
+        let _ = CloseHandle(handle);
+        if queried.is_err() {
+            return String::new();
+        }
+        // 只留文件名并去掉 .exe，与 .NET 的 Process.ProcessName 语义一致。
+        Path::new(&utf16_z(&buffer[..size as usize]))
+            .file_stem()
+            .map(|stem| stem.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    }
+}
+
+/// `EnumWindows` 的回调。回调不能捕获环境，待填的列表通过 `LPARAM` 递进来。
+///
+/// 过滤条件：不可见 / 最小化 / 无标题 / 边界无效的窗口全部跳过，
+/// 否则列表里会塞满没有任何信息的空壳窗口。
+unsafe extern "system" fn collect_visible_window(handle: HWND, parameter: LPARAM) -> BOOL {
+    let records = &mut *(parameter.0 as *mut Vec<WindowRecord>);
+    if !IsWindowVisible(handle).as_bool() || IsIconic(handle).as_bool() {
+        return TRUE;
+    }
+    let title = window_title(handle);
+    if title.is_empty() {
+        return TRUE;
+    }
+    let mut rect = RECT::default();
+    if GetWindowRect(handle, &mut rect).is_err() || rect.right <= rect.left || rect.bottom <= rect.top {
+        return TRUE;
+    }
+    // 注意：GetWindowThreadProcessId 的**返回值是线程 id**，进程 id 从第二个参数出来。
+    // 想拿进程 id 就必须传 out 参数（`focus_window` 那边要的是线程 id，所以传 None）。
+    let mut process_id: u32 = 0;
+    GetWindowThreadProcessId(handle, Some(&mut process_id));
+    if process_id == 0 {
+        return TRUE;
+    }
+    records.push(WindowRecord {
+        id: (handle.0 as isize).to_string(),
+        title,
+        process_id,
+        application: process_name(process_id),
+        focused: false,
+        bounds: Region {
+            x: rect.left,
+            y: rect.top,
+            width: rect.right - rect.left,
+            height: rect.bottom - rect.top,
+        },
+    });
+    TRUE
+}
+
+/// 枚举可见的顶层窗口，并标出哪一个是当前前台窗口。
+fn list_windows() -> Result<Vec<WindowRecord>, String> {
+    unsafe {
+        let mut records: Vec<WindowRecord> = Vec::new();
+        EnumWindows(
+            Some(collect_visible_window),
+            LPARAM(&mut records as *mut Vec<WindowRecord> as isize),
+        )
+        .map_err(|e| format!("EnumWindows 失败：{e}"))?;
+        let foreground = GetForegroundWindow().0 as isize;
+        for record in records.iter_mut() {
+            record.focused = record.id == foreground.to_string();
+        }
+        Ok(records)
+    }
+}
+
+/// `focus-window` 命令：把窗口提到前台。
+/// 复用截图那条路径的同一个 `focus_window` —— 一处实现，不会出现"改了这份忘了那份"。
+fn focus_by_request(request: &FocusRequest) -> Result<(), String> {
+    focus_window(&FocusTarget {
+        handle: request.id.clone(),
+        process_id: request.process_id,
+        title: request.title.clone(),
+    })?;
+    Ok(())
+}
+
 fn capture(request: &ScreenshotRequest) -> Result<ScreenshotResponse, String> {
     // DPI 感知必须在任何坐标查询之前设置：
     // 否则在缩放显示器（125%/150%）上，系统回报的是「逻辑像素」，
@@ -1259,7 +1701,39 @@ fn main() -> ExitCode {
             },
             Err(e) => fail(e),
         },
-        "" => fail("用法：dsh-screen <list-displays|screenshot|find-image|probe-pixels> [--x N --y N --width N --height N]"),
-        other => fail(format!("未知命令 '{other}'（支持 list-displays / screenshot / find-image / probe-pixels）")),
+        "action" => match read_body::<ActionRequest>() {
+            Ok(request) => match run_action(&request) {
+                Ok(()) => match write_json(&ActionOutcome { ok: true }) {
+                    Ok(()) => ExitCode::SUCCESS,
+                    Err(e) => fail(e),
+                },
+                Err(e) => fail(e),
+            },
+            Err(e) => fail(e),
+        },
+        "list-windows" => match list_windows() {
+            Ok(windows) => match write_json(&windows) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => fail(e),
+            },
+            Err(e) => fail(e),
+        },
+        "focus-window" => match read_body::<FocusRequest>() {
+            Ok(request) => match focus_by_request(&request) {
+                Ok(()) => match write_json(&ActionOutcome { ok: true }) {
+                    Ok(()) => ExitCode::SUCCESS,
+                    Err(e) => fail(e),
+                },
+                Err(e) => fail(e),
+            },
+            Err(e) => fail(e),
+        },
+        "" => fail(
+            "用法：dsh-screen <list-displays|screenshot|find-image|action|list-windows|focus-window|probe-pixels> \
+             [--x N --y N --width N --height N]",
+        ),
+        other => fail(format!(
+            "未知命令 '{other}'（支持 list-displays / screenshot / find-image / action / list-windows / focus-window / probe-pixels）"
+        )),
     }
 }

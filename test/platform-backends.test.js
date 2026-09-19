@@ -394,22 +394,13 @@ test('macOS pointer adapter uses the bundled CoreGraphics helper', async () => {
   assert.match(helper, /post\(mouseEvent\('drag', point, 'left'\)\)/);
   assert.match(helper, /post\(mouseEvent\('move', point, 'left'\)\)/);
 });
-test('Windows focus revalidates complete listed window identity', async () => {
+test('Windows focus goes through the native helper with identity only', async () => {
+  let args;
   let payload;
   const runner = {
-    async requireAny() { return 'powershell.exe'; },
-    async runJson(argv) {
-      const script = await readFile(argv.at(-1), 'utf8');
-      assert.match(script, /EnumWindows\(/);
-      assert.match(script, /IsWindowVisible\(handle\)/);
-      assert.match(script, /IsIconic\(handle\)/);
-       assert.match(script, /ConvertTo-Json -InputObject \$value/);
-       assert.match(script, /\$items = @\(\[DshComputer\.Native\]::VisibleWindows\(\)/);
-       assert.match(script, /WindowMatches\(long rawHandle/);
-      assert.match(script, /requested window no longer matches its listed identity/);
-      const encoded = script.match(/FromBase64String\('([^']+)'\)/)?.[1];
-      assert.notEqual(encoded, undefined);
-      payload = JSON.parse(Buffer.from(encoded, 'base64').toString('utf8'));
+    async runJson(argv, options) {
+      args = argv;
+      payload = JSON.parse(Buffer.from(options.stdin, 'base64').toString('utf8'));
       return { ok: true };
     },
   };
@@ -418,49 +409,23 @@ test('Windows focus revalidates complete listed window identity', async () => {
     id: '12345', processId: 123, title: 'Observed Window',
     bounds: { x: 10, y: 20, width: 800, height: 600 },
   });
-  assert.deepEqual(payload, {
-    kind: 'focus', id: '12345', processId: 123, title: 'Observed Window',
-    bounds: { x: 10, y: 20, width: 800, height: 600 },
-  });
+  // 提窗走原生 helper，不再是 PowerShell 脚本。
+  assert.equal(args.at(-1), 'focus-window');
+  // **只交身份，不带列出时刻的旧边界**：窗口被移动过并不代表换了一个窗口，
+  // 而拿旧边界去校验会让一次本该成功的聚焦直接失败。边界由原生侧在聚焦之后实时读出。
+  assert.deepEqual(payload, { id: '12345', processId: 123, title: 'Observed Window' });
   await assert.rejects(() => computer.focusWindow({ id: '12345' }), /requires a listed native window record/);
 });
 
-test('Windows semantic actions use their dedicated candidate search bound', async () => {
-  let payload;
-  const runner = {
-    async requireAny() { return 'powershell.exe'; },
-    async runJson(argv) {
-      const script = await readFile(argv.at(-1), 'utf8');
-      assert.doesNotMatch(script, /FindAll\(/);
-      assert.match(script, /\$scanned -lt \$maxCandidates/);
-      assert.match(script, /public static void Move\(int x, int y\)/);
-       assert.match(script, /'move' \{ \[DshComputer\.Native\]::Move\(/);
-       assert.doesNotMatch(script, /'move' \{ \[DshComputer\.Native\]::SetCursorPos\(/);
-       assert.match(script, /if \(!SetCursorPos\(x, y\)\)/);
-      assert.match(script, /Math\.Ceiling\(duration \/ 16\.0\)/);
-      const encoded = script.match(/FromBase64String\('([^']+)'\)/)?.[1];
-      assert.notEqual(encoded, undefined);
-      payload = JSON.parse(Buffer.from(encoded, 'base64').toString('utf8'));
-      return { ok: true };
-    },
-  };
-  const computer = new WindowsComputer(runner, {
-    ...config,
-    maxAccessibilityNodes: 2,
-    maxAccessibilityActionCandidates: 777,
-  });
-  await computer.performAccessibility({
-    kind: 'focus',
-    elementId: 'uia:7,900,42',
-    element: {
-      process_id: 900,
-      automation_id: 'Target',
-      name: 'Target input',
-      class_name: 'TextBox',
-      role: 'Edit',
-    },
-  });
-  assert.equal(payload.action.maxCandidates, 777);
-  assert.equal(payload.action.processId, 900);
-  assert.equal(payload.action.kind, 'focus');
+test('Windows backend carries no PowerShell route', async () => {
+  // 这是一条**架构约束**，不是实现细节断言：平台限定的 PowerShell 路线已整体移除
+  // （脚本常量、shell 探测、运行时 Add-Type 编译 C# 都不许回来），谁加回来这条就挂。
+  //
+  // 至于语义动作的行为（候选搜索上限、施加前的身份复核），那些在真机 smoke 里验证 ——
+  // 拿正则去匹配 C# 源码只能证明"某个字符串在文件里"，证明不了行为，那种断言没有意义。
+  const windows = await readFile(new URL('../src/windows.js', import.meta.url), 'utf8');
+  assert.doesNotMatch(windows, /POWER_SHELL_HELPER/);
+  assert.doesNotMatch(windows, /requireAny\(\['pwsh/);
+  assert.doesNotMatch(windows, /Add-Type/);
+  assert.doesNotMatch(windows, /\.ps1/);
 });

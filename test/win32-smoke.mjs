@@ -1,19 +1,7 @@
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import { WindowsComputer } from '../src/windows.js';
+import { createRunner } from './win32-runner.mjs';
 
-const execute = promisify(execFile);
-const runner = {
-  async requireAny() { return 'powershell.exe'; },
-  async runJson(argv, options = {}) {
-    const { stdout, stderr } = await execute(argv[0], argv.slice(1), {
-      encoding: 'utf8',
-      maxBuffer: options.stdoutMaxBytes ?? 16 * 1024 * 1024,
-    });
-    if (stderr.trim() !== '') process.stderr.write(stderr);
-    return JSON.parse(stdout);
-  },
-};
+const runner = createRunner();
 
 const computer = new WindowsComputer(runner, {
   screenshotMaxDimension: 1280,
