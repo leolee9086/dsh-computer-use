@@ -4,6 +4,7 @@ import { accessibilityElementById, findAccessibilityElements } from './semantics
 const OBSERVATION_TOOLS = new Set([
   'computer_accessibility',
   'computer_find',
+  'computer_find_image',
   'computer_screenshot',
   'computer_status',
 ]);
@@ -11,6 +12,7 @@ const OBSERVATION_TOOLS = new Set([
 const TOOL_NAMES = new Set([
   ...OBSERVATION_TOOLS,
   'computer_click',
+  'computer_click_image',
   'computer_drag',
   'computer_element',
   'computer_key',
@@ -18,6 +20,13 @@ const TOOL_NAMES = new Set([
   'computer_type',
   'computer_windows',
 ]);
+
+/**
+ * `computer_click_image` 的默认相似度门槛。
+ * 比 `computer_find_image` 的 0.9 更严：find 只是"我看它像"，错了无非白看一眼；
+ * click 是"我按下去了"，错了就是点错东西 —— 而且它点的是算法算出来的那个位置。
+ */
+const CLICK_IMAGE_THRESHOLD = 0.95;
 
 const DEFAULTS = Object.freeze({
   observeApproval: 'ask',
@@ -461,6 +470,7 @@ export function apply(ctx, rawConfig) {
           height: { type: 'number', description: 'Optional capture region height in pixels (>= 1).' },
           scale: { type: 'number', description: 'Optional zoom factor applied after cropping (1 = native pixels, 2 = magnified 2x). Useful for reading small text; the image is still capped by the configured max dimension.' },
           window_id: { type: 'string', description: 'Optional window_id from computer_windows. Raises that window to the foreground and captures the bounds it actually has at that moment, in one step — use it to capture a specific window even when it is covered. Give it alone (no x/y/width/height and no display_id).' },
+          save_to: { type: 'string', description: 'Optional file path to also write the captured PNG to. Use it to keep a template for computer_find_image: these are the original PNG bytes, not the re-encoded copy attached for viewing, so matching against it keeps full fidelity.' },
         },
       },
       async (rawArgs, exec) => {
@@ -469,6 +479,7 @@ export function apply(ctx, rawConfig) {
         const region = optionalRegion(args);
         const scale = optionalFiniteNumber(args, 'scale');
         const windowId = optionalNonBlankString(args, 'window_id');
+        const saveTo = optionalNonBlankString(args, 'save_to');
         if (scale !== undefined && scale <= 0) throw new Error('scale must be greater than 0');
         if (windowId !== undefined && (region !== undefined || displayId !== undefined)) {
           throw new Error('window_id captures that window on its own; drop x, y, width, height and display_id');
@@ -486,12 +497,13 @@ export function apply(ctx, rawConfig) {
             displayId,
             region: region ?? null,
             scale: scale ?? null,
+            saveTo: saveTo ?? null,
           }, exec.signal);
         } else {
           const record = freshWindow(observations, exec, windowId, config);
           capture = await computer(nested).captureWindow(
             record.nativeWindow,
-            { scale: scale ?? null },
+            { scale: scale ?? null, saveTo: saveTo ?? null },
             exec.signal,
           );
           // 聚焦改变了前台，此前所有截图、语义快照与窗口记录都不再可信。
@@ -536,6 +548,137 @@ export function apply(ctx, rawConfig) {
       },
     ));
   });
+
+  registerTool(ctx.tools, textTool(
+    'computer_find_image',
+    'Find a small image (a template PNG) on screen and report where it is. '
+    + 'The template is a file path written earlier by computer_screenshot with save_to. '
+    + 'Matching is pixel-based with a colour tolerance, so it also works on surfaces that expose no accessibility tree '
+    + '(canvas, games, remote desktops). '
+    + 'Not finding it is a normal result (found:false), not an error. '
+    + 'Passing window_id raises that window and searches the bounds it actually has — that moves the foreground, so that form counts as desktop control.',
+    {
+      type: 'object', additionalProperties: false,
+      required: ['template'],
+      properties: {
+        template: { type: 'string', description: 'Path to a PNG template, e.g. written earlier with computer_screenshot save_to.' },
+        window_id: { type: 'string', description: 'Optional window_id from computer_windows. List again right before use: these ids expire. Raises that window and searches inside the bounds it actually has, in one step. Give it alone — no x/y/width/height and no display_id.' },
+        display_id: { type: 'string', description: 'Optional display id from computer_status. Omit for the whole virtual desktop.' },
+        x: { type: 'number', description: 'Optional search region left edge, in virtual-desktop pixels (may be negative). Give x, y, width and height together.' },
+        y: { type: 'number', description: 'Optional search region top edge, in virtual-desktop pixels (may be negative).' },
+        width: { type: 'number', description: 'Optional search region width in pixels.' },
+        height: { type: 'number', description: 'Optional search region height in pixels.' },
+        threshold: { type: 'number', description: 'Minimum similarity to count as a match, 0..1 (default 0.9). Similarity is the fraction of pixels within the colour tolerance — 0.9 means nine in ten pixels matched.' },
+        tolerance: { type: 'number', description: 'Per-channel colour tolerance, 0..255 (default 12). Absorbs anti-aliasing and small rendering differences without treating a neighbouring grey button as a match.' },
+      },
+    },
+    async (rawArgs, exec) => {
+      const args = object(rawArgs);
+      const templatePath = requiredString(args, 'template');
+      const windowId = optionalNonBlankString(args, 'window_id');
+      const displayId = optionalNonBlankString(args, 'display_id');
+      const region = optionalRegion(args);
+      if (windowId !== undefined && (region !== undefined || displayId !== undefined)) {
+        throw new Error('window_id searches that window on its own; drop x, y, width, height and display_id');
+      }
+      const threshold = optionalFiniteNumber(args, 'threshold');
+      const tolerance = optionalFiniteNumber(args, 'tolerance');
+      if (threshold !== undefined && !(threshold > 0 && threshold <= 1)) throw new Error('threshold must be within (0, 1]');
+      if (tolerance !== undefined && (tolerance < 0 || tolerance > 255)) throw new Error('tolerance must be within [0, 255]');
+      let focus = null;
+      if (windowId !== undefined) {
+        const record = freshWindow(observations, exec, windowId, config);
+        focus = {
+          handle: record.nativeWindow.id,
+          processId: record.nativeWindow.processId,
+          title: record.nativeWindow.title,
+        };
+      }
+      const result = await computer(ctx).findImage({
+        templatePath,
+        displayId,
+        region: region ?? null,
+        threshold: threshold ?? null,
+        tolerance: tolerance ?? null,
+        focus,
+      }, exec.signal);
+      if (focus !== null) consumeAllObservations(observations, exec);
+      return describeJson(result);
+    },
+  ));
+
+  registerTool(ctx.tools, textTool(
+    'computer_click_image',
+    'Find a template image inside one window and click it — but only when it is found in exactly one place. '
+    + 'This refuses to act on ambiguity: if the template matches more than once, or nothing meets the confidence bar, '
+    + 'nothing is clicked and the candidates are reported instead. '
+    + 'Raising the window changes the foreground, so this counts as desktop control.',
+    {
+      type: 'object', additionalProperties: false,
+      required: ['template', 'window_id'],
+      properties: {
+        template: { type: 'string', description: 'Path to a PNG template, e.g. written earlier with computer_screenshot save_to.' },
+        window_id: { type: 'string', description: 'Required: a window_id from computer_windows. List again right before use — these ids expire. The window is raised and the search is confined to its bounds, so uniqueness is judged inside that window rather than across the whole desktop.' },
+        threshold: { type: 'number', description: 'Minimum similarity, 0..1 (default 0.95 — stricter than computer_find_image, because this one actually clicks).' },
+        tolerance: { type: 'number', description: 'Per-channel colour tolerance, 0..255 (default 12).' },
+        button: { type: 'string', enum: ['left', 'middle', 'right'] },
+        clicks: { type: 'number', enum: [1, 2] },
+      },
+    },
+    async (rawArgs, exec) => {
+      const args = object(rawArgs);
+      const templatePath = requiredString(args, 'template');
+      const windowId = requiredString(args, 'window_id');
+      const threshold = optionalFiniteNumber(args, 'threshold') ?? CLICK_IMAGE_THRESHOLD;
+      const tolerance = optionalFiniteNumber(args, 'tolerance');
+      if (!(threshold > 0 && threshold <= 1)) throw new Error('threshold must be within (0, 1]');
+      if (tolerance !== undefined && (tolerance < 0 || tolerance > 255)) throw new Error('tolerance must be within [0, 255]');
+      const button = enumValue(args, 'button', ['left', 'middle', 'right'], 'left');
+      const clickCount = enumValue(args, 'clicks', [1, 2], 1);
+
+      const record = freshWindow(observations, exec, windowId, config);
+      const focus = {
+        handle: record.nativeWindow.id,
+        processId: record.nativeWindow.processId,
+        title: record.nativeWindow.title,
+      };
+      const result = await computer(ctx).findImage({
+        templatePath,
+        displayId: undefined,
+        region: null,
+        threshold,
+        tolerance: tolerance ?? null,
+        focus,
+      }, exec.signal);
+      // 提窗改变了前台，此前所有截图与语义快照都不再可信。
+      consumeAllObservations(observations, exec);
+
+      // ---- 硬约束：找得到、且**只找到一处**，两个条件都要 ----
+      // 不满足就什么都不做，把情况报回去。这里刻意不做"那就取最好的那个"的降级：
+      // 一个会自己拿主意去点的工具，比一个不会点的工具危险得多。
+      if (result.found !== true || result.matchCount !== 1) {
+        const spots = Array.isArray(result.matches) && result.matches.length > 0
+          ? `匹配位置：${result.matches.map((spot) => `(${spot.x}, ${spot.y}) ${Number(spot.score).toFixed(3)}`).join('、')}。`
+          : '';
+        const why = result.found !== true
+          ? '没有找到达到门槛的匹配'
+          : `找到 ${result.matchCount} 处匹配，无法确定该点哪一个`;
+        return `未点击：${why}（门槛 ${threshold}，窗口「${record.window.title}」）。${spots}`
+          + '没有改动任何界面。可以把搜索缩到更小的区域、换一张更有辨识度的模板，或先用 computer_find_image 看清楚情况。';
+      }
+
+      const spot = result.matches[0];
+      const point = {
+        x: spot.x + Math.floor(Number(result.templateWidth) / 2),
+        y: spot.y + Math.floor(Number(result.templateHeight) / 2),
+      };
+      await computer(ctx).perform({ kind: 'click', point, button, clickCount, focus }, exec.signal);
+      consumeAllObservations(observations, exec);
+      return `已点击窗口「${record.window.title}」里唯一匹配到的那一处：屏幕坐标 (${point.x}, ${point.y})，`
+        + `相似度 ${Number(spot.score).toFixed(3)}（模板 ${result.templateWidth}×${result.templateHeight}，左上角在 (${spot.x}, ${spot.y})）。`
+        + ' Capture a new screenshot before the next consequential action.';
+    },
+  ));
 
   registerTool(ctx.tools, textTool(
     'computer_status',

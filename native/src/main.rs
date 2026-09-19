@@ -30,8 +30,8 @@ use windows::Win32::Graphics::Gdi::{
     BI_RGB, CLR_INVALID, DIB_RGB_COLORS, HBITMAP, HDC, HMONITOR, MONITORINFO, MONITORINFOEXW, ROP_CODE,
 };
 use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
+use windows::Win32::UI::Input::KeyboardAndMouse::{keybd_event, SetFocus, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, VK_MENU};
 use windows::Win32::UI::HiDpi::{SetProcessDpiAwareness, PROCESS_PER_MONITOR_DPI_AWARE};
-use windows::Win32::UI::Input::KeyboardAndMouse::SetFocus;
 use windows::Win32::UI::WindowsAndMessaging::{
     BringWindowToTop, GetForegroundWindow, GetWindowRect, GetWindowTextLengthW, GetWindowTextW,
     GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible, SetForegroundWindow, ShowWindow,
@@ -210,13 +210,6 @@ fn list_displays() -> Result<Vec<DisplayInfo>, String> {
         .collect())
 }
 
-/// 虚拟桌面矩形 = 所有显示器矩形的并集。
-/// 自己求并集而不是查某个「VirtualScreen」属性：并集是定义，不会因 API 差异而变。
-fn virtual_screen() -> Result<Region, String> {
-    let displays = list_displays()?;
-    union_of(&displays)
-}
-
 fn union_of(displays: &[DisplayInfo]) -> Result<Region, String> {
     let left = displays.iter().map(|d| d.bounds.x).min().ok_or("没有显示器")?;
     let top = displays.iter().map(|d| d.bounds.y).min().ok_or("没有显示器")?;
@@ -234,6 +227,445 @@ fn find_display(id: &str) -> Result<DisplayInfo, String> {
         .ok_or_else(|| format!("找不到显示器 '{id}'"))
 }
 
+/// 决定这次要操作哪块屏幕：给了 region 就用它（虚拟桌面坐标，允许负值：副屏可能在原点左侧）；
+/// 否则给了 display_id 就用那块屏的整屏；两者都没有则返回 `None`，由调用方填整个虚拟桌面。
+///
+/// 抽出来是因为截图与找图（find-image）走的是同一套决策 —— 两处各写一遍迟早会走偏，
+/// 而「找图找错屏」这种错误在结果里看不出来（它会认真地给你另一个屏幕上的坐标）。
+fn resolve_region(
+    region: Option<&Region>,
+    display_id: Option<&str>,
+) -> Result<(Option<Region>, Option<String>), String> {
+    match (region, display_id) {
+        (Some(r), _) => Ok((Some(*r), None)),
+        (None, Some(id)) => {
+            let display = find_display(id)?;
+            Ok((Some(display.bounds), Some(display.id)))
+        }
+        (None, None) => Ok((None, None)),
+    }
+}
+
+/// 把请求的区域裁到虚拟桌面以内。
+///
+/// 越界部分直接 BitBlt 只会得到黑边，那不是「屏幕内容」；所以裁掉，并把**实际**区域回报出去
+/// （宿主依赖这个回报做坐标换算）。截图与找图共用同一条规则 —— 找图如果少了这一步，
+/// 越界时匹配会在黑边上进行，然后给出一个看起来很正常、但根本不在屏幕里的坐标。
+fn clip_to_virtual(requested: Region, virtual_rect: Region) -> Result<Region, String> {
+    let left = requested.x.max(virtual_rect.x);
+    let top = requested.y.max(virtual_rect.y);
+    let right = (requested.x + requested.width).min(virtual_rect.x + virtual_rect.width);
+    let bottom = (requested.y + requested.height).min(virtual_rect.y + virtual_rect.height);
+    if right <= left || bottom <= top {
+        return Err(format!(
+            "请求的区域完全落在虚拟桌面之外（虚拟桌面 {}x{} @ ({}, {})）",
+            virtual_rect.width, virtual_rect.height, virtual_rect.x, virtual_rect.y
+        ));
+    }
+    Ok(Region { x: left, y: top, width: right - left, height: bottom - top })
+}
+
+/* ------------------------------ 找图（模板匹配） ------------------------------ */
+
+/// 找图请求：拿一张模板图，看它出现在屏幕（或指定区域）的什么位置。
+///
+/// 模板走 base64 PNG，是因为宿主本来就在传 PNG —— 截图接口吐出来的就是它，
+/// 直接拿来当模板，中间不需要任何格式转换。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FindImageRequest {
+    /// base64 PNG 的模板图。
+    template_png: String,
+    #[serde(default)]
+    region: Option<Region>,
+    #[serde(default)]
+    display_id: Option<String>,
+    /// 低于这个分数就不算「找到」（默认 0.9）。真正决定敢不敢点的是它与次佳的差距。
+    #[serde(default)]
+    threshold: Option<f64>,
+    /// 每个通道允许的偏差（0-255，默认 12）。够吸收抗锯齿与轻微渲染差异，
+    /// 又不至于把「旁边那个灰色按钮」也算成匹配 —— 这个参数就是按键精灵/大漠里的「偏色」。
+    #[serde(default)]
+    tolerance: Option<u8>,
+    /// 指名窗口：先把它提到前台，再按它**聚焦之后**的实际边界搜索。
+    /// 与截图同一条理由 —— 聚焦与抓屏必须挤在同一次进程调用里，
+    /// 否则第二次 spawn 冒出来的控制台窗口会盖住刚聚焦好的目标。
+    #[serde(default)]
+    focus: Option<FocusTarget>,
+}
+
+/// 一处匹配：它的屏幕坐标与相似度。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MatchSpot {
+    x: i32,
+    y: i32,
+    score: f64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FindImageResponse {
+    found: bool,
+    /// 模板左上角在**虚拟桌面坐标**里的位置。找不到时省略。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    x: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    y: Option<i32>,
+    /// 最佳得分（0..1，1 = 完全一致）。找不到时是 0。
+    score: f64,
+    /// 远离最佳的次佳得分（也就是第二处的分数）。**屏幕上没有第二处像的地方时省略**。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    runner_up: Option<f64>,
+    /// 通过阈值的**不同位置**数量（已按「距离不超过半个模板」聚类）。
+    /// `computer_click_image` 的硬约束就建立在这个数上：只有等于 1 才允许点击 ——
+    /// 靠一个次佳分数去猜「唯不唯一」是猜不准的，直接数出来才是事实。
+    match_count: usize,
+    /// 各处的位置与分数（按分数降序，最多 `CANDIDATE_KEEP` 个）。
+    /// 不止一处时调用方需要知道**是哪些地方**像，才能自己决定下一步。
+    matches: Vec<MatchSpot>,
+    searched: Region,
+    template_width: u32,
+    template_height: u32,
+    /// 为控制运算量而采用的降采样倍率（1 = 原分辨率）。坐标误差不超过这个值。
+    scale: u32,
+    elapsed_ms: u64,
+}
+
+/// 从 stdin 读一个 base64(UTF8 JSON) 请求体 —— 与截图那条命令同一套协议。
+fn read_body<T: for<'de> Deserialize<'de>>() -> Result<T, String> {
+    let mut raw = String::new();
+    std::io::stdin()
+        .read_to_string(&mut raw)
+        .map_err(|e| format!("读 stdin 失败：{e}"))?;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(raw.trim())
+        .map_err(|e| format!("stdin base64 解码失败：{e}"))?;
+    let text = String::from_utf8(bytes).map_err(|e| format!("stdin 不是合法 UTF-8：{e}"))?;
+    serde_json::from_str(&text).map_err(|e| format!("请求 JSON 解析失败：{e}"))
+}
+
+/// 保留的候选数：次佳不能取「紧挨着最佳的那一格」—— 那只是同一个目标的邻居，
+/// 「拉开差距」这件事就无从谈起。所以要留几个候选，最后挑一个离最佳足够远的。
+const CANDIDATE_KEEP: usize = 8;
+
+/// 默认的每通道容差。这个量级能吸收抗锯齿、字体渲染和轻微压缩差异，
+/// 又不足以把「旁边那个灰色按钮」算成匹配 —— 再大就该调的是模板，不是容差。
+const DEFAULT_TOLERANCE: u8 = 12;
+
+/// 金字塔粗筛层的降采样倍率。粗筛只用它回答「可能在哪」，不回答「是不是」——
+/// 降采样会把像素平均掉，位置精度只到 ±COARSE_SCALE，真正的判定在精算层做。
+const COARSE_SCALE: u32 = 4;
+
+/// 粗筛层的相似度阈值。**故意比精算层低**：降采样之后本来就不可能逐像素对上，
+/// 拿严格阈值去筛只会一个候选都不剩 —— 这正是先前那次失败的方式。
+const WEAK_THRESHOLD: f64 = 0.7;
+
+/// 粗筛层的容差放大倍数：降采样做了平均，像素值本身就带偏移，容差要跟着松。
+const COARSE_TOLERANCE_BOOST: u8 = 2;
+
+/// 模板灰度标准差的下限。低于它基本就是纯色：这种模板会在任何同色区域拿到满分，
+/// 于是「第一个遇到的同色位置」成了答案 —— 那不是匹配，是碰运气，
+/// 而且它返回的分数看起来还很自信。必须明确拒绝，宁可报错。
+const MIN_TEMPLATE_STDDEV: f64 = 3.0;
+
+/// RGBA → 灰度（Rec.601 亮度权重，整数运算）。
+///
+/// 灰度化是这里最划算的一步：三通道变单通道，直接省掉 2/3 的比较。
+/// 代价是丢掉颜色 —— 对「找按钮」这类任务无所谓，形状与明暗已经够区分；
+/// 真正只靠颜色区分的场景（两个只有颜色不同的圆点）得另走找色那条路。
+fn to_gray(rgba: &[u8]) -> Vec<u8> {
+    let count = rgba.len() / 4;
+    let mut gray = Vec::with_capacity(count);
+    for index in 0..count {
+        let base = index * 4;
+        let value = (299 * u32::from(rgba[base])
+            + 587 * u32::from(rgba[base + 1])
+            + 114 * u32::from(rgba[base + 2]))
+            / 1000;
+        gray.push(value as u8);
+    }
+    gray
+}
+
+/// 盒式降采样（factor <= 1 时原样返回一份拷贝）。
+fn downsample_gray(gray: &[u8], width: u32, height: u32, factor: u32) -> (Vec<u8>, u32, u32) {
+    if factor <= 1 {
+        return (gray.to_vec(), width, height);
+    }
+    let step = factor as usize;
+    let out_w = (width as usize / step).max(1);
+    let out_h = (height as usize / step).max(1);
+    let mut out = vec![0u8; out_w * out_h];
+    for oy in 0..out_h {
+        for ox in 0..out_w {
+            let mut sum = 0u32;
+            let mut count = 0u32;
+            for dy in 0..step {
+                let sy = oy * step + dy;
+                if sy >= height as usize {
+                    break;
+                }
+                for dx in 0..step {
+                    let sx = ox * step + dx;
+                    if sx >= width as usize {
+                        break;
+                    }
+                    sum += u32::from(gray[sy * width as usize + sx]);
+                    count += 1;
+                }
+            }
+            out[oy * out_w + ox] = if count == 0 { 0 } else { (sum / count) as u8 };
+        }
+    }
+    (out, out_w as u32, out_h as u32)
+}
+
+/// 在 `region` 指定的窗口内滑窗匹配，返回得分最高的至多 `top_k` 个位置。
+///
+/// 分数 = **容差内像素数 / 总像素数**，跟按键精灵、大漠插件里那个「相似度」是同一个含义：
+/// 0.9 就是「九成像素对上了」。这个语义能用，恰恰因为它**不归一化** ——
+/// 相关系数（ZNCC）先减去均值、除以标准差，于是「布局一样、内容不同」的两块区域
+/// 也能拿 0.99，而 UI 截图里这种地方遍地都是。
+///
+/// 提前退出：不匹配数一旦超过阈值允许的上限，这个位置就没希望了，立刻换下一个。
+/// 再叠一层**按区分度排序**：先比模板里最有辨识力的像素（离模板均值最远那些）。
+///
+/// 为什么带 `region`：精算层只需在每个粗筛候选附近 ±scale 的小窗口里滑窗，
+/// 把搜索范围收窄到几个像素见方，比全图重扫便宜好几个数量级。
+fn scan_region(
+    screen: &[u8], screen_w: u32, screen_h: u32,
+    template: &[u8], template_w: u32, template_h: u32,
+    tolerance: u8, min_score: f64,
+    region: (u32, u32, u32, u32),
+    top_k: usize,
+) -> Vec<(f64, u32, u32)> {
+    let mut candidates: Vec<(f64, u32, u32)> = Vec::new();
+    if template_w > screen_w || template_h > screen_h {
+        return candidates;
+    }
+    let tw = template_w as usize;
+    let th = template_h as usize;
+    let sw = screen_w as usize;
+    let sh = screen_h as usize;
+    let total = tw * th;
+    let tol = i32::from(tolerance);
+    let budget = ((1.0 - min_score) * total as f64).floor().max(0.0) as usize;
+
+    // 搜索窗口夹进图内
+    let last_x = sw - tw;
+    let last_y = sh - th;
+    let start_x = (region.0 as usize).min(last_x);
+    let start_y = (region.1 as usize).min(last_y);
+    let end_x = (region.0 as usize + region.2 as usize).min(last_x + 1);
+    let end_y = (region.1 as usize + region.3 as usize).min(last_y + 1);
+    if start_x >= end_x || start_y >= end_y {
+        return candidates;
+    }
+
+    // 区分度：离模板均值越远越有辨识力。按它降序检查像素，是最省时间的淘汰顺序。
+    let mean = template.iter().map(|value| f64::from(*value)).sum::<f64>() / total as f64;
+    let mut order: Vec<usize> = (0..total).collect();
+    order.sort_by(|&a, &b| {
+        let left = (f64::from(template[a]) - mean).abs();
+        let right = (f64::from(template[b]) - mean).abs();
+        right.partial_cmp(&left).unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    candidates.reserve(top_k.max(1));
+    for oy in start_y..end_y {
+        for ox in start_x..end_x {
+            let mut mismatch = 0usize;
+            for &index in &order {
+                let tx = index % tw;
+                let ty = index / tw;
+                let s = (oy + ty) * sw + ox + tx;
+                if (i32::from(screen[s]) - i32::from(template[index])).abs() > tol {
+                    mismatch += 1;
+                    if mismatch > budget {
+                        break;
+                    }
+                }
+            }
+            if mismatch > budget {
+                continue;
+            }
+            let score = 1.0 - mismatch as f64 / total as f64;
+            let worst = candidates.last().map_or(f64::NEG_INFINITY, |entry| entry.0);
+            if candidates.len() < top_k || score > worst {
+                candidates.push((score, ox as u32, oy as u32));
+                candidates.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+                candidates.truncate(top_k);
+            }
+        }
+    }
+    candidates
+}
+
+fn find_image(request: &FindImageRequest) -> Result<FindImageResponse, String> {
+    let started = std::time::Instant::now();
+    // DPI 感知必须在任何坐标查询之前设置，理由同 capture：否则缩放屏上的坐标会整体偏一圈。
+    unsafe {
+        let _ = SetProcessDpiAwareness(PROCESS_PER_MONITOR_DPI_AWARE);
+    }
+
+    let png = base64::engine::general_purpose::STANDARD
+        .decode(request.template_png.trim())
+        .map_err(|e| format!("模板 base64 解码失败：{e}"))?;
+    let template_image = image::load_from_memory_with_format(&png, image::ImageFormat::Png)
+        .map_err(|e| format!("模板 PNG 解码失败：{e}"))?
+        .to_rgba8();
+    let (template_w, template_h) = template_image.dimensions();
+    if template_w == 0 || template_h == 0 {
+        return Err("模板图尺寸为 0".into());
+    }
+    let template_gray = to_gray(template_image.as_raw());
+    // 纯色模板当场拒绝：它没有可匹配的结构，会在任何同色区域拿满分，
+    // 于是「第一个遇到的同色位置」就成了答案 —— 那不是匹配，是碰运气。
+    {
+        let count = template_gray.len() as f64;
+        let mean = template_gray.iter().map(|value| f64::from(*value)).sum::<f64>() / count;
+        let variance = template_gray
+            .iter()
+            .map(|value| {
+                let delta = f64::from(*value) - mean;
+                delta * delta
+            })
+            .sum::<f64>()
+            / count;
+        let stddev = variance.sqrt();
+        if stddev < MIN_TEMPLATE_STDDEV {
+            return Err(format!(
+                "模板几乎是纯色（灰度标准差 {stddev:.1}）：没有可匹配的结构，换一块有内容的区域当模板"
+            ));
+        }
+    }
+
+    let displays = list_displays()?;
+    let virtual_rect = union_of(&displays)?;
+    // 指名窗口时边界以**聚焦之后**读到的为准（同 capture 的理由：窗口被移动过并不代表
+    // 换了一个窗口，边界本来就该是这里读出来的结果）。focus_window 内部已校验它确实到了前台，
+    // 抢不到前台会直接报错 —— 否则匹配会在遮挡物上进行，再给出一个"看起来很自信"的坐标。
+    let focused_bounds = match request.focus.as_ref() {
+        Some(target) => Some(focus_window(target)?),
+        None => None,
+    };
+    let (requested, _display_id) = resolve_region(
+        request.region.as_ref().or(focused_bounds.as_ref()),
+        request.display_id.as_deref(),
+    )?;
+    let crop = clip_to_virtual(requested.unwrap_or(virtual_rect), virtual_rect)?;
+
+    let pixels = grab_screen(crop)?;
+    let screen_gray = to_gray(&pixels);
+    let threshold = request.threshold.unwrap_or(0.9);
+    let tolerance = request.tolerance.unwrap_or(DEFAULT_TOLERANCE);
+
+    // ---- 第一层：粗筛 ----
+    // 降采样只回答「可能在哪」。位置精度只到 ±COARSE_SCALE，而且降采样做了平均，
+    // 像素值本身就带偏移 —— 所以这一层**必须**用宽松的阈值和容差。
+    // 先前把这一层当成了最终答案（降采样之后直接判定），结果阈值严到一个候选都不剩。
+    let scale = COARSE_SCALE;
+    let (coarse_screen, coarse_w, coarse_h) =
+        downsample_gray(&screen_gray, crop.width as u32, crop.height as u32, scale);
+    let (coarse_template, coarse_tw, coarse_th) =
+        downsample_gray(&template_gray, template_w, template_h, scale);
+    if coarse_tw < 4 || coarse_th < 4 {
+        return Err(format!(
+            "模板降采样后只剩 {coarse_tw}x{coarse_th}，太小了（模板至少要 {}x{} 像素）",
+            scale * 4,
+            scale * 4
+        ));
+    }
+    let coarse = scan_region(
+        &coarse_screen, coarse_w, coarse_h,
+        &coarse_template, coarse_tw, coarse_th,
+        tolerance.saturating_mul(COARSE_TOLERANCE_BOOST), WEAK_THRESHOLD,
+        (0, 0, coarse_w, coarse_h),
+        CANDIDATE_KEEP,
+    );
+
+    // ---- 第二层：精算 ----
+    // 回到原分辨率，只在每个候选周围 ±scale 的窗口里滑窗，用严格阈值。
+    // **这一层算出来的分数才是能拿来做判断的分数。**
+    //
+    // 这里收集的是**每一处**的最佳，而不只是全局最佳：「找到几处」是 click_image 的硬约束
+    // （只有一处才允许点），所以数量必须在这一层数出来 —— 数出来的是事实，猜出来的是概率。
+    let mut refined: Vec<(f64, u32, u32)> = Vec::new();
+    for (_, candidate_x, candidate_y) in &coarse {
+        let base_x = candidate_x * scale;
+        let base_y = candidate_y * scale;
+        let window = (
+            base_x.saturating_sub(scale),
+            base_y.saturating_sub(scale),
+            scale * 2 + 1,
+            scale * 2 + 1,
+        );
+        refined.extend(scan_region(
+            &screen_gray, crop.width as u32, crop.height as u32,
+            &template_gray, template_w, template_h,
+            tolerance, threshold, window, 1,
+        ));
+    }
+
+    // 聚类：粗筛给出的候选可能彼此相邻（同一个目标的邻居），必须合并成「一处」。
+    // 判据是距离不超过半个模板 —— 在这个范围内就是同一个目标，不是两处。
+    refined.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    let mut distinct: Vec<(f64, u32, u32)> = Vec::new();
+    for (score, x, y) in refined {
+        let same_spot = distinct.iter().any(|(_, dx, dy)| {
+            x.abs_diff(*dx) <= template_w / 2 && y.abs_diff(*dy) <= template_h / 2
+        });
+        if !same_spot {
+            distinct.push((score, x, y));
+        }
+    }
+
+    // 「没找到」是正常结果，不是错误：屏幕内容变了、目标不在这块屏上、或者模板不够有辨识度，
+    // 都会走到这里。返回 found:false 让调用方决定怎么办（换区域、换模板、还是人工看一眼），
+    // 比抛错误更贴合它的含义 —— 错误该留给「请求本身有问题」（模板是纯色、区域越界这种）。
+    let Some(&(score, match_x, match_y)) = distinct.first() else {
+        return Ok(FindImageResponse {
+            found: false,
+            x: None,
+            y: None,
+            score: 0.0,
+            runner_up: None,
+            match_count: 0,
+            matches: Vec::new(),
+            searched: crop,
+            template_width: template_w,
+            template_height: template_h,
+            scale,
+            elapsed_ms: started.elapsed().as_millis() as u64,
+        });
+    };
+
+    Ok(FindImageResponse {
+        found: score >= threshold,
+        // match_x/y 已经是**原分辨率**坐标（精算层就是在原图上滑的），不要再乘 scale。
+        x: Some(crop.x + match_x as i32),
+        y: Some(crop.y + match_y as i32),
+        score,
+        runner_up: distinct.get(1).map(|entry| entry.0),
+        match_count: distinct.len(),
+        matches: distinct
+            .iter()
+            .take(CANDIDATE_KEEP)
+            .map(|(spot_score, x, y)| MatchSpot {
+                x: crop.x + *x as i32,
+                y: crop.y + *y as i32,
+                score: *spot_score,
+            })
+            .collect(),
+        searched: crop,
+        template_width: template_w,
+        template_height: template_h,
+        scale,
+        elapsed_ms: started.elapsed().as_millis() as u64,
+    })
+}
+
 /* ------------------------------ 屏幕捕获 ------------------------------ */
 
 /// 阶段打点：只在设了 DSH_SCREEN_DEBUG 时输出到 stderr。
@@ -246,6 +678,28 @@ fn trace(label: &str) {
 }
 
 /* ------------------------------ 窗口聚焦 ------------------------------ */
+
+/// 发一个孤立的 Alt 按下/抬起，用来解开 Windows 的前台锁。
+///
+/// 系统只允许「当前前台进程」或「刚收到过用户输入事件的进程」改变前台窗口。
+/// 这一下假按键不产生任何字符、不改变任何状态，但足以让系统把我们算作"刚收到输入"。
+/// 代价：如果恰好在某个程序里按着 Alt，可能会触发它的菜单 —— 因此只在提窗失败后才发。
+fn unlock_foreground() {
+    unsafe {
+        keybd_event(VK_MENU.0 as u8, 0, KEYBD_EVENT_FLAGS(0), 0);
+        keybd_event(VK_MENU.0 as u8, 0, KEYEVENTF_KEYUP, 0);
+    }
+}
+
+/// 目标窗口是不是**当前的前台窗口**？
+///
+/// 判据只能是前台，**不能放宽成「Z-order 最上层也算」** —— 试过，反而更错：
+/// `GetWindow(handle, GW_HWNDPREV)` 对 QQ 这类窗口永远非空（它上面总有别的窗口），
+/// 于是补救路径明明成功了、判据仍然为假（实测踩过：窗口就在眼前，却一路报「未能提到前台」）。
+/// 而且这里要回答的是「随后注入的按键/点击会落到谁身上」，那答案本来就是前台窗口。
+fn is_on_top(handle: HWND) -> bool {
+    unsafe { GetForegroundWindow() == handle }
+}
 
 /// 把窗口提到前台，并返回它**聚焦之后**的实际边界。
 ///
@@ -272,7 +726,20 @@ fn focus_window(target: &FocusTarget) -> Result<Region, String> {
 
         // SW_RESTORE：最小化的窗口光靠 SetForegroundWindow 抬不起来
         let _ = ShowWindow(handle, SW_RESTORE);
-        if !(SetForegroundWindow(handle).as_bool() && GetForegroundWindow() == handle) {
+        // 判据只能是「目标现在是不是前台」，**不能**拿 SetForegroundWindow 的返回值当成败依据：
+        // 窗口已经在前台时，系统认为没什么可做的，它会返回 false —— 而窗口状态完全正确。
+        // 那样会把「本来就对」误判成失败，再跑去走补救路径、白折腾一场，
+        // 最后报出「未能提到前台」而目标其实一直在前台（实测踩过，QQ 窗口）。
+        let _ = SetForegroundWindow(handle);
+        // 前台锁只认「当前前台进程」或「**刚收到过用户输入事件**的进程」。一个孤立的
+        // Alt 按下/抬起（不产生字符、不改变任何状态）会让系统认为我们刚收到输入，
+        // 从而解开这把锁 —— 这是窗口自动化里通行的做法，微软 SetForegroundWindow 的
+        // 文档也把「刚收到用户输入」列为允许改前台的情形。**只在首次失败后发一次**。
+        if !is_on_top(handle) {
+            unlock_foreground();
+            let _ = SetForegroundWindow(handle);
+        }
+        if !is_on_top(handle) {
             // Windows 的前台锁会拒绝合法请求：临时把本线程接入前台线程与目标线程的
             // 输入队列，再试一次（与宿主侧 PowerShell 实现同样的手法）。
             let current = GetCurrentThreadId();
@@ -305,7 +772,7 @@ fn focus_window(target: &FocusTarget) -> Result<Region, String> {
             }
         }
 
-        if GetForegroundWindow() != handle {
+        if !is_on_top(handle) {
             return Err("未能把目标窗口提到前台".into());
         }
         if !matches_window(handle, target) {
@@ -379,36 +846,15 @@ fn capture(request: &ScreenshotRequest) -> Result<ScreenshotResponse, String> {
         virtual_rect.width, virtual_rect.height, virtual_rect.x, virtual_rect.y, displays.len()
     ));
 
-    // 源区域决策：
-    //   1) 给了 region 就用它（虚拟桌面坐标，允许负值：副屏可能位于原点左侧/上方）
-    //   2) 否则给了 display_id 就用那块屏的整屏
-    //   3) 都没有 = 整个虚拟桌面
-    let (requested, display_id) = match (&request.region, &request.display_id) {
-        (Some(r), _) => (*r, None),
-        (None, Some(id)) => {
-            let d = find_display(id)?;
-            (d.bounds, Some(d.id))
-        }
-        (None, None) => (virtual_rect, None),
-    };
+    // 源区域决策：区域 → 显示器 → 整个虚拟桌面（三选一见 resolve_region）
+    let (requested, display_id) = resolve_region(request.region.as_ref(), request.display_id.as_deref())?;
+    let requested = requested.unwrap_or(virtual_rect);
 
     if requested.width < 1 || requested.height < 1 {
         return Err("截图区域的宽高必须 >= 1".into());
     }
 
-    // 与虚拟桌面求交：请求区域可能越界（多屏坐标算错、窗口贴边）。
-    // 越界部分直接 BitBlt 会得到黑边，那不是「屏幕内容」，所以裁掉并如实回报实际区域。
-    let left = requested.x.max(virtual_rect.x);
-    let top = requested.y.max(virtual_rect.y);
-    let right = (requested.x + requested.width).min(virtual_rect.x + virtual_rect.width);
-    let bottom = (requested.y + requested.height).min(virtual_rect.y + virtual_rect.height);
-    if right <= left || bottom <= top {
-        return Err(format!(
-            "请求的截图区域完全落在虚拟桌面之外（虚拟桌面 {}x{} @ ({}, {})）",
-            virtual_rect.width, virtual_rect.height, virtual_rect.x, virtual_rect.y
-        ));
-    }
-    let crop = Region { x: left, y: top, width: right - left, height: bottom - top };
+    let crop = clip_to_virtual(requested, virtual_rect)?;
 
     trace(&format!("3 开始抓屏 区域 {}x{} @ ({}, {})", crop.width, crop.height, crop.x, crop.y));
     let pixels = grab_screen(crop)?;
@@ -803,7 +1249,17 @@ fn main() -> ExitCode {
             }
             ExitCode::SUCCESS
         }
-        "" => fail("用法：dsh-screen <list-displays|screenshot|probe-pixels> [--x N --y N --width N --height N]"),
-        other => fail(format!("未知命令 '{other}'（支持 list-displays / screenshot / probe-pixels）")),
+        "find-image" => match read_body::<FindImageRequest>() {
+            Ok(request) => match find_image(&request) {
+                Ok(response) => match write_json(&response) {
+                    Ok(()) => ExitCode::SUCCESS,
+                    Err(e) => fail(e),
+                },
+                Err(e) => fail(e),
+            },
+            Err(e) => fail(e),
+        },
+        "" => fail("用法：dsh-screen <list-displays|screenshot|find-image|probe-pixels> [--x N --y N --width N --height N]"),
+        other => fail(format!("未知命令 '{other}'（支持 list-displays / screenshot / find-image / probe-pixels）")),
     }
 }

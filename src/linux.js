@@ -329,6 +329,10 @@ export class LinuxComputer {
     throw unsupported('capturing one window requires region capture, which the Linux backend does not provide yet');
   }
 
+  async findImage() {
+    throw unsupported('finding an image requires region capture, which the Linux backend does not provide yet');
+  }
+
   async accessibilitySnapshot(signal) {
     return this.runAtspi({
       kind: 'snapshot',

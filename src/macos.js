@@ -429,6 +429,10 @@ export class MacComputer {
     throw unsupported('capturing one window requires region capture, which the macOS backend does not provide yet');
   }
 
+  async findImage() {
+    throw unsupported('finding an image requires region capture, which the macOS backend does not provide yet');
+  }
+
   async accessibilitySnapshot(signal) {
     return this.runAx({
       kind: 'snapshot',

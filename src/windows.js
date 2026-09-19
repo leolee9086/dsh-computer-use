@@ -104,6 +104,7 @@ namespace DshComputer {
     [DllImport("user32.dll", SetLastError = true)] public static extern bool BringWindowToTop(IntPtr handle);
     [DllImport("user32.dll", SetLastError = true)] public static extern IntPtr SetFocus(IntPtr handle);
     [DllImport("user32.dll", SetLastError = true)] public static extern bool IsWindow(IntPtr handle);
+    [DllImport("user32.dll", SetLastError = true)] public static extern IntPtr GetWindow(IntPtr handle, uint command);
     [DllImport("user32.dll", SetLastError = true)] public static extern uint GetWindowThreadProcessId(IntPtr handle, IntPtr processId);
     [DllImport("user32.dll", SetLastError = true, EntryPoint = "GetWindowThreadProcessId")] public static extern uint GetWindowThreadProcessIdWithProcess(IntPtr handle, out uint processId);
     [DllImport("user32.dll", SetLastError = true)] public static extern bool AttachThreadInput(uint attachThreadId, uint attachToThreadId, bool attach);
@@ -212,6 +213,18 @@ namespace DshComputer {
       return text.ToString();
     }
 
+    // 标题按**前缀**比，不做精确等于。
+    // Electron 应用（QQ NT 等）会让本地窗口标题跟着页面标题变 —— 尾部的计数
+    //（"…等 N 个会话"）尤其容易在「列出」和「操作」这两次调用之间变。
+    // 句柄 + 进程已经足以定位窗口，标题只用来防串窗，所以前缀够用。
+    static bool TitleMatches(IntPtr handle, string expectedTitle) {
+      var actual = WindowTitle(handle);
+      if (actual == expectedTitle) return true;
+      var shared = Math.Min(actual.Length, expectedTitle.Length);
+      if (shared < 8) return false;   // 太短的前缀没有辨识力，不能算匹配
+      return actual.Substring(0, shared) == expectedTitle.Substring(0, shared);
+    }
+
     static bool BoundsEqual(RECT rect, RectValue expected) {
       return expected != null
         && rect.Left == expected.x && rect.Top == expected.y
@@ -223,7 +236,7 @@ namespace DshComputer {
       if (!IsWindow(handle) || !IsWindowVisible(handle) || IsIconic(handle)) return false;
       uint processId;
       if (GetWindowThreadProcessIdWithProcess(handle, out processId) == 0 || processId != (uint)expectedProcessId) return false;
-      if (WindowTitle(handle) != expectedTitle) return false;
+      if (!TitleMatches(handle, expectedTitle)) return false;
       RECT rect;
       return GetWindowRect(handle, out rect) && BoundsEqual(rect, expectedBounds);
     }
@@ -235,17 +248,38 @@ namespace DshComputer {
       if (!IsWindow(handle) || !IsWindowVisible(handle) || IsIconic(handle)) return false;
       uint processId;
       if (GetWindowThreadProcessIdWithProcess(handle, out processId) == 0 || processId != (uint)expectedProcessId) return false;
-      return WindowTitle(handle) == expectedTitle;
+      return TitleMatches(handle, expectedTitle);
     }
 
     // Raise a window identified by handle/process/title, without comparing its listed bounds.
     // Needed before injecting keyboard input: this process's own startup console window takes
     // the foreground, and SendInput only reaches the foreground window.
+    // 只在「目标确实是前台窗口」时算成功。
+    // 曾试过放宽成「Z-order 最上层也算」——那反而更严也更错：GetWindow(handle, GW_HWNDPREV)
+    // 对 QQ 这类窗口永远非空（它上面总有别的窗口），于是补救路径明明成功了、判据仍然为假。
+    // 这里要回答的是「按键会注入给谁」，而 SendInput 的目标就是前台窗口，所以只能问前台。
+    public static bool IsOnTop(IntPtr handle) {
+      return GetForegroundWindow() == handle;
+    }
+
     public static bool FocusWindowByIdentity(long rawHandle, int expectedProcessId, string expectedTitle) {
       var handle = new IntPtr(rawHandle);
       if (!WindowMatchesIdentity(rawHandle, expectedProcessId, expectedTitle)) return false;
       ShowWindow(handle, 9);
-      if (SetForegroundWindow(handle) && GetForegroundWindow() == handle) {
+      // 判据只能是「目标现在是不是前台」：窗口已经在前台时 SetForegroundWindow 可能返回
+      // false（系统认为没什么可做的），拿返回值当判据就会把「本来就对」判成失败，
+      // 再白跑一趟补救路径。FocusWindow 那份已按同一理由改过 —— 输入类动作走的是这一个。
+      SetForegroundWindow(handle);
+      if (!IsOnTop(handle)) {
+        // 前台锁只认「当前前台进程」或「刚收到过用户输入事件的进程」。一个孤立的
+        // Alt 按下/抬起（不产生字符、不改变任何状态）足以让系统把我们算作"刚收到输入"，
+        // 这把锁就开了 —— 窗口自动化里的通行做法，微软 SetForegroundWindow 的文档
+        // 也把「刚收到用户输入」列为允许改前台的情形。**只在首次失败后发一次。**
+        keybd_event(0x12, 0, 0, 0);   // Alt down
+        keybd_event(0x12, 0, 2, 0);   // Alt up（KEYEVENTF_KEYUP = 2）
+        SetForegroundWindow(handle);
+      }
+      if (IsOnTop(handle)) {
         return WindowMatchesIdentity(rawHandle, expectedProcessId, expectedTitle);
       }
 
@@ -267,7 +301,7 @@ namespace DshComputer {
         BringWindowToTop(handle);
         SetForegroundWindow(handle);
         SetFocus(handle);
-        return GetForegroundWindow() == handle && WindowMatchesIdentity(rawHandle, expectedProcessId, expectedTitle);
+        return IsOnTop(handle) && WindowMatchesIdentity(rawHandle, expectedProcessId, expectedTitle);
       } finally {
         if (attachedTarget) AttachThreadInput(currentThread, targetThread, false);
         if (attachedForeground) AttachThreadInput(currentThread, foregroundThread, false);
@@ -297,7 +331,17 @@ namespace DshComputer {
       var handle = new IntPtr(rawHandle);
       if (!WindowMatches(rawHandle, expectedProcessId, expectedTitle, expectedBounds)) return false;
       ShowWindow(handle, 9);
-      if (SetForegroundWindow(handle) && GetForegroundWindow() == handle) {
+      // 判据只能是「目标现在是不是前台」：窗口已经在前台时 SetForegroundWindow 可能返回
+      // false（系统认为没什么可做的），拿返回值当判据就会把「本来就对」判成失败，
+      // 再白跑一趟补救路径。native 侧的 focus_window 已按同一理由改过 —— 这是同一件事的另一份实现。
+      SetForegroundWindow(handle);
+      if (!IsOnTop(handle)) {
+        // 同 FocusWindowByIdentity：先发一个孤立的 Alt 按下/抬起解开前台锁，再试一次。
+        keybd_event(0x12, 0, 0, 0);   // Alt down
+        keybd_event(0x12, 0, 2, 0);   // Alt up
+        SetForegroundWindow(handle);
+      }
+      if (IsOnTop(handle)) {
         return WindowMatches(rawHandle, expectedProcessId, expectedTitle, expectedBounds);
       }
 
@@ -319,7 +363,7 @@ namespace DshComputer {
         BringWindowToTop(handle);
         SetForegroundWindow(handle);
         SetFocus(handle);
-        return GetForegroundWindow() == handle && WindowMatches(rawHandle, expectedProcessId, expectedTitle, expectedBounds);
+        return IsOnTop(handle) && WindowMatches(rawHandle, expectedProcessId, expectedTitle, expectedBounds);
       } finally {
         if (attachedTarget) AttachThreadInput(currentThread, targetThread, false);
         if (attachedForeground) AttachThreadInput(currentThread, foregroundThread, false);
@@ -646,7 +690,11 @@ async function nativeScreenshot(runner, config, request, signal) {
   const helperPath = requireHelperPath(config);
 
   const directory = await mkdtemp(join(tmpdir(), 'dsh-computer-use-shot-'));
-  const pngPath = join(directory, 'shot.png');
+  // saveTo 给了就把 PNG 直接落在那里：那是调用方要**留着当模板**的文件，
+  // 不能放在读完即删的临时目录里，也不能拿附件系统里那份 —— 那份可能被缩放或重压，
+  // 拿去当模板匹配会平白掉分。落点由 helper 的 --out 决定，宿主只是换了路径。
+  const keep = typeof request.saveTo === 'string' && request.saveTo.length > 0;
+  const pngPath = keep ? request.saveTo : join(directory, 'shot.png');
   try {
     const payload = {
       maxDimension: config.screenshotMaxDimension,
@@ -858,8 +906,36 @@ export class WindowsComputer {
       displayId: undefined,
       region: null,
       scale: request?.scale ?? null,
+      saveTo: request?.saveTo ?? null,
       focus: { handle: target.id, processId: target.processId, title: target.title },
     }, signal);
+  }
+
+  /**
+   * 在一屏里找一张小图，返回它的位置与相似度；**找不到是正常结果，不是错误**。
+   *
+   * 匹配整个在原生 helper 里做：一张 1920×1080 的屏幕转成 RGBA 是 8MB，
+   * 把像素来回穿进程边界比匹配本身还贵，所以只在最后过一道坐标和分数。
+   *
+   * 传 `focus` 时先提窗再按它聚焦后的实际边界搜索 —— 与 captureWindow 同一个理由：
+   * 聚焦和抓屏必须挤在一次进程调用里，否则第二次 spawn 冒出来的控制台窗口会盖住目标。
+   * helper 会校验它确实到了前台，抢不到就报错，不会对着遮挡物匹配。
+   */
+  async findImage(request, signal) {
+    const helperPath = requireHelperPath(this.config);
+    // 模板按路径读：模型给不了 base64，只能给路径 —— 由 computer_screenshot 的 save_to 落下来。
+    const template = await readFile(request.templatePath);
+    const payload = { templatePng: template.toString('base64') };
+    if (request.threshold !== undefined && request.threshold !== null) payload.threshold = request.threshold;
+    if (request.tolerance !== undefined && request.tolerance !== null) payload.tolerance = request.tolerance;
+    if (request.displayId !== undefined && request.displayId !== null) payload.displayId = request.displayId;
+    if (request.region !== undefined && request.region !== null) payload.region = request.region;
+    if (request.focus !== undefined && request.focus !== null) payload.focus = request.focus;
+    const result = await runNativeHelper(this.runner, helperPath, ['find-image'], payload, signal);
+    if (result === null || typeof result !== 'object' || typeof result.found !== 'boolean') {
+      throw new ComputerUseError('native find-image helper returned invalid result');
+    }
+    return result;
   }
 
   async accessibilitySnapshot(signal) {
