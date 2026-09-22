@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { ComputerUseError, unavailable, unsupported } from './errors.js';
+import { ComputerUseError, requireWindowHandleUnsupported, unavailable, unsupported } from './errors.js';
 import { pngDimensions } from './geometry.js';
 
 function appleString(value) {
@@ -433,7 +433,8 @@ export class MacComputer {
     throw unsupported('finding an image requires region capture, which the macOS backend does not provide yet');
   }
 
-  async accessibilitySnapshot(signal) {
+  async accessibilitySnapshot(windowHandle, signal) {
+    requireWindowHandleUnsupported(windowHandle, 'macOS');
     return this.runAx({
       kind: 'snapshot',
       maxNodes: this.config.maxAccessibilityNodes,

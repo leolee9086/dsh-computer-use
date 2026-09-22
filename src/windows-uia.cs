@@ -48,12 +48,48 @@ public class Startup
         if (maxNodes < 1) throw new InvalidOperationException("UI Automation 节点上限无效");
 
         var walker = TreeWalker.ControlViewWalker;
-        var focused = AutomationElement.FocusedElement ?? AutomationElement.RootElement;
-        var root = FindApplicationRoot(focused, walker);
+        // 优先从调用方指定的窗口扎根：那才是「这张截图拍的那个窗口」。
+        var root = RootFromWindowHandle(input);
+        if (root == null)
+        {
+            // 没指定才退回「当前焦点窗口」。
+            // 注意：这在多窗口 / 多屏时是**错的**——它问的是"此刻谁在前台"，
+            // 而不是"截图拍的是谁"。所以宿主侧抓到窗口截图时一定要把 HWND 传下来。
+            var focused = AutomationElement.FocusedElement ?? AutomationElement.RootElement;
+            root = FindApplicationRoot(focused, walker);
+        }
         var budget = new Budget();
         var tree = ConvertNode(root, 0, maxDepth, maxNodes, walker, budget);
         if (tree == null) throw new InvalidOperationException("UI Automation 没有返回可访问的根元素");
         return tree;
+    }
+
+    /// 按 HWND 找那个顶层窗口元素；没指定句柄时返回 null。
+    ///
+    /// 两个坑写在这里：
+    /// 1. UIA 的 `NativeWindowHandle` 是 **int**，不是指针宽度 —— 所以这边收十进制字符串
+    ///    再裁到 int。宿主侧一律以十进制字符串传 HWND（见 native/src/main.rs 的说明）。
+    /// 2. **找不到就报错，绝不悄悄退回焦点窗口。** 静默回退正是这个 bug 藏了这么久的理由：
+    ///    返回的树看起来完全正常，只是属于另一个窗口，而调用方无从察觉。
+    private static AutomationElement RootFromWindowHandle(dynamic input)
+    {
+        string raw = null;
+        if (input.hwnd != null) raw = (string)input.hwnd;
+        if (string.IsNullOrEmpty(raw)) return null;
+        long value;
+        if (!long.TryParse(raw, out value))
+        {
+            throw new InvalidOperationException("窗口句柄必须是十进制数字，收到 '" + raw + "'");
+        }
+        var condition = new PropertyCondition(
+            AutomationElement.NativeWindowHandleProperty, unchecked((int)value));
+        var found = AutomationElement.RootElement.FindFirst(TreeScope.Children, condition);
+        if (found == null)
+        {
+            throw new InvalidOperationException(
+                "按句柄 " + raw + " 找不到窗口——它可能已经关闭，或者不再是可见的顶层窗口");
+        }
+        return found;
     }
 
     /// 从被聚焦的元素往上找最近的窗口级祖先，作为这棵树的根。

@@ -382,13 +382,22 @@ export class WindowsComputer {
     return result;
   }
 
-  async accessibilitySnapshot(signal) {
+  /**
+   * 抓一棵语义树。
+   *
+   * @param windowHandle - 可选的 HWND（宿主侧一律十进制字符串）。给了就从**那个窗口**扎根；
+   *   不给才退回"当前焦点窗口"——那在单窗口时够用，多窗口时是错的。
+   * @param signal - 取消信号。
+   */
+  async accessibilitySnapshot(windowHandle, signal) {
     // 走进程内的 C# 桥（edge-js），不再 spawn PowerShell 现场编译 C#。
     const call = await loadCSharpFile('windows-uia.cs', { references: UIA_ASSEMBLIES });
     return call({
       kind: 'accessibility',
       maxNodes: this.config.maxAccessibilityNodes,
       maxDepth: this.config.maxAccessibilityDepth,
+      // 空字符串 / undefined 都当成"没指定"，由 C# 侧回退。
+      hwnd: typeof windowHandle === 'string' && windowHandle.length > 0 ? windowHandle : null,
     });
   }
 

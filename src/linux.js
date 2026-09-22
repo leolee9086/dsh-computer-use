@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { ComputerUseError, unavailable, unsupported } from './errors.js';
+import { ComputerUseError, requireWindowHandleUnsupported, unavailable, unsupported } from './errors.js';
 import { assertFinitePoint, pngDimensions } from './geometry.js';
 
 async function withCaptureFile(run) {
@@ -333,7 +333,8 @@ export class LinuxComputer {
     throw unsupported('finding an image requires region capture, which the Linux backend does not provide yet');
   }
 
-  async accessibilitySnapshot(signal) {
+  async accessibilitySnapshot(windowHandle, signal) {
+    requireWindowHandleUnsupported(windowHandle, 'Linux');
     return this.runAtspi({
       kind: 'snapshot',
       maxNodes: this.config.maxAccessibilityNodes,

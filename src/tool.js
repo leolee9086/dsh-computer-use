@@ -839,7 +839,7 @@ export function apply(ctx, rawConfig) {
 
   registerTool(ctx.tools, textTool(
     'computer_accessibility',
-    'Capture a bounded native accessibility tree for the application shown in a recent screenshot. It returns a short-lived snapshot_id, the bound screenshot evidence, and stable element_id values for semantic lookup and native control actions.',
+    'Capture a bounded native accessibility tree for the application shown in a recent screenshot. It returns a short-lived snapshot_id, the bound screenshot evidence, and stable element_id values for semantic lookup and native control actions. The tree is rooted at the window that screenshot captured; a plain desktop-region screenshot has no window, so the tree falls back to whichever application currently has focus.',
     {
       type: 'object', additionalProperties: false,
       required: ['screenshot_id'],
@@ -849,7 +849,14 @@ export function apply(ctx, rawConfig) {
       const args = object(rawArgs);
       const screenshotId = requiredString(args, 'screenshot_id');
       const screenshot = freshObservation(observations, exec, screenshotId, config);
-      const tree = await computer(ctx).accessibilitySnapshot(exec.signal);
+      // 树必须从**这张截图那个窗口**扎根。
+      //
+      // 截图走 window_id 时，观测记录里带着那个窗口的 HWND（`focus.handle`，
+      // 来自 `record.nativeWindow.id`）。不把它传下去的话，UIA 会从"当前焦点元素"
+      // 往上找窗口——那是**调用这一刻谁在前台**，跟截图拍的是谁毫无关系。
+      // 多窗口/多屏时就会拿到另一个窗口的树，而两条证据用的是同一个 screenshot_id，
+      // 看起来完全自洽，只有细看 bounds 才发现对不上。（2026-09-20 踩过。）
+      const tree = await computer(ctx).accessibilitySnapshot(screenshot.focus?.handle, exec.signal);
       const state = agentState(observations, exec);
       const capturedAt = Date.now();
       const snapshotId = `semantic-${randomUUID()}`;

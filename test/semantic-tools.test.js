@@ -50,6 +50,9 @@ function toolContext() {
     }],
   };
   const calls = [];
+  // 单独记：抓语义树时宿主传下来的窗口句柄。
+  // 不塞进 `calls`——那里是"元素动作"的流水，其余用例按它断 `at(-1)`。
+  const accessibilityHandles = [];
   const computer = {
     capabilities: {},
     async screenshot() {
@@ -69,7 +72,7 @@ function toolContext() {
         capturedAt: Date.now(),
       };
     },
-    async accessibilitySnapshot() { return semanticTree; },
+    async accessibilitySnapshot(windowHandle) { accessibilityHandles.push(windowHandle); return semanticTree; },
     async perform(action) { calls.push(action); },
     async listWindows() { return [{ id: 'native-41', title: 'Example Window', processId: 99, bounds: { x: 0, y: 0, width: 100, height: 50 }, focused: true }]; },
     async focusWindow(target) { calls.push({ kind: 'focus_window', target }); },
@@ -96,7 +99,7 @@ function toolContext() {
       return undefined;
     },
   };
-  return { ctx, tools, calls };
+  return { ctx, tools, calls, accessibilityHandles };
 }
 
 const agent = {
@@ -194,6 +197,39 @@ test('computer_screenshot(window_id) raises that window and captures it in one s
     () => screenshot.execute({ window_id: windowId, x: 1, y: 1, width: 10, height: 10 }, exec),
     /window_id captures that window on its own/,
   );
+});
+
+test('语义树从**截图那个窗口**扎根，而不是"当前焦点窗口"', async () => {
+  // 这条盯的是一个很难发现的 bug：截图和抓树用的是同一个 screenshot_id，
+  // 看起来完全自洽，但抓树那一刻问的是"谁在前台"——多窗口/多屏时会拿到
+  // 另一个窗口的树。两条证据互相矛盾，却没有任何迹象提示调用方。
+  const { ctx, tools, accessibilityHandles } = toolContext();
+  applyTools(ctx, {
+    observeApproval: 'allow',
+    controlApproval: 'allow',
+    maxObservationAgeMs: 120_000,
+    maxObservationsPerAgent: 8,
+    maxSemanticSnapshots: 8,
+    maxSemanticMatches: 20,
+  });
+  const exec = { agent };
+
+  const listed = JSON.parse(await toolByName(tools, 'computer_windows').execute({ operation: 'list' }, exec));
+  const windowId = listed.windows[0].id;
+
+  // 1) 截一个**窗口**，再抓树：句柄必须传下去。
+  const capture = await toolByName(tools, 'computer_screenshot').execute({ window_id: windowId }, exec);
+  await toolByName(tools, 'computer_accessibility').execute({ screenshot_id: capture.screenshot_id }, exec);
+  assert.equal(
+    accessibilityHandles.at(-1),
+    'native-41',
+    '窗口截图的句柄必须一路传到后端，否则它会从"当前焦点窗口"抓——那是另一个窗口',
+  );
+
+  // 2) 整屏截图没有窗口，句柄应当是空的：由后端决定回退，而不是宿主假装知道。
+  const plain = await toolByName(tools, 'computer_screenshot').execute({}, exec);
+  await toolByName(tools, 'computer_accessibility').execute({ screenshot_id: plain.screenshot_id }, exec);
+  assert.equal(accessibilityHandles.at(-1), undefined);
 });
 
 test('control actions consume their screenshot evidence and window focus consumes all evidence', async () => {
