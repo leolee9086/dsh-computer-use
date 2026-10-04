@@ -132,7 +132,7 @@ async function main() {
   try {
     await denyCtx.plugin(SystemPrompt);
     await denyCtx.plugin(ToolRuntime);
-    denyCtx.provide('computer', { capabilities: {} });
+    denyCtx.provide('computer', { capabilities: {}, narratorStatus: async () => ({ running: false }) });
     denyCtx.on('tools/pre-execute', (exec, next) => (
       exec.name === 'computer_type' ? Promise.resolve({ kind: 'allow' }) : next()
     ), { prepend: true });
@@ -148,6 +148,10 @@ async function main() {
     });
     assert.equal(denied.isError, true);
     assert.equal(denied.error?.message, 'dsh-computer-use configuration denies desktop control');
+    const narratorStatus = await denyCtx.tools.execute({ signal: new AbortController().signal, callId: ToolCallId('narrator-observe'), name: 'computer_narrator', arguments: { operation: 'status' } });
+    assert.equal(narratorStatus.isError, false, JSON.stringify(narratorStatus));
+    const narratorDenied = await denyCtx.tools.execute({ signal: new AbortController().signal, callId: ToolCallId('narrator-denied'), name: 'computer_narrator', arguments: { operation: 'command', command: 'next_item' } });
+    assert.match(narratorDenied.error?.message ?? '', /denies desktop control/);
   } finally {
     await denyCtx.fiber.dispose();
   }
@@ -254,6 +258,56 @@ async function main() {
   } finally {
     await fullAccessCtx.fiber.dispose();
   }
+
+  // 服务契约 fixture 配合真正的 ToolRuntime 验证证据与状态边界；不把它当作语音实测。
+  const readerCtx = new Context();
+  try {
+    let running = false;
+    let failNext = false;
+    const inputs = [];
+    await readerCtx.plugin(SystemPrompt);
+    await readerCtx.plugin(ToolRuntime);
+    readerCtx.provide('computer', {
+      capabilities: { narrator: true },
+      narratorStatus: async () => ({ running, virtualCursorObserved: false, speechCaptured: false }),
+      listWindows: async () => [{id: 'reader-window', processId: 78, title: 'Reader fixture', bounds: {x: 0, y: 0, width: 100, height: 100}}],
+      perform: async action => {
+        inputs.push(action);
+        if (failNext) { failNext = false; throw new Error('provider failed after an input side effect'); }
+      },
+    });
+    await readerCtx.plugin(toolPlugin('dsh-computer-use-reader-probe', allowConfig));
+    const readerAgent = { options: {}, session: {} };
+    let call = 0;
+    const execute = (name, args, agent = readerAgent) => readerCtx.tools.execute({ signal: new AbortController().signal, callId: ToolCallId('reader-' + (++call)), name, arguments: args, agent });
+    const listed = await execute('computer_windows', {operation: 'list'});
+    assert.equal(listed.isError, false, JSON.stringify(listed));
+    const windowId = JSON.parse(listed.value).windows[0].id;
+    const command = {operation: 'command', command: 'next_item', window_id: windowId};
+    const stopped = await execute('computer_narrator', command);
+    assert.match(stopped.error?.message ?? '', /not running/);
+    assert.equal(inputs.length, 0);
+    running = true;
+    const otherSession = await execute('computer_narrator', command, { options: {}, session: {} });
+    assert.equal(otherSession.isError, true);
+    assert.equal(inputs.length, 0);
+    const sent = await execute('computer_narrator', command);
+    assert.equal(sent.isError, false, JSON.stringify(sent));
+    assert.equal(JSON.parse(sent.value).resultVerified, false);
+    assert.equal(inputs[0].key, 'right');
+    assert.deepEqual(inputs[0].modifiers, ['insert']);
+    assert.deepEqual(inputs[0].focus, {handle: 'reader-window', processId: 78, title: 'Reader fixture'});
+    assert.equal((await execute('computer_narrator', command)).isError, true);
+    assert.equal(inputs.length, 1);
+    const freshList = await execute('computer_windows', {operation: 'list'});
+    const freshId = JSON.parse(freshList.value).windows[0].id;
+    failNext = true;
+    const failed = await execute('computer_type', {window_id: freshId, text: 'partial input'});
+    assert.match(failed.error?.message ?? '', /side effect/);
+    const retry = await execute('computer_key', {window_id: freshId, key: 'enter'});
+    assert.equal(retry.isError, true, 'failed control must consume its observation');
+    assert.equal(inputs.length, 2, 'a consumed window cannot authorize the retry');
+  } finally { await readerCtx.fiber.dispose(); }
 
   process.stdout.write('DshComputerUseToolRuntimeProbe:' + JSON.stringify({ image: 'ok', fullAccess: 'ok' }) + '\\n');
 }

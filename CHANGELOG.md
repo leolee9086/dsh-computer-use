@@ -1,5 +1,18 @@
 # 变更记录
 
+## 0.5.0 — 2026-10-04
+
+- 无障碍路径独立于图像：允许焦点应用或 Windows 窗口的语义快照，新增有界 `computer_read`，保留可选截图的精确绑定。文本模型可使用 UIA/MSAA 观测、读取、动作及窗口证据键盘。
+- UIA 增加 TextPattern 文档/范围/选择读取、多选增删、范围值、scroll、window 与 transform 操作。新增独立 MSAA IAccessible 后端及身份复核。
+- 视觉输入增加 move/hover、三击、modifier、hold/repeat、路径拖动，以及最多 256 步、显式等待/按住总和最多 10 秒的原生输入序列。全条预校验、失焦首错停止、正常结束/处理到的错误释放本次取得的输入。
+- Windows 增加显式 PrintWindow 后台捕获、子 HWND 目录、限定客户区点击/滚轮消息，以及移动/缩放/最小化/最大化/恢复/关闭请求。最小化窗口现在能通过新列表发现并恢复。后台消息报告实际 `foregroundChanged`，不把投递当作应用结果确认。
+- 新增 `computer_narrator`：当前登录会话的只读运行状态与 Microsoft Standard 布局固定命令，支持 Insert/CapsLock。不会启动讲述人或改设置；语音/虚拟光标输出未捕获、未实测。
+- macOS AX 与 Linux AT-SPI 接好内容读取；不支持的 Windows 后端和扩展输入参数明确报错。Linux 修复把操作参数误当身份字段的问题。
+- 控制提供者报错时也消耗旧证据，避免部分输入后复用过期状态。修复显式 helper 路径被全局缓存/静默回退、拖动插值超过步数预算的问题。
+- 工具总数从 13 增至 18；补充工作流、能力矩阵、边界与验收记录。使用 pnpm 12 构建许可配置；打包前运行回归，并核对 release exe 与版本/源码哈希清单。
+
+验证：55 项 JavaScript 回归（含真实 DSH ToolRuntime）、5 项 Python 纯读取/身份合同、3 项 Rust 校验测试通过；WPF UIA 8 项、WinForms MSAA 5 项及原生扩展 10 项有真机证据。macOS/Linux 原生运行时与讲述人语音验收仍未进行。
+
 ## 0.4.0
 
 ### 变更

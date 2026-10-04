@@ -42,6 +42,10 @@ function modelElement(raw) {
   if (processPath.length > 0) element.process_path = processPath;
   const bounds = finiteBounds(raw.bounds);
   if (bounds !== undefined) element.bounds = bounds;
+  // 这些字段来自原生 provider，是阅读与选操作所需的状态；保留明确的后端身份。
+  for (const key of ['backend', 'native_window_handle', 'window_title', 'password', 'help_text', 'item_status', 'value', 'read_only', 'toggle_state', 'expand_state', 'range', 'grid', 'scroll', 'state', 'default_action']) {
+    if (raw[key] !== undefined) element[key] = raw[key];
+  }
   return element;
 }
 

@@ -18,6 +18,9 @@
 //! （见 src/tool.js 的 mapScreenshotPoint），所以区域裁剪只要如实回报边界，
 //! 点击/拖拽/滚动的坐标就自动继续正确。
 
+mod input_sequence;
+mod window_control;
+
 use std::io::{Read, Write};
 use std::path::Path;
 use std::process::ExitCode;
@@ -27,21 +30,23 @@ use serde::{Deserialize, Serialize};
 use windows::core::PWSTR;
 use windows::Win32::Foundation::{CloseHandle, BOOL, FALSE, HWND, LPARAM, RECT, TRUE};
 use windows::Win32::Graphics::Gdi::{
-    BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, EnumDisplayMonitors,
-    GetDC, GetDIBits, GetMonitorInfoW, GetPixel, ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER,
-    BI_RGB, CLR_INVALID, DIB_RGB_COLORS, HBITMAP, HDC, HMONITOR, MONITORINFO, MONITORINFOEXW, ROP_CODE,
+    BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject,
+    EnumDisplayMonitors, GetDC, GetDIBits, GetMonitorInfoW, GetPixel, ReleaseDC, SelectObject,
+    BITMAPINFO, BITMAPINFOHEADER, BI_RGB, CLR_INVALID, DIB_RGB_COLORS, HBITMAP, HDC, HMONITOR,
+    MONITORINFO, MONITORINFOEXW, ROP_CODE,
 };
 use windows::Win32::System::Threading::{
     AttachThreadInput, GetCurrentThreadId, OpenProcess, QueryFullProcessImageNameW,
     PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
 };
+use windows::Win32::UI::HiDpi::{SetProcessDpiAwareness, PROCESS_PER_MONITOR_DPI_AWARE};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     keybd_event, mouse_event, SendInput, SetFocus, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
-    KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN,
-    MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_RIGHTDOWN,
-    MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL, MOUSE_EVENT_FLAGS, VIRTUAL_KEY, VK_MENU,
+    KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, MOUSEEVENTF_HWHEEL,
+    MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP,
+    MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL, MOUSE_EVENT_FLAGS, VIRTUAL_KEY,
+    VK_MENU,
 };
-use windows::Win32::UI::HiDpi::{SetProcessDpiAwareness, PROCESS_PER_MONITOR_DPI_AWARE};
 use windows::Win32::UI::WindowsAndMessaging::{
     BringWindowToTop, EnumWindows, GetForegroundWindow, GetWindowRect, GetWindowTextLengthW,
     GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible, SetCursorPos,
@@ -67,6 +72,9 @@ struct ScreenshotRequest {
     /// 为什么必须和截图挤在同一次进程调用里，见 `focus_window` 的说明。
     #[serde(default)]
     focus: Option<FocusTarget>,
+    /// 显式后台捕获：PrintWindow，不提窗；和 focus / region / displayId 互斥。
+    #[serde(default)]
+    background: Option<FocusTarget>,
 }
 
 /// 「提到前台再截图」的目标窗口。
@@ -112,6 +120,7 @@ struct ScreenshotResponse {
     height: u32,
     /// 实际截取的屏幕区域（可能与请求的区域不同：越界部分会被裁到虚拟桌面内）
     source_bounds: Region,
+    capture_mode: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     display_id: Option<String>,
 }
@@ -124,6 +133,7 @@ struct OutMeta {
     width: u32,
     height: u32,
     source_bounds: Region,
+    capture_mode: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     display_id: Option<String>,
     bytes: u64,
@@ -138,8 +148,10 @@ fn write_json<T: Serialize>(value: &T) -> Result<(), String> {
     let text = serde_json::to_string(value).map_err(|e| format!("JSON 序列化失败：{e}"))?;
     let stdout = std::io::stdout();
     let mut lock = stdout.lock();
-    lock.write_all(text.as_bytes()).map_err(|e| format!("写 stdout 失败：{e}"))?;
-    lock.flush().map_err(|e| format!("flush stdout 失败：{e}"))?;
+    lock.write_all(text.as_bytes())
+        .map_err(|e| format!("写 stdout 失败：{e}"))?;
+    lock.flush()
+        .map_err(|e| format!("flush stdout 失败：{e}"))?;
     Ok(())
 }
 
@@ -221,11 +233,32 @@ fn list_displays() -> Result<Vec<DisplayInfo>, String> {
 }
 
 fn union_of(displays: &[DisplayInfo]) -> Result<Region, String> {
-    let left = displays.iter().map(|d| d.bounds.x).min().ok_or("没有显示器")?;
-    let top = displays.iter().map(|d| d.bounds.y).min().ok_or("没有显示器")?;
-    let right = displays.iter().map(|d| d.bounds.x + d.bounds.width).max().ok_or("没有显示器")?;
-    let bottom = displays.iter().map(|d| d.bounds.y + d.bounds.height).max().ok_or("没有显示器")?;
-    Ok(Region { x: left, y: top, width: right - left, height: bottom - top })
+    let left = displays
+        .iter()
+        .map(|d| d.bounds.x)
+        .min()
+        .ok_or("没有显示器")?;
+    let top = displays
+        .iter()
+        .map(|d| d.bounds.y)
+        .min()
+        .ok_or("没有显示器")?;
+    let right = displays
+        .iter()
+        .map(|d| d.bounds.x + d.bounds.width)
+        .max()
+        .ok_or("没有显示器")?;
+    let bottom = displays
+        .iter()
+        .map(|d| d.bounds.y + d.bounds.height)
+        .max()
+        .ok_or("没有显示器")?;
+    Ok(Region {
+        x: left,
+        y: top,
+        width: right - left,
+        height: bottom - top,
+    })
 }
 
 /// 按设备 id 找显示器；顺带回传它的矩形，用于「指定显示器整屏截图」
@@ -272,7 +305,12 @@ fn clip_to_virtual(requested: Region, virtual_rect: Region) -> Result<Region, St
             virtual_rect.width, virtual_rect.height, virtual_rect.x, virtual_rect.y
         ));
     }
-    Ok(Region { x: left, y: top, width: right - left, height: bottom - top })
+    Ok(Region {
+        x: left,
+        y: top,
+        width: right - left,
+        height: bottom - top,
+    })
 }
 
 /* ------------------------------ 找图（模板匹配） ------------------------------ */
@@ -363,6 +401,12 @@ struct ActionRequest {
 #[serde(tag = "kind", rename_all = "camelCase")]
 enum ActionSpec {
     #[serde(rename_all = "camelCase")]
+    Sequence {
+        steps: Vec<input_sequence::Step>,
+        #[serde(default)]
+        delay_ms: i64,
+    },
+    #[serde(rename_all = "camelCase")]
     Move {
         x: i32,
         y: i32,
@@ -424,6 +468,8 @@ struct WindowRecord {
     application: String,
     /// 是不是当前前台窗口。
     focused: bool,
+    /// 保留最小化窗口，才能通过新列表恢复它；边界不是当前可点击区域。
+    minimized: bool,
     bounds: Region,
 }
 
@@ -548,9 +594,14 @@ fn downsample_gray(gray: &[u8], width: u32, height: u32, factor: u32) -> (Vec<u8
 /// 为什么带 `region`：精算层只需在每个粗筛候选附近 ±scale 的小窗口里滑窗，
 /// 把搜索范围收窄到几个像素见方，比全图重扫便宜好几个数量级。
 fn scan_region(
-    screen: &[u8], screen_w: u32, screen_h: u32,
-    template: &[u8], template_w: u32, template_h: u32,
-    tolerance: u8, min_score: f64,
+    screen: &[u8],
+    screen_w: u32,
+    screen_h: u32,
+    template: &[u8],
+    template_w: u32,
+    template_h: u32,
+    tolerance: u8,
+    min_score: f64,
     region: (u32, u32, u32, u32),
     top_k: usize,
 ) -> Vec<(f64, u32, u32)> {
@@ -583,7 +634,9 @@ fn scan_region(
     order.sort_by(|&a, &b| {
         let left = (f64::from(template[a]) - mean).abs();
         let right = (f64::from(template[b]) - mean).abs();
-        right.partial_cmp(&left).unwrap_or(std::cmp::Ordering::Equal)
+        right
+            .partial_cmp(&left)
+            .unwrap_or(std::cmp::Ordering::Equal)
     });
 
     candidates.reserve(top_k.max(1));
@@ -608,7 +661,8 @@ fn scan_region(
             let worst = candidates.last().map_or(f64::NEG_INFINITY, |entry| entry.0);
             if candidates.len() < top_k || score > worst {
                 candidates.push((score, ox as u32, oy as u32));
-                candidates.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+                candidates
+                    .sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
                 candidates.truncate(top_k);
             }
         }
@@ -638,7 +692,11 @@ fn find_image(request: &FindImageRequest) -> Result<FindImageResponse, String> {
     // 于是「第一个遇到的同色位置」就成了答案 —— 那不是匹配，是碰运气。
     {
         let count = template_gray.len() as f64;
-        let mean = template_gray.iter().map(|value| f64::from(*value)).sum::<f64>() / count;
+        let mean = template_gray
+            .iter()
+            .map(|value| f64::from(*value))
+            .sum::<f64>()
+            / count;
         let variance = template_gray
             .iter()
             .map(|value| {
@@ -692,9 +750,14 @@ fn find_image(request: &FindImageRequest) -> Result<FindImageResponse, String> {
         ));
     }
     let coarse = scan_region(
-        &coarse_screen, coarse_w, coarse_h,
-        &coarse_template, coarse_tw, coarse_th,
-        tolerance.saturating_mul(COARSE_TOLERANCE_BOOST), WEAK_THRESHOLD,
+        &coarse_screen,
+        coarse_w,
+        coarse_h,
+        &coarse_template,
+        coarse_tw,
+        coarse_th,
+        tolerance.saturating_mul(COARSE_TOLERANCE_BOOST),
+        WEAK_THRESHOLD,
         (0, 0, coarse_w, coarse_h),
         CANDIDATE_KEEP,
     );
@@ -716,9 +779,16 @@ fn find_image(request: &FindImageRequest) -> Result<FindImageResponse, String> {
             scale * 2 + 1,
         );
         refined.extend(scan_region(
-            &screen_gray, crop.width as u32, crop.height as u32,
-            &template_gray, template_w, template_h,
-            tolerance, threshold, window, 1,
+            &screen_gray,
+            crop.width as u32,
+            crop.height as u32,
+            &template_gray,
+            template_w,
+            template_h,
+            tolerance,
+            threshold,
+            window,
+            1,
         ));
     }
 
@@ -838,13 +908,17 @@ fn focus_window(target: &FocusTarget) -> Result<Region, String> {
             return Err("目标窗口已不存在或身份不符（句柄 / 进程 / 标题）".into());
         }
 
-        // SW_RESTORE：最小化的窗口光靠 SetForegroundWindow 抬不起来
-        let _ = ShowWindow(handle, SW_RESTORE);
+        // 只恢复最小化窗口。已在使用的窗口不能每个按键前都 Restore，避免改变控件焦点/选择。
+        if IsIconic(handle).as_bool() {
+            let _ = ShowWindow(handle, SW_RESTORE);
+        }
         // 判据只能是「目标现在是不是前台」，**不能**拿 SetForegroundWindow 的返回值当成败依据：
         // 窗口已经在前台时，系统认为没什么可做的，它会返回 false —— 而窗口状态完全正确。
         // 那样会把「本来就对」误判成失败，再跑去走补救路径、白折腾一场，
         // 最后报出「未能提到前台」而目标其实一直在前台（实测踩过，QQ 窗口）。
-        let _ = SetForegroundWindow(handle);
+        if !is_on_top(handle) {
+            let _ = SetForegroundWindow(handle);
+        }
         // 前台锁只认「当前前台进程」或「**刚收到过用户输入事件**的进程」。一个孤立的
         // Alt 按下/抬起（不产生字符、不改变任何状态）会让系统认为我们刚收到输入，
         // 从而解开这把锁 —— 这是窗口自动化里通行的做法，微软 SetForegroundWindow 的
@@ -870,7 +944,8 @@ fn focus_window(target: &FocusTarget) -> Result<Region, String> {
             if foreground_thread != 0 && foreground_thread != current {
                 attached_foreground = AttachThreadInput(current, foreground_thread, TRUE).as_bool();
             }
-            if target_thread != 0 && target_thread != current && target_thread != foreground_thread {
+            if target_thread != 0 && target_thread != current && target_thread != foreground_thread
+            {
                 attached_target = AttachThreadInput(current, target_thread, TRUE).as_bool();
             }
 
@@ -912,13 +987,10 @@ fn focus_window(target: &FocusTarget) -> Result<Region, String> {
     }
 }
 
-/// 身份校验：句柄有效、可见、未最小化、属于指定进程、标题一致。
+/// 身份校验：句柄有效、可见、属于指定进程、标题一致。最小化状态由调用方决定是否恢复。
 fn matches_window(handle: HWND, target: &FocusTarget) -> bool {
     unsafe {
-        if !IsWindow(handle).as_bool()
-            || !IsWindowVisible(handle).as_bool()
-            || IsIconic(handle).as_bool()
-        {
+        if !IsWindow(handle).as_bool() || !IsWindowVisible(handle).as_bool() {
             return false;
         }
         let mut process_id: u32 = 0;
@@ -952,7 +1024,7 @@ fn sleep_ms(milliseconds: i64) {
 
 /// 虚拟键码：宿主侧已经把按键名映射成码，这里只守住取值范围。
 fn virtual_key(code: i32) -> Result<VIRTUAL_KEY, String> {
-    if !(0..=0xFF).contains(&code) {
+    if !(1..=0xFE).contains(&code) {
         return Err(format!("虚拟键码超出范围：{code}"));
     }
     Ok(VIRTUAL_KEY(code as u16))
@@ -1075,29 +1147,16 @@ fn type_text(text: &str) -> Result<(), String> {
 /// 按一下键，前后夹住修饰键。修饰键**逆序**抬起，且无论主键那步成不成功都要抬 ——
 /// 否则会留下一个卡住的 Ctrl。
 fn tap_key(key: i32, modifiers: &[i32]) -> Result<(), String> {
-    let mut pressed: Vec<VIRTUAL_KEY> = Vec::new();
-    let result = (|| -> Result<(), String> {
-        for code in modifiers {
-            let modifier = virtual_key(*code)?;
-            unsafe { keybd_event(modifier.0 as u8, 0, KEYBD_EVENT_FLAGS(0), 0) };
-            pressed.push(modifier);
-        }
-        let vk = virtual_key(key)?;
-        unsafe {
-            keybd_event(vk.0 as u8, 0, KEYBD_EVENT_FLAGS(0), 0);
-            keybd_event(vk.0 as u8, 0, KEYEVENTF_KEYUP, 0);
-        }
-        Ok(())
-    })();
-    for modifier in pressed.iter().rev() {
-        unsafe { keybd_event(modifier.0 as u8, 0, KEYEVENTF_KEYUP, 0) };
-    }
-    result
+    input_sequence::tap(key, modifiers)
 }
 
 /// 执行一个动作，六种分支都把 `delay_ms` 放在动作之后等待。
 fn perform_action(spec: &ActionSpec) -> Result<(), String> {
     match spec {
+        ActionSpec::Sequence { steps, delay_ms } => {
+            input_sequence::execute(steps, || Ok(()))?;
+            sleep_ms(*delay_ms);
+        }
         ActionSpec::Move { x, y, delay_ms } => {
             pointer_move(*x, *y)?;
             sleep_ms(*delay_ms);
@@ -1154,8 +1213,28 @@ fn perform_action(spec: &ActionSpec) -> Result<(), String> {
 /// 提窗与注入挤在同一次进程调用里 —— 分两次时，第二次 spawn 冒出来的控制台窗口
 /// 会抢走前台，按键就落到控制台去了（实测踩过）。
 fn run_action(request: &ActionRequest) -> Result<(), String> {
+    // 在提窗之前验证整条序列，后半段的参数错误也不能造成前半段副作用。
+    if let ActionSpec::Sequence { steps, delay_ms } = &request.action {
+        input_sequence::validate(steps)?;
+        if !(0..=10_000).contains(delay_ms) {
+            return Err("动作后等待必须 0..10000ms".into());
+        }
+    }
     if let Some(target) = request.focus.as_ref() {
         focus_window(target)?;
+    }
+    if let ActionSpec::Sequence { steps, delay_ms } = &request.action {
+        input_sequence::execute(steps, || {
+            if let Some(target) = request.focus.as_ref() {
+                let handle = window_control::checked_window(target)?;
+                if !is_on_top(handle) {
+                    return Err("输入序列中目标失去前台，已停止并释放输入".into());
+                }
+            }
+            Ok(())
+        })?;
+        sleep_ms(*delay_ms);
+        return Ok(());
     }
     perform_action(&request.action)
 }
@@ -1187,8 +1266,12 @@ fn process_name(process_id: u32) -> String {
         };
         let mut buffer = [0u16; 512];
         let mut size = buffer.len() as u32;
-        let queried =
-            QueryFullProcessImageNameW(handle, PROCESS_NAME_WIN32, PWSTR(buffer.as_mut_ptr()), &mut size);
+        let queried = QueryFullProcessImageNameW(
+            handle,
+            PROCESS_NAME_WIN32,
+            PWSTR(buffer.as_mut_ptr()),
+            &mut size,
+        );
         let _ = CloseHandle(handle);
         if queried.is_err() {
             return String::new();
@@ -1203,11 +1286,11 @@ fn process_name(process_id: u32) -> String {
 
 /// `EnumWindows` 的回调。回调不能捕获环境，待填的列表通过 `LPARAM` 递进来。
 ///
-/// 过滤条件：不可见 / 最小化 / 无标题 / 边界无效的窗口全部跳过，
+/// 过滤条件：不可见 / 无标题 / 边界无效的窗口全部跳过，
 /// 否则列表里会塞满没有任何信息的空壳窗口。
 unsafe extern "system" fn collect_visible_window(handle: HWND, parameter: LPARAM) -> BOOL {
     let records = &mut *(parameter.0 as *mut Vec<WindowRecord>);
-    if !IsWindowVisible(handle).as_bool() || IsIconic(handle).as_bool() {
+    if !IsWindowVisible(handle).as_bool() {
         return TRUE;
     }
     let title = window_title(handle);
@@ -1215,7 +1298,10 @@ unsafe extern "system" fn collect_visible_window(handle: HWND, parameter: LPARAM
         return TRUE;
     }
     let mut rect = RECT::default();
-    if GetWindowRect(handle, &mut rect).is_err() || rect.right <= rect.left || rect.bottom <= rect.top {
+    if GetWindowRect(handle, &mut rect).is_err()
+        || rect.right <= rect.left
+        || rect.bottom <= rect.top
+    {
         return TRUE;
     }
     // 注意：GetWindowThreadProcessId 的**返回值是线程 id**，进程 id 从第二个参数出来。
@@ -1231,6 +1317,7 @@ unsafe extern "system" fn collect_visible_window(handle: HWND, parameter: LPARAM
         process_id,
         application: process_name(process_id),
         focused: false,
+        minimized: IsIconic(handle).as_bool(),
         bounds: Region {
             x: rect.left,
             y: rect.top,
@@ -1285,21 +1372,33 @@ fn capture(request: &ScreenshotRequest) -> Result<ScreenshotResponse, String> {
     let virtual_rect = union_of(&displays)?;
     trace(&format!(
         "  虚拟桌面 {}x{} @ ({}, {})，共 {} 块屏",
-        virtual_rect.width, virtual_rect.height, virtual_rect.x, virtual_rect.y, displays.len()
+        virtual_rect.width,
+        virtual_rect.height,
+        virtual_rect.x,
+        virtual_rect.y,
+        displays.len()
     ));
 
-    // 源区域决策：区域 → 显示器 → 整个虚拟桌面（三选一见 resolve_region）
-    let (requested, display_id) = resolve_region(request.region.as_ref(), request.display_id.as_deref())?;
-    let requested = requested.unwrap_or(virtual_rect);
-
-    if requested.width < 1 || requested.height < 1 {
-        return Err("截图区域的宽高必须 >= 1".into());
-    }
-
-    let crop = clip_to_virtual(requested, virtual_rect)?;
-
-    trace(&format!("3 开始抓屏 区域 {}x{} @ ({}, {})", crop.width, crop.height, crop.x, crop.y));
-    let pixels = grab_screen(crop)?;
+    let (crop, pixels, display_id, capture_mode) = if let Some(target) = request.background.as_ref()
+    {
+        if request.focus.is_some() || request.region.is_some() || request.display_id.is_some() {
+            return Err("background 只能单独指定窗口，不能与 focus/region/displayId 混用".into());
+        }
+        let (region, pixels) = window_control::capture(target)?;
+        (region, pixels, None, "print-window")
+    } else {
+        let (requested, display_id) = if let Some(target) = request.focus.as_ref() {
+            (Some(focus_window(target)?), None)
+        } else {
+            resolve_region(request.region.as_ref(), request.display_id.as_deref())?
+        };
+        let requested = requested.unwrap_or(virtual_rect);
+        if requested.width < 1 || requested.height < 1 {
+            return Err("截图区域的宽高必须 >= 1".into());
+        }
+        let crop = clip_to_virtual(requested, virtual_rect)?;
+        (crop, grab_screen(crop)?, display_id, "screen")
+    };
     trace(&format!("4 抓屏完成，像素 {} 字节", pixels.len()));
 
     // 缩放两段算，而不是合并成一个倍率：
@@ -1318,7 +1417,10 @@ fn capture(request: &ScreenshotRequest) -> Result<ScreenshotResponse, String> {
 
     let rgba = image::RgbaImage::from_raw(crop.width as u32, crop.height as u32, pixels)
         .ok_or("位图缓冲区尺寸与区域不符")?;
-    trace(&format!("5 组装 RgbaImage 完成，输出目标 {}x{}", out_w, out_h));
+    trace(&format!(
+        "5 组装 RgbaImage 完成，输出目标 {}x{}",
+        out_w, out_h
+    ));
     let final_image = if out_w != crop.width as u32 || out_h != crop.height as u32 {
         let r = image::imageops::resize(&rgba, out_w, out_h, image::imageops::FilterType::Lanczos3);
         trace("6 缩放完成");
@@ -1338,7 +1440,8 @@ fn capture(request: &ScreenshotRequest) -> Result<ScreenshotResponse, String> {
         if png.len() as i64 > max_bytes {
             return Err(format!(
                 "截图 PNG 体积 {} 字节，超过上限 {} 字节",
-                png.len(), max_bytes
+                png.len(),
+                max_bytes
             ));
         }
     }
@@ -1348,6 +1451,7 @@ fn capture(request: &ScreenshotRequest) -> Result<ScreenshotResponse, String> {
         width: out_w,
         height: out_h,
         source_bounds: crop,
+        capture_mode: capture_mode.into(),
         display_id,
     })
 }
@@ -1418,7 +1522,12 @@ fn grab_screen(crop: Region) -> Result<Vec<u8>, String> {
 }
 
 /// 从 DIB 读出像素并转成 RGBA8（GDI 给的是 BGRA）
-fn read_bitmap_pixels(dc: HDC, bitmap: HBITMAP, width: i32, height: i32) -> Result<Vec<u8>, String> {
+fn read_bitmap_pixels(
+    dc: HDC,
+    bitmap: HBITMAP,
+    width: i32,
+    height: i32,
+) -> Result<Vec<u8>, String> {
     let stride = width * 4;
     let mut info = BITMAPINFO {
         bmiHeader: BITMAPINFOHEADER {
@@ -1509,7 +1618,9 @@ fn flag_f64(flags: &std::collections::HashMap<String, String>, key: &str) -> Opt
 /// 但**大块结果（PNG）绝不要走 stdout 管道** —— 那条路在 Windows 上会因
 /// 管道缓冲区被填满且读取方状态不明而挂死（这个坑真实踩过，见 PROGRESS 记录）。
 /// 所以截图的大数据一律落文件，stdout 只回小 JSON。
-fn read_request(flags: &std::collections::HashMap<String, String>) -> Result<ScreenshotRequest, String> {
+fn read_request(
+    flags: &std::collections::HashMap<String, String>,
+) -> Result<ScreenshotRequest, String> {
     let mut raw = String::new();
     std::io::stdin()
         .read_to_string(&mut raw)
@@ -1525,13 +1636,14 @@ fn read_request(flags: &std::collections::HashMap<String, String>) -> Result<Scr
             max_dimension: None,
             max_bytes: None,
             focus: None,
+            background: None,
         }
     } else {
         let decoded = base64::engine::general_purpose::STANDARD
             .decode(trimmed)
             .map_err(|e| format!("stdin 不是合法 base64：{e}"))?;
-        let text = String::from_utf8(decoded)
-            .map_err(|e| format!("base64 解出的内容不是 UTF-8：{e}"))?;
+        let text =
+            String::from_utf8(decoded).map_err(|e| format!("base64 解出的内容不是 UTF-8：{e}"))?;
         serde_json::from_str(&text)
             .map_err(|e| format!("请求 JSON 解析失败：{e}（原文：{text}）"))?
     };
@@ -1543,7 +1655,12 @@ fn read_request(flags: &std::collections::HashMap<String, String>) -> Result<Scr
         flag_i32(flags, "width"),
         flag_i32(flags, "height"),
     ) {
-        request.region = Some(Region { x, y, width: w, height: h });
+        request.region = Some(Region {
+            x,
+            y,
+            width: w,
+            height: h,
+        });
     }
     if let Some(id) = flags.get("display-id") {
         request.display_id = Some(id.clone());
@@ -1563,7 +1680,7 @@ fn read_request(flags: &std::collections::HashMap<String, String>) -> Result<Scr
 /// 文件模式：PNG 直接写进 `--out`，stdout 只回小 JSON。
 /// 这是宿主应该用的模式 —— 大块二进制不进管道，从根上避开挂死。
 fn screenshot_to_files(flags: &std::collections::HashMap<String, String>) -> ExitCode {
-    let mut request = match read_request(flags) {
+    let request = match read_request(flags) {
         Ok(r) => r,
         Err(e) => return fail(e),
     };
@@ -1572,20 +1689,7 @@ fn screenshot_to_files(flags: &std::collections::HashMap<String, String>) -> Exi
         None => return fail("文件模式需要 --out <png 路径>"),
     };
 
-    // 指名窗口：先把窗口提到前台，再拿**它此刻的边界**当截图区域。
-    // 顺序不能反 —— 边界必须是聚焦之后读出来的，否则窗口被移动过就会截错地方。
-    if let Some(target) = request.focus.clone() {
-        match focus_window(&target) {
-            Ok(bounds) => {
-                trace(&format!(
-                    "F 已把窗口提到前台，实时边界 {}x{} @ ({}, {})",
-                    bounds.width, bounds.height, bounds.x, bounds.y
-                ));
-                request.region = Some(bounds);
-            }
-            Err(e) => return fail(e),
-        }
-    }
+    // capture 内统一处理前台/后台窗口，文件和 stdout 两种出口的语义一致。
 
     let response = match capture(&request) {
         Ok(r) => r,
@@ -1612,6 +1716,7 @@ fn screenshot_to_files(flags: &std::collections::HashMap<String, String>) -> Exi
         width: response.width,
         height: response.height,
         source_bounds: response.source_bounds,
+        capture_mode: response.capture_mode,
         display_id: response.display_id,
         bytes: bytes.len() as u64,
     };
@@ -1636,10 +1741,28 @@ fn screenshot_to_stdout(flags: &std::collections::HashMap<String, String>) -> Ex
     }
 }
 
+fn json_command<T: for<'de> Deserialize<'de>, R: Serialize>(
+    operation: impl FnOnce(&T) -> Result<R, String>,
+) -> ExitCode {
+    match read_body::<T>()
+        .and_then(|request| operation(&request))
+        .and_then(|response| write_json(&response))
+    {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => fail(error),
+    }
+}
+
 fn main() -> ExitCode {
     let (command, flags) = parse_args(std::env::args().skip(1).collect());
-
+    // 所有窗口/输入坐标都使用物理像素，不能只在截图命令里设置感知。
+    unsafe {
+        let _ = SetProcessDpiAwareness(PROCESS_PER_MONITOR_DPI_AWARE);
+    }
     match command.as_str() {
+        "child-windows" => json_command(window_control::children),
+        "window-message" => json_command(window_control::perform_message),
+        "manage-window" => json_command(window_control::manage),
         "list-displays" => {
             unsafe {
                 // 用 PER_MONITOR 而不是 SYSTEM：多屏不同缩放率时，前者按显示器各自换算，
@@ -1729,11 +1852,11 @@ fn main() -> ExitCode {
             Err(e) => fail(e),
         },
         "" => fail(
-            "用法：dsh-screen <list-displays|screenshot|find-image|action|list-windows|focus-window|probe-pixels> \
+            "用法：dsh-screen <list-displays|screenshot|find-image|action|list-windows|focus-window|child-windows|window-message|manage-window|probe-pixels> \
              [--x N --y N --width N --height N]",
         ),
         other => fail(format!(
-            "未知命令 '{other}'（支持 list-displays / screenshot / find-image / action / list-windows / focus-window / probe-pixels）"
+            "未知命令 '{other}'（支持 list-displays / screenshot / find-image / action / list-windows / focus-window / child-windows / window-message / manage-window / probe-pixels）"
         )),
     }
 }

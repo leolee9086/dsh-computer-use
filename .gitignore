@@ -11,3 +11,6 @@ native/target/
 # 原生 helper 的调试产物
 native/out/
 *.tgz
+
+# 本机观测、开发检查点与隔离 fixture 产物
+.local/

@@ -1,89 +1,103 @@
 # dsh-computer-use
 
-`dsh-computer-use` 是一套独立的 Cordis 插件，为 DeepSeek Harness 提供**模型可见、可审计**的桌面操作能力，且不修改 Harness 源码树、不要求改动任何随附的 agent 预设。
+独立的 Cordis bundle，为 DeepSeek Harness 提供视觉、原生无障碍和 Windows 讲述人操作路径。0.5.0 注册 **18 个 `computer_*` 工具**；无障碍观测、阅读和语义动作可以独立使用，文本模型也能操作原生应用。
 
-可安装的 bundle 注册一个 `computer` 服务，并在同一个 bundle patch 里激活面向模型的工具插件与工作流提示词插件。安装过程不创建也不需要任何 agent 预设。
+Windows 是经过本机运行时验证的主要后端。macOS AX、Linux AT-SPI 已实现并做契约测试，尚无这两个系统的原生运行时验收。接口覆盖与实测范围见 [EVIDENCE.md](EVIDENCE.md)；对标的官方接口见 [能力矩阵](references/CAPABILITY-MATRIX.md)。目前没有任务成功率基准，也没有 SOTA 等效结论。
 
-## Bundle 结构
+## 操作路径
 
-一个包、一行裸包加载项、两个面 —— 与 `dsh-tool-websearch`、`dsh-tool-restart` 同构：
+| 路径 | 工具 | 行为 |
+| --- | --- | --- |
+| 视觉 | `computer_screenshot`、`computer_find_image`、`computer_click_image` | Windows 支持多显示器、区域/缩放、前台窗口捕获、显式后台 PrintWindow、模板匹配与唯一匹配点击。图像以 DSH 附件返回。 |
+| 指针 | `computer_move`、`computer_click`、`computer_drag`、`computer_scroll` | 截图像素映射到实际捕获边界；Windows 支持三击、modifier、按住、带路径拖动。 |
+| 键盘/序列 | `computer_key`、`computer_type`、`computer_input` | Windows 支持扩展键、Insert/CapsLock、重复/按住，以及一条有界 down/move/up 序列；纯键盘也接受窗口或绑定窗口的语义证据。 |
+| 无障碍 | `computer_accessibility`、`computer_find`、`computer_read`、`computer_element` | 独立快照、元素查找、文本/选择/值/状态读取与控件模式操作。Windows 显式选择 UIA 或 MSAA。 |
+| 窗口 | `computer_windows`、`computer_window_input` | Windows 列出含最小化状态的顶层窗口，枚举子 HWND、管理窗口，或向已观测子窗口发送限定点击/滚轮消息。 |
+| 讲述人 | `computer_narrator` | 只读进程状态；向已运行的讲述人发送固定 Microsoft Standard 布局命令。 |
+| 能力 | `computer_status` | 返回平台能力和显示器几何。 |
 
-- `exports["."]` → `src/index.js` —— 裸包加载项的 host 半边，再导出 host 插件（`provide('computer')`）。它的加载项沿用 `dsh-computer-use-host` 这个 id，因此 profile 层已有的配置覆盖不会失效。
-- `exports["./tool"]` → `src/tool.js`、`exports["./prompt"]` → `src/prompt.js` —— 子路径加载项，各自有独立的 config 块（Loader 会整体替换一行的 `config`，所以 host 与 tool 的参数互不干扰，可以各自覆盖）。
-- `exports["./client"]` → `src/client.js` —— 浏览器半边（`dsh.client.platform: "web"`），经同一行裸包加载项扫描进 `window.__DSH_BOOT__`。它把 `computer_screenshot` 的工具卡渲染成真实图片，用的是 toolview owner props 里由会话鉴权提供的 `loadImage` 加载器；`read_image` 仍走产品内置的图片卡，没有被遮蔽。
+### 独立无障碍循环
 
-浏览器半边的 `__ModuleLoader__.load` id 必须与包名一致 —— client-modules 图会校验注册 id 与图条目 id 是否相同。
+1. 调用 `computer_windows`，`operation:"list"`，获得短期 `window_id`；也可直接观察当前焦点应用。
+2. 调用 `computer_accessibility`。Windows 可以给 `window_id`；`backend:"native"` 默认 UIA，`backend:"msaa"` 是独立的传统 IAccessible 实现。
+3. 用 `computer_find` 缩小元素范围，或直接使用快照中的 `element_id`。
+4. `computer_read` 读取有界内容；`computer_element` 使用控件实际暴露的 pattern 操作。
+5. 每次控制尝试后重新观测，再进行下一次动作。
 
-## 能力模型
+这条路径不需要图像能力。若快照选择绑定 `screenshot_id`，后续阅读/动作仍必须给同一份图像证据；截图的 SHA-256 绑定保持有效。
 
-- 截图观测返回一份模型可见的图片附件、其持久化字节的 SHA-256，以及一个短期有效的 screenshot ID。
-- 截图可以瞄准**整个虚拟桌面**、**单个显示器**（`display_id`），或**任意区域**（`x`/`y`/`width`/`height`，单位为虚拟桌面像素，允许负值），并可用 `scale` 放大。超出虚拟桌面的区域会被裁剪到桌面范围内，而回报的 `source_bounds` **始终描述实际截取的区域** —— 正因如此，局部截图的坐标操作才依然正确。
-- 截图还可以指名**一个窗口**（`window_id`）：它**一步完成**「把该窗口提到前台 + 按它那一刻的实际边界截图」，所以被别的窗口盖住的窗口也能正确截到。聚焦只校验身份（窗口句柄 + 进程 + 标题的**前缀**），**不比对列出时的边界** —— 窗口被移动过不代表换了一个窗口，而拿列表时刻的旧边界去校验，会让一次本该成功的截图直接失败；边界是在聚焦之后实时读出来的。这个形态改变了前台，因此按控制类审批，并同样消耗此前所有记录。**聚焦与抓屏在同一次原生 helper 调用内完成**，刻意不拆成两步：宿主每 spawn 一次子进程，Windows 就会把宿主所在的控制台窗口提到前台，拆成两次时第二次启动冒出来的控制台窗口会正好盖住刚被提到前面的目标，截回来的就是那个控制台。
-- 坐标操作必须带上那个 screenshot ID。provider 用随观测一并保存的原始捕获边界，把持久化图片的像素换算回物理桌面坐标，再把图片内的比例坐标夹取到该矩形的最后一个物理像素。
-- 原生无障碍观测必须带一个**新的** screenshot ID，并把该 screenshot ID 与 SHA-256 一并存入短期有效的语义快照。树的根是被聚焦元素最近的原生 Window/Application，返回稳定的原生 element ID、控件元信息、边界、可聚焦性与支持的 pattern。`computer_find` 按名称、角色或 automation ID 缩小范围；`computer_element` 只接受与该快照绑定的那张截图。
-- 语义动作支持原生 invoke/focus/value/toggle/expand/collapse/select，以及针对已发现的屏幕外元素的 `scroll_into_view`。`scroll_into_view` 是一个独立的状态变更步骤：其后任何操作前都要重新截图并重新取语义快照。
-- 截图证据对一次有后果的桌面操作是**一次性**的。每一次成功的坐标或语义动作都会消耗该 agent 的全部截图、语义快照与窗口列表记录。窗口聚焦需要 `computer_windows:list` 刚返回的、属于该 agent 的 `window_id`，并同样消耗此前所有记录。因此下一个控制动作必须基于新捕获的桌面状态。
-- Windows 在执行动作时，用 UIA runtime ID 加上进程与当前身份属性重新识别元素。如果被观测的元素已被替换或改变，它会失败退出，而不是把动作施加到一个仅仅相似的控件上。模型可见的快照受 `maxAccessibilityNodes` 限制；重新识别走一趟有限的控制视图遍历，受 `maxAccessibilityActionCandidates` 限制，因此不会在施加限制之前就把整个进程树物化出来。
-- 输入类动作是串行的，且是独占式工具调用。下一步应当先重新观测屏幕，再做下一个有后果的动作。
-- Windows 提供直接捕获（整个桌面、单个显示器、任意区域，或**指名窗口**——后者先提升该窗口再按其实时边界捕获，走自带的 `native/dsh-screen.exe`）、指针与键盘注入、可见非最小化顶层窗口枚举、有界的 UI Automation 树、语义元素查找，以及基于 pattern 的 UIA 动作（含 scroll-into-view）。聚焦之前它会拿 PID、标题、边界重新校验所列 HWND，随后核对最终前台状态；常规前台请求失败时，先补发一个孤立的 Alt 按下/抬起解开前台锁再试一次，仍不成才通过临时挂接输入队列重试。指名窗口的捕获只校验句柄/进程/标题前缀，不比对旧边界。
-- macOS 提供直接捕获（**目前仅整个虚拟桌面**，因此 `window_id` 形式的窗口截图会明确报错，而不是静默交回一张整屏图）、键盘自动化、有界的 System Events 窗口枚举/聚焦、AX 语义适配器，以及经由自带 JXA helper 的指针动作。只列出暴露了原生窗口标识的窗口。列出的窗口 ID 绑定其 PID、标题、边界与原生窗口 ID；聚焦前会确认当前恰好只有一个匹配项，再把对应应用提到前台，提出后再校验一次，然后聚焦。指针与 AX 操作需要 macOS 的「辅助功能」权限；AX 的快照与动作调用还需要「自动化」权限。AX 动作在条件允许时会重新核对 PID、名称、角色与观测到的边界。
-- Linux 通过系统设施捕获（**目前仅整个虚拟桌面**，同理不支持 `window_id` 窗口截图）；在兼容 X11 的会话里用 `xdotool` 做指针、键盘、窗口枚举、聚焦与活动窗口查询。查询元信息时消失的窗口会被跳过；聚焦前会拿所列 XID 的 PID、标题、边界重新校验，然后激活。它的 AT-SPI 语义适配器用 `python3`/`python` 加 `pyatspi`，并要求 AT-SPI 总线在运行；它惰性枚举子节点，受配置的节点/候选预算约束，并拒绝深度超过其来源快照上限的动作路径。
-- 当已安装的 `@yuxianglin/dsh-bridge-browser` host bundle 连接时，对应的 agent 会同时拿到它的 `browser_*` 文本/DOM 工具与 `computer_*`。工作流提示词要求在浏览器/桌面边界之间切换时重新取证，并禁止混用浏览器索引、桌面坐标与原生 element ID。这两个域被刻意保持分离，不存在合成的跨域定位器。
-- 本 provider **不使用系统剪贴板**作为图像传输通道，也**不依赖 Rubick 那个不透明的 `ScreenCapture.exe`**。Windows 走自带原生 helper（`native/dsh-screen.exe`，Rust + Win32 GDI，MIT）：捕获路径开源、协议记录在 `native/README.md`，PNG 通过临时文件交回，既不走 stdout 管道也不走剪贴板。
+UIA 读取包括 TextPattern 文档/选择/字符范围、ValuePattern、范围值、选择集、scroll/window 状态和 grid 信息/单元格。新增动作包括多选增删、范围值、scroll、文本选择/滚入视图、窗口状态/关闭与 transform 移动/缩放。只有提供对应 pattern 的控件才支持这些动作。
 
-## 平台支持与局限
+MSAA 使用 `AccessibleObjectFromWindow` / `AccessibleChildren`，提供传统控件树、名称/角色/状态/值读取、默认动作、值写入和选择。它使用 HWND/PID/窗口标题与可重定位路径检查身份；同一位置出现属性完全相同的替换控件时，MSAA 无法提供 UIA runtime ID 那样的代际保证。
 
-**Windows 是唯一经过实测的平台。** 作者日常只用 Windows，所以：
+### 视觉与原生输入
 
-- **macOS 与 Linux 的实现没有稳定性保证。** 它们不是空壳 —— 截图、指针、键盘、窗口枚举都接了各自的系统接口 ——
-  但作者没有条件持续验证，出问题也未必能及时修。**请当参考实现看待，不要当生产依赖。**
-- **区域截图与找图只在 Windows 上可用。** macOS / Linux 后端目前只能抓整个虚拟桌面，
-  所以 `window_id` 形式的窗口截图、以及依赖它的找图能力会**明确报错**，
-  而不是静默交回一张整屏图（那会让调用方以为自己拿到的是那个窗口）。
-- **前台锁的处理是 Windows 专有的。** 提窗失败时补发一个孤立的 Alt 按下/抬起
-  （见 CHANGELOG 与 `native/src/main.rs` 的 `unlock_foreground`），
-  这是 Windows `SetForegroundWindow` 的权限规则逼出来的做法，别的平台没有对应逻辑。
-- **`native/dsh-screen.exe` 是 Windows 原生 helper**（Rust + `windows` crate，MIT）。
-  macOS / Linux 走各自的脚本后端，与它无关。
+普通桌面/区域截图返回 `screenshot_id`、持久化附件 SHA-256 和实际 `source_bounds`。指针工具必须使用该图像中的坐标。Windows 指名窗口捕获将提窗与抓屏放在同一次 helper 调用里，避免两次进程启动之间丢失目标；它按控制类审批。
 
-欢迎在 macOS / Linux 上试用并反馈，但请把「它可能坏」当作**已知前提**，而不是意外。
+Windows 输入序列最多 256 步，显式等待/按住总和最多 10 秒；全文本最多 100000 UTF-16 单元。整条序列先校验再执行，首错停止。正常结束及处理到的错误会释放该序列取得的按键/鼠标按钮；不会取得或释放调用前已由外部按住的输入。绑定窗口的序列每步检查身份及前台状态。强制结束进程无法保证析构清理执行，见 [SECURITY.md](SECURITY.md)。
 
-## 安装到当前 web profile
+`computer_key` / `computer_type` 接受新的 `window_id`、绑定窗口的 `snapshot_id` 或前台截图证据。键盘快捷键的实际含义由应用决定，输入投递成功仍需读取结果确认。
 
-在 `D:\dev\deepseek-harness` 下执行：
+### 后台捕获与子窗口消息
+
+`computer_screenshot` 给 `window_id` 和 `background:true` 时，Windows 用 PrintWindow 按窗口完整边界渲染，返回 `capture_mode:"print-window"`，不主动提窗或恢复窗口，也不回退到前台捕获。GPU/受保护窗口可能失败或返回空白；最小化窗口明确报错，应先显式恢复。
+
+后台图像不能作为全局指针动作的证据。可以使用语义动作，或先 `computer_windows(operation:"children")` 取得短期 `child_window_id`，再调用 `computer_window_input`。消息坐标是**子窗口客户区物理像素**。接口只有固定 click/scroll，不接受任意消息编号。每次复核 root/parent/PID/class/title，使用 500ms 消息超时。
+
+helper 不主动请求前台，应用的消息处理仍可能自行激活窗口；响应的 `foregroundChanged` 记录实际变化。`delivered:true` 仅代表消息已交付，`applicationResultVerified:false` 表示仍需重新读/观察。窗口 `close` 同样只是请求关闭，应用可能拒绝或弹出保存对话框。
+
+开发时已验证：Low 完整性标签的 exe 对 Medium 目标执行 PrintWindow 会报 Win32 错误 5；相同字节部署到新临时目录、继承 Medium 后捕获成功。插件不会自动修改标签、提升权限或静默搬迁；可通过 host 配置 `nativeHelperPath` 明确选择部署产物。显式路径不存在会报错。
+
+### Windows 讲述人
+
+`computer_narrator(operation:"status")` 只检查当前 Windows 登录会话中的 Narrator 进程，不启动讲述人或改设置。命令要求讲述人已运行以及绑定窗口的新证据；可选 Insert / CapsLock modifier，命令按 Microsoft **Standard** 布局发送。
+
+支持 item/view 移动、当前项/窗口/标题/文档/选择/行/词阅读、连续阅读、重复语音、scan 切换、激活与停止语音。实际配置布局不能从进程状态中推断，因此响应明确标为 unknown / Standard assumption。
+
+讲述人虚拟光标、UIA 键盘焦点、语音是不同状态。本版本提供命令投递与 UIA/MSAA 内容读取协作，**没有语音捕获或虚拟光标观测**。本机只验证了状态桥接及命令/审批/证据合同，没有启动讲述人进行语音验收。
+
+## 平台范围
+
+| 能力 | Windows | macOS | Linux |
+| --- | --- | --- | --- |
+| 桌面截图/基本输入/窗口列出与聚焦 | 已实测 | 已实现、契约测试 | 已实现、契约测试；输入/窗口需 X11 `xdotool` |
+| 独立无障碍观测/读取/基本动作 | UIA、MSAA 已实测 | AXValue / AXSelectedText；需 Automation + Accessibility | AT-SPI 文本/范围/选择/caret/数值；需 Python + pyatspi + AT-SPI 总线 |
+| 区域/窗口截图、图像匹配 | 已实测 | 明确不支持 | 明确不支持 |
+| 原子输入序列/路径拖动/扩展 hold/repeat | 已实现及核心真机检查 | 明确拒绝 | 明确拒绝 |
+| PrintWindow/子 HWND/窗口管理/讲述人 | Windows 专属 | 明确拒绝 | 明确拒绝 |
+
+macOS/Linux 的快照目前从焦点应用获取，不支持 Windows 形式的目标窗口语义根。显式 UIA/MSAA 后端请求会报错。macOS AX 不提供本接口的字符范围或 grid 读取；Linux 不提供 grid 读取。不支持的扩展输入选项在执行前报错，避免静默忽略。macOS 多屏左/上方显示器的截图原点与 Quartz 坐标仍待原生验收。
+
+## 安装与组合
+
+在 Harness CLI 可用的环境中，将仓库或打包产物添加为 profile bundle，例如：
 
 ```powershell
-pnpm dsh plugin --profile web add D:\dev\dsh-computer-use
+pnpm dsh plugin --profile web add <path-to-dsh-computer-use>
 ```
 
-这会把 bundle 装进 profile 并加上它的 `cordis.patch.yml` 层。该层会一并激活 host provider、面向模型的工具消费方与工作流提示词；安装过程中不包含任何预设编辑。bundle 栈是在 Harness 进程启动时读取的，所以请用 Harness 常规的重启入口重启既有进程，再开始会话；只刷新浏览器页面不会挂载新装的 bundle。
+bundle patch 同时激活 host `computer` 服务、工具和工作流提示词，不需要编辑任何 agent 预设。使用 Harness 正常重启入口加载新 host 代码，刷新网页不足以挂载它。包保持现有 `src` ESM 入口；浏览器入口将截图工具卡渲染为图片，加载器注册 ID 与包名一致。
 
-bundle 把 `observeApproval` 与 `controlApproval` 默认设为 `ask`。当当前 agent 的 DSH 权限预设解析为 `danger-full-access`（UI 里的「Full access」）时，这些默认的询问会继承该预设的免提示审批策略而自动放行。本插件里显式写的 `deny` 仍然优先。profile patch 可以覆盖任一行，但 Loader 层是**整体替换**一行的 `config`，不做深合并 —— 覆盖某一行时要写全该行的完整配置。`maxAccessibilityActionCandidates` 默认 `5000`，它与模型可见树的限制 `maxAccessibilityNodes` 是两个独立的量。
+默认 `observeApproval` / `controlApproval` 都为 `ask`。权威 DSH 权限预设为 Full access（danger-full-access + approval never）时继承免提示；显式 `deny` 始终有效。Loader 对单行 `config` 整体替换，覆盖时需写全该行配置。截图只读/后台与焦点改变分开审批，讲述人 status / command 同样区分观察与控制。
 
-## 开发
+运行时只通过 Cordis 的服务契约取得 Harness 能力，不导入 Harness 实现。Windows 无障碍/讲述人依赖可选 `edge-js`，C# 在 Node 进程内编译并调用；视觉/窗口输入走仓库自带的 Rust exe。生产后端不走 PowerShell，也不使用系统剪贴板传图。
+
+## 开发与交付验证
+
+Node >=22.19，pnpm；原生构建需要 Rust >=1.88。真实 Harness 回归默认使用相邻 `../deepseek-harness` 检出，可设 `DSH_HARNESS_ROOT`。
 
 ```powershell
-npm run verify
-npm run verify:profile
-npm run smoke:windows
-npm run smoke:linux
-npm run smoke:macos
+pnpm install
+pnpm run verify
+python test/linux-reader-contracts.py
+pnpm run smoke:windows
+pnpm run verify:profile
+# 修改原生源码后：
+cargo build --release --manifest-path native/Cargo.toml
+pnpm run native:stage
+pnpm pack --pack-destination .local
 ```
 
-Windows 的显示器 smoke 是只读的 provider 探针。`npm run verify:profile` 会建一个临时 DSH home，只把本 bundle 装进去，并启动一个真实的 Loader profile，用来检查 provider、全部面向模型的 schema 与工作流提示词，全程不创建也不挂载预设。它默认解析同级的 `../deepseek-harness` 检出；可用 `DSH_HARNESS_ROOT` 指向别的检出。语义聚焦 smoke 会起一个标题唯一的临时 WPF 窗口，通过 UI Automation 聚焦它自己的原生 Edit 元素、写入文本、切换复选框、点击按钮，并在每个动作后用一份新的 UIA 快照确认结果，最后只终止那个子进程并清理自己的临时脚本。
+`verify` 检查所有 JS 文件并运行单元/提供者合同及真实 ToolRuntime 回归。`verify:profile` 使用独立临时 DSH home 检查真实 Loader、18 工具及提示词，清理后不影响既有 profile。Windows 动作 smoke 只操作标题唯一、由自己创建的 WPF/WinForms 进程，结束后清理自己的进程和临时目录。
 
-Linux 语义前置条件：`python3` 或 `python`，带 `pyatspi` 模块，且 AT-SPI 总线在运行。macOS 语义前置条件：`osascript` 需要「自动化」与「辅助功能」权限；自带的 `src/macos-ax.js` helper 以 JXA 方式调用。各平台适配器在 Windows 上做契约测试，而原生运行时 smoke 必须在各自的目标操作系统上跑。
-
-本项目**没有运行时 npm 依赖**。它使用 host profile 提供的实时 Cordis 服务，因此它保持为独立版本化的项目，而 DSH 保持为组合宿主。
-
-## 安全
-
-启用控制类动作之前，请先读 [SECURITY.md](SECURITY.md)。[EVIDENCE.md](EVIDENCE.md) 记录了已验证的机制、可复现的检查，以及在任何 SOTA 式声明之前仍然存在的缺口。
-
-## 来源与出处
-
-见 [references/UPSTREAM.md](references/UPSTREAM.md)。项目记录了所审计的参考资料，且不使用任何第三方桌面自动化二进制，也不直接依赖 npm 桌面驱动。
-
-## 变更记录
-
-见 [CHANGELOG.md](CHANGELOG.md)。
+`native:stage` 复制 release exe 并记录二进制与 Rust 源文件哈希；`prepack` 要求回归成功且产物清单匹配当前版本/源码。打包不含构建缓存或本地检查点。来源、许可与风险边界见 [UPSTREAM.md](references/UPSTREAM.md)、[LICENSE](LICENSE)、[SECURITY.md](SECURITY.md)，变更见 [CHANGELOG.md](CHANGELOG.md)。

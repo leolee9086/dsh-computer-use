@@ -1,0 +1,11 @@
+import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+import { resolve } from 'node:path';
+import { root, sha256, sources, version } from './native-artifact.mjs';
+const manifest = JSON.parse(await readFile(resolve(root, 'native/release/manifest.json'), 'utf8'));
+const binary = await readFile(resolve(root, 'native/release/dsh-screen.exe'));
+assert.equal(manifest.version, await version(), 'Native artifact version must match the package');
+assert.equal(binary.subarray(0, 2).toString('ascii'), 'MZ', 'Expected Windows PE header');
+assert.equal(sha256(binary), manifest.executableSha256, 'Native executable hash mismatch');
+assert.deepEqual(await sources(), manifest.sources, 'Native sources changed; build --release and pnpm native:stage again');
+console.log(`Native artifact verified: ${manifest.version} ${manifest.executableSha256}`);

@@ -225,10 +225,12 @@ def verify_identity(accessible, expected):
         "role": str(safe(lambda: accessible.getRoleName(), "")),
         "processPath": process_path_of(accessible),
     }
-    for key, value in expected.items():
-        if key == "processId" or not isinstance(value, str) or value == "":
+    # 仅比对身份字段。kind/value/text 是操作参数，不能当成应用属性再比一次。
+    for key in actual:
+        value = expected.get(key)
+        if not isinstance(value, str) or value == "":
             continue
-        if actual.get(key, "") != value:
+        if actual[key] != value:
             raise RuntimeError("AT-SPI element " + key + " changed after observation")
 
 
@@ -280,6 +282,54 @@ def scroll_into_view(accessible):
     perform_named_action(accessible, {"scroll to visible", "scrolltovisible"})
 
 
+def read_element(accessible, action):
+    if any(key in action for key in ("row", "column")):
+        raise RuntimeError("AT-SPI reader does not expose grid-cell queries")
+    maximum = action.get("maxChars", 16000)
+    if not isinstance(maximum, int) or not 1 <= maximum <= 100000:
+        raise RuntimeError("AT-SPI maxChars must be 1..100000")
+    role = str(accessible.getRoleName())
+    password = "password" in role.lower() or state_contains(accessible, "STATE_PROTECTED")
+    result = {"backend": "atspi", "role": role, "name": str(accessible.name), "password": password}
+    if password:
+        result["redacted"] = True
+        return result
+    text = safe(lambda: accessible.queryText(), None)
+    if text is not None:
+        count = int(text.characterCount)
+        start, end = action.get("start", 0), action.get("end", count)
+        if not isinstance(start, int) or not isinstance(end, int) or not 0 <= start <= end <= count:
+            raise RuntimeError("AT-SPI text range exceeds current text")
+        if "text" in action:
+            # 不无界读取整篇文章来寻找字符串；有界读取中找不到就明确报错。
+            content = text.getText(0, min(count, maximum))
+            start = content.find(action["text"])
+            if start < 0:
+                raise RuntimeError("Requested text not found within the bounded AT-SPI content")
+            end = start + len(action["text"])
+        result["text"] = text.getText(start, min(end, start + maximum))
+        result["text_truncated"] = end - start > maximum
+        result["caret_offset"] = int(text.caretOffset)
+        remaining = maximum
+        selected = []
+        for index in range(min(int(text.getNSelections()), 64)):
+            first, last = text.getSelection(index)
+            selected.append({"start": first, "end": last, "text": text.getText(first, min(last, first + remaining)), "truncated": last - first > remaining})
+            remaining = max(0, remaining - (last - first))
+            if remaining == 0:
+                break
+        result["selection"] = selected
+    elif any(key in action for key in ("text", "start", "end")):
+        raise RuntimeError("AT-SPI element has no text interface")
+    numeric = safe(lambda: accessible.queryValue(), None)
+    if numeric is not None:
+        result["range_value"] = {"value": numeric.currentValue, "minimum": numeric.minimumValue, "maximum": numeric.maximumValue, "increment": numeric.minimumIncrement}
+    selection = safe(lambda: accessible.querySelection(), None)
+    if selection is not None:
+        result["selected_count"] = int(selection.nSelectedChildren)
+    return result
+
+
 def execute_action(desktop, payload):
     action = payload["action"]
     max_depth = action.get("maxDepth")
@@ -289,6 +339,8 @@ def execute_action(desktop, payload):
     accessible = resolve_path(desktop, path)
     verify_identity(accessible, action)
     kind = action.get("kind")
+    if kind == "read":
+        return read_element(accessible, action)
     if kind == "focus":
         component = safe(lambda: accessible.queryComponent(), None)
         if component is None or not component.grabFocus():

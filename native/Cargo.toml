@@ -1,8 +1,8 @@
 [package]
 name = "dsh-screen"
-version = "0.1.0"
+version = "0.5.0"
 edition = "2021"
-description = "Native screen capture helper for dsh-computer-use: display enumeration and region capture with GDI"
+description = "Native Windows computer-use helper: GDI/PrintWindow capture, bounded input sequences and identity-checked window control"
 
 # 这是给 dsh-computer-use 用的原生 helper。
 # 为什么不做成 Node 原生 addon（N-API）：
@@ -26,6 +26,8 @@ path = "src/main.rs"
 windows = { version = "0.58", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
+    # windows 0.58 的 PrintWindow 实际生成在 Storage::Xps。
+    "Win32_Storage_Xps",
     "Win32_UI_HiDpi",
     # 「聚焦并截图」需要的窗口操作：
     #   - SetForegroundWindow / GetForegroundWindow / ShowWindow / IsWindow / IsWindowVisible /

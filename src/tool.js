@@ -1,10 +1,14 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { NARRATOR_COMMANDS, narratorAction } from './narrator.js';
+import { INPUT_STEPS_SCHEMA, MODIFIERS, inputSequenceArgs, keyOptions } from './input-actions.js';
 import { accessibilityElementById, findAccessibilityElements } from './semantics.js';
+import { ELEMENT_OPERATIONS, PATTERN_BY_OPERATION, SEMANTIC_PARAMETERS, semanticActionArgs, textRangeArgs } from './accessibility-actions.js';
 
 const OBSERVATION_TOOLS = new Set([
   'computer_accessibility',
   'computer_find',
   'computer_find_image',
+  'computer_read',
   'computer_screenshot',
   'computer_status',
 ]);
@@ -16,6 +20,10 @@ const TOOL_NAMES = new Set([
   'computer_drag',
   'computer_element',
   'computer_key',
+  'computer_input',
+  'computer_move',
+  'computer_narrator',
+  'computer_window_input',
   'computer_scroll',
   'computer_type',
   'computer_windows',
@@ -173,7 +181,7 @@ function agentState(states, exec) {
   }
   let value = states.get(exec.agent);
   if (value === undefined) {
-    value = { observations: new Map(), semanticSnapshots: new Map(), windowLists: new Map() };
+    value = { observations: new Map(), semanticSnapshots: new Map(), windowLists: new Map(), childWindowLists: new Map() };
     states.set(exec.agent, value);
   }
   return value;
@@ -240,12 +248,61 @@ function freshWindow(states, exec, windowId, config) {
   throw new Error(`window '${windowId}' is unavailable in this session; list native windows before focusing one`);
 }
 
+/** A semantic observation can stand on its own, or retain its exact image binding. */
+function semanticEvidence(states, exec, args, config) {
+  const snapshotId = requiredString(args, 'snapshot_id');
+  const snapshot = freshSemanticSnapshot(states, exec, snapshotId, config);
+  const screenshotId = optionalNonBlankString(args, 'screenshot_id');
+  if (snapshot.screenshotId !== undefined) {
+    const screenshot = freshObservation(states, exec, screenshotId ?? snapshot.screenshotId, config);
+    if ((screenshotId ?? snapshot.screenshotId) !== snapshot.screenshotId || screenshot.contentHash !== snapshot.screenshotHash) {
+      throw new Error(`semantic snapshot '${snapshotId}' is not bound to screenshot '${screenshotId}'; capture accessibility immediately after that screenshot`);
+    }
+  } else if (screenshotId !== undefined) {
+    throw new Error('this semantic snapshot has no screenshot binding; omit screenshot_id');
+  }
+  return { snapshotId, snapshot };
+}
+
+const KEYBOARD_EVIDENCE_SCHEMA = {
+  screenshot_id: { type: 'string' }, snapshot_id: { type: 'string' }, window_id: { type: 'string' },
+};
+function keyboardEvidence(states, exec, args, config) {
+  const ids = ['screenshot_id', 'snapshot_id', 'window_id'].filter((key) => args[key] !== undefined && args[key] !== '');
+  if (ids.length === 0) throw new Error('keyboard input requires screenshot_id, snapshot_id or window_id');
+  let observation;
+  const targets = [];
+  if (ids.includes('screenshot_id')) {
+    observation = freshObservation(states, exec, requiredString(args, 'screenshot_id'), config);
+    if (observation.captureMode === 'print-window') throw new Error('background screenshots only support targeted window input or semantic actions; capture in foreground before native input');
+    if (observation.focus !== undefined) targets.push(observation.focus);
+  }
+  if (ids.includes('snapshot_id')) {
+    const { snapshot } = semanticEvidence(states, exec, args, config);
+    if (snapshot.focus === undefined) throw new Error('semantic keyboard input needs a window-bound snapshot; observe accessibility with window_id');
+    targets.push(snapshot.focus);
+  }
+  if (ids.includes('window_id')) {
+    const record = freshWindow(states, exec, requiredString(args, 'window_id'), config);
+    targets.push({ handle: record.nativeWindow.id, processId: record.nativeWindow.processId, title: record.nativeWindow.title });
+  }
+  const focus = targets[0];
+  if (targets.some((target) => target.handle !== focus.handle || target.processId !== focus.processId || target.title !== focus.title)) throw new Error('keyboard evidence refers to different windows');
+  return { observation, focus, evidence: ids.map((key) => args[key]).join(', ') };
+}
+function foregroundObservation(states, exec, screenshotId, config) {
+  const observation = freshObservation(states, exec, screenshotId, config);
+  if (observation.captureMode === 'print-window') throw new Error('background screenshots cannot ground global pointer input; use computer_window_input or a foreground capture');
+  return observation;
+}
+
 function consumeAllObservations(states, exec) {
   const state = agentState(states, exec);
   const consumedAt = Date.now();
   for (const observation of state.observations.values()) observation.consumedAt = consumedAt;
   for (const snapshot of state.semanticSnapshots.values()) snapshot.consumedAt = consumedAt;
   for (const list of state.windowLists.values()) list.consumedAt = consumedAt;
+  for (const list of state.childWindowLists.values()) list.consumedAt = consumedAt;
 }
 
 function rememberBounded(map, id, value, limit) {
@@ -260,14 +317,16 @@ function contentHash(data) {
 function observationText(value) {
   const xScale = value.source_bounds.width / value.image.width;
   const yScale = value.source_bounds.height / value.image.height;
-  // 指名窗口的截图会把它提到前台，这件事对模型是可见事实，不是实现细节。
+  // 明确区分前台像素与 PrintWindow 渲染：后台图像不能授权全局指针输入。
   const raised = value.window === undefined
     ? ''
-    : `Raised for this capture: "${value.window.title}" (${value.window.id}).\n`;
+    : `${value.capture_mode === 'print-window' ? 'Captured in background with PrintWindow' : 'Raised for this capture'}: "${value.window.title}" (${value.window.id}).\n`;
   return `<computer-screenshot id="${value.screenshot_id}">
 ${raised}${value.image.mediaType} attachment: ${value.image.width}x${value.image.height} px; SHA-256: ${value.content_hash}.
 Native source bounds: x=${value.source_bounds.x}, y=${value.source_bounds.y}, width=${value.source_bounds.width}, height=${value.source_bounds.height}.
-Use image coordinates with this exact screenshot id for click, drag, or scroll. Coordinate scale: x=${xScale.toFixed(4)}, y=${yScale.toFixed(4)}.
+${value.capture_mode === 'print-window'
+    ? 'Background image: use semantic controls or freshly enumerated child HWND client coordinates; this image cannot authorize global pointer input.'
+    : 'Use image coordinates with this exact screenshot id for click, drag, or scroll.'} Coordinate scale: x=${xScale.toFixed(4)}, y=${yScale.toFixed(4)}.
 </computer-screenshot>`;
 }
 
@@ -280,6 +339,7 @@ function screenshotSchema() {
       screenshot_id: { type: 'string' },
       captured_at: { type: 'number' },
       content_hash: { type: 'string' },
+      capture_mode: { type: 'string' },
       source_bounds: {
         type: 'object',
         additionalProperties: false,
@@ -342,6 +402,7 @@ function imageTool(name, description, parameters, execute) {
 }
 
 function isObservationExecution(exec) {
+  if (exec.name === 'computer_narrator') return exec.arguments?.operation === 'status';
   if (OBSERVATION_TOOLS.has(exec.name)) {
     // 指名窗口的截图会先把该窗口提到前台，那是有后果的控制动作，按控制类审批。
     // 不带 window_id 的截图仍然是纯观测。
@@ -349,14 +410,14 @@ function isObservationExecution(exec) {
       && exec.arguments !== null
       && typeof exec.arguments === 'object'
       && !Array.isArray(exec.arguments)
-      && exec.arguments.window_id !== undefined) return false;
+      && exec.arguments.window_id !== undefined && exec.arguments.background !== true) return false;
     return true;
   }
   return exec.name === 'computer_windows'
     && exec.arguments !== null
     && typeof exec.arguments === 'object'
     && !Array.isArray(exec.arguments)
-    && exec.arguments.operation === 'list';
+    && ['list', 'children'].includes(exec.arguments.operation);
 }
 
 function policyDecision(policy, description) {
@@ -428,6 +489,12 @@ export function apply(ctx, rawConfig) {
   const config = resolveConfig(rawConfig);
   const observations = new WeakMap();
   const pipelineAsks = new WeakSet();
+  // 提供者报错前也可能已经输入或改变窗口；失败后同样要求重新观测。
+  const control = async (exec, operation) => {
+    try { return await operation(); }
+    finally { consumeAllObservations(observations, exec); }
+  };
+  const performInput = (action, exec) => control(exec, () => computer(ctx).perform(action, exec.signal));
   const registerTool = (tools, definition) => tools.register({
     ...definition,
     async execute(rawArgs, exec) {
@@ -456,9 +523,9 @@ export function apply(ctx, rawConfig) {
     registerTool(nested.tools, imageTool(
       'computer_screenshot',
       'Capture the desktop, a display, one region, or one named native window as a model-visible image. '
-      + 'Passing window_id raises that window and captures it in a single step, so a window hidden behind others is still captured correctly; '
-      + 'that form moves the foreground and therefore counts as desktop control. '
-      + 'Use the returned screenshot_id for coordinate actions, and capture again after any consequential action.',
+      + 'Passing window_id alone raises that window and captures it in a single step; that form counts as desktop control. '
+      + 'Windows background:true instead uses PrintWindow without raising/restoring; rendering depends on the application. '
+      + 'Only foreground screenshots authorize coordinate actions. Observe again after any control attempt.',
       {
         type: 'object',
         additionalProperties: false,
@@ -470,6 +537,7 @@ export function apply(ctx, rawConfig) {
           height: { type: 'number', description: 'Optional capture region height in pixels (>= 1).' },
           scale: { type: 'number', description: 'Optional zoom factor applied after cropping (1 = native pixels, 2 = magnified 2x). Useful for reading small text; the image is still capped by the configured max dimension.' },
           window_id: { type: 'string', description: 'Optional window_id from computer_windows. Raises that window to the foreground and captures the bounds it actually has at that moment, in one step — use it to capture a specific window even when it is covered. Give it alone (no x/y/width/height and no display_id).' },
+          background: { type: 'boolean', description: 'Windows only, requires window_id. Render with PrintWindow without raising or restoring the window. GPU/protected/minimized windows may not render. Global pointer input cannot use this image; use semantic actions or computer_window_input.' },
           save_to: { type: 'string', description: 'Optional file path to also write the captured PNG to. Use it to keep a template for computer_find_image: these are the original PNG bytes, not the re-encoded copy attached for viewing, so matching against it keeps full fidelity.' },
         },
       },
@@ -480,6 +548,9 @@ export function apply(ctx, rawConfig) {
         const scale = optionalFiniteNumber(args, 'scale');
         const windowId = optionalNonBlankString(args, 'window_id');
         const saveTo = optionalNonBlankString(args, 'save_to');
+        if (args.background !== undefined && typeof args.background !== 'boolean') throw new Error('background must be boolean');
+        if (args.background === true && windowId === undefined) throw new Error('background requires window_id');
+        if (args.background === true && computer(nested).capabilities.backgroundCapture !== true) throw new Error('background capture is unsupported on this platform');
         if (scale !== undefined && scale <= 0) throw new Error('scale must be greater than 0');
         if (windowId !== undefined && (region !== undefined || displayId !== undefined)) {
           throw new Error('window_id captures that window on its own; drop x, y, width, height and display_id');
@@ -503,12 +574,11 @@ export function apply(ctx, rawConfig) {
           const record = freshWindow(observations, exec, windowId, config);
           capture = await computer(nested).captureWindow(
             record.nativeWindow,
-            { scale: scale ?? null, saveTo: saveTo ?? null },
+            { scale: scale ?? null, saveTo: saveTo ?? null, background: args.background === true },
             exec.signal,
           );
-          // 聚焦改变了前台，此前所有截图、语义快照与窗口记录都不再可信。
-          // 这里在写入本次截图之前消耗：新截图本身仍然可用。
-          consumeAllObservations(observations, exec);
+          // 前台捕获提窗；后台捕获保持已有观测，可与语义/子窗口记录联合使用。
+          if (args.background !== true) consumeAllObservations(observations, exec);
           capturedWindow = {
             id: windowId,
             title: record.window.title,
@@ -535,12 +605,14 @@ export function apply(ctx, rawConfig) {
           sourceBounds: capture.sourceBounds,
           image: stored.ref,
           contentHash: hash,
+          captureMode: capture.captureMode,
           ...(capturedFocus === undefined ? {} : { focus: capturedFocus }),
         }, config.maxObservationsPerAgent);
         return {
           screenshot_id: screenshotId,
           captured_at: capture.capturedAt,
           content_hash: hash,
+          ...(capture.captureMode === undefined ? {} : { capture_mode: capture.captureMode }),
           source_bounds: capture.sourceBounds,
           image: stored.ref,
           ...(capturedWindow === undefined ? {} : { window: capturedWindow }),
@@ -672,8 +744,7 @@ export function apply(ctx, rawConfig) {
         x: spot.x + Math.floor(Number(result.templateWidth) / 2),
         y: spot.y + Math.floor(Number(result.templateHeight) / 2),
       };
-      await computer(ctx).perform({ kind: 'click', point, button, clickCount, focus }, exec.signal);
-      consumeAllObservations(observations, exec);
+      await performInput({ kind: 'click', point, button, clickCount, focus }, exec);
       return `已点击窗口「${record.window.title}」里唯一匹配到的那一处：屏幕坐标 (${point.x}, ${point.y})，`
         + `相似度 ${Number(spot.score).toFixed(3)}（模板 ${result.templateWidth}×${result.templateHeight}，左上角在 (${spot.x}, ${spot.y})）。`
         + ' Capture a new screenshot before the next consequential action.';
@@ -698,18 +769,20 @@ export function apply(ctx, rawConfig) {
       required: ['screenshot_id', 'x', 'y'],
       properties: {
         screenshot_id: { type: 'string' }, x: { type: 'number' }, y: { type: 'number' },
-        button: { type: 'string', enum: ['left', 'middle', 'right'] }, clicks: { type: 'number', enum: [1, 2] },
+        button: { type: 'string', enum: ['left', 'middle', 'right'] }, clicks: { type: 'number', enum: [1, 2, 3] },
+        modifiers: { type: 'array', items: { type: 'string', enum: MODIFIERS }, uniqueItems: true },
+        hold_ms: { type: 'integer', minimum: 0, maximum: 3000 },
       },
     },
     async (rawArgs, exec) => {
       const args = object(rawArgs);
       const screenshotId = requiredString(args, 'screenshot_id');
-      const observation = freshObservation(observations, exec, screenshotId, config);
+      const observation = foregroundObservation(observations, exec, screenshotId, config);
       const point = mapScreenshotPoint(observation, finiteNumber(args, 'x'), finiteNumber(args, 'y'));
       const button = enumValue(args, 'button', ['left', 'middle', 'right'], 'left');
-      const clickCount = enumValue(args, 'clicks', [1, 2], 1);
-      await computer(ctx).perform({ kind: 'click', point, button, clickCount }, exec.signal);
-      consumeAllObservations(observations, exec);
+      const clickCount = enumValue(args, 'clicks', [1, 2, 3], 1);
+      if ((args.hold_ms ?? 0) > 3000) throw new Error('click hold_ms must not exceed 3000');
+      await performInput({ kind: 'click', point, button, clickCount, modifiers: keyOptions(args).modifiers, holdMs: keyOptions(args).holdMs, focus: observation.focus }, exec);
       return `Clicked ${button} button at screenshot (${args.x}, ${args.y}) using ${screenshotId}. Capture a new screenshot before the next consequential action.`;
     },
   ));
@@ -722,18 +795,25 @@ export function apply(ctx, rawConfig) {
       required: ['screenshot_id', 'from_x', 'from_y', 'to_x', 'to_y'],
       properties: {
         screenshot_id: { type: 'string' }, from_x: { type: 'number' }, from_y: { type: 'number' }, to_x: { type: 'number' }, to_y: { type: 'number' }, duration_ms: { type: 'number' },
+        path: { type: 'array', minItems: 1, maxItems: 119, items: { type: 'object', additionalProperties: false, required: ['x', 'y'], properties: { x: { type: 'number' }, y: { type: 'number' } } }, description: 'Optional intermediate image points followed by to_x/to_y. Windows supports curved paths.' },
+        button: { type: 'string', enum: ['left', 'middle', 'right'] },
+        modifiers: { type: 'array', items: { type: 'string', enum: MODIFIERS }, uniqueItems: true },
       },
     },
     async (rawArgs, exec) => {
       const args = object(rawArgs);
       const screenshotId = requiredString(args, 'screenshot_id');
-      const observation = freshObservation(observations, exec, screenshotId, config);
+      const observation = foregroundObservation(observations, exec, screenshotId, config);
       const from = mapScreenshotPoint(observation, finiteNumber(args, 'from_x'), finiteNumber(args, 'from_y'));
       const to = mapScreenshotPoint(observation, finiteNumber(args, 'to_x'), finiteNumber(args, 'to_y'));
       const durationMs = optionalInteger(args, 'duration_ms', 100);
       if (durationMs < 0 || durationMs > 10_000) throw new Error('duration_ms must be between 0 and 10000');
-      await computer(ctx).perform({ kind: 'drag', from, to, durationMs }, exec.signal);
-      consumeAllObservations(observations, exec);
+      let path;
+      if (args.path !== undefined) {
+        if (!Array.isArray(args.path) || args.path.length < 1 || args.path.length > 119) throw new Error('path must contain 1..119 intermediate points');
+        path = [...args.path.map((point) => mapScreenshotPoint(observation, point.x, point.y)), to];
+      }
+      await performInput({ kind: 'drag', from, to, durationMs, path, button: enumValue(args, 'button', ['left', 'middle', 'right'], 'left'), modifiers: keyOptions(args).modifiers, focus: observation.focus }, exec);
       return `Dragged using ${screenshotId}. Capture a new screenshot before the next consequential action.`;
     },
   ));
@@ -744,74 +824,123 @@ export function apply(ctx, rawConfig) {
     {
       type: 'object', additionalProperties: false,
       required: ['screenshot_id', 'x', 'y'],
-      properties: { screenshot_id: { type: 'string' }, x: { type: 'number' }, y: { type: 'number' }, delta_x: { type: 'number' }, delta_y: { type: 'number' } },
+      properties: { screenshot_id: { type: 'string' }, x: { type: 'number' }, y: { type: 'number' }, delta_x: { type: 'integer', minimum: -120000, maximum: 120000 }, delta_y: { type: 'integer', minimum: -120000, maximum: 120000 }, modifiers: { type: 'array', items: { type: 'string', enum: MODIFIERS }, uniqueItems: true } },
     },
     async (rawArgs, exec) => {
       const args = object(rawArgs);
       const screenshotId = requiredString(args, 'screenshot_id');
-      const observation = freshObservation(observations, exec, screenshotId, config);
+      const observation = foregroundObservation(observations, exec, screenshotId, config);
       const point = mapScreenshotPoint(observation, finiteNumber(args, 'x'), finiteNumber(args, 'y'));
       const deltaX = args.delta_x === undefined ? 0 : finiteNumber(args, 'delta_x');
       const deltaY = args.delta_y === undefined ? 0 : finiteNumber(args, 'delta_y');
       if (deltaX === 0 && deltaY === 0) throw new Error('at least one of delta_x or delta_y must be non-zero');
-      await computer(ctx).perform({ kind: 'scroll', point, deltaX, deltaY }, exec.signal);
-      consumeAllObservations(observations, exec);
+      if (![deltaX, deltaY].every((delta) => Number.isInteger(delta) && Math.abs(delta) <= 120000)) throw new Error('scroll deltas must be integers within -120000..120000');
+      await performInput({ kind: 'scroll', point, deltaX, deltaY, modifiers: keyOptions(args).modifiers, focus: observation.focus }, exec);
       return `Scrolled using ${screenshotId}. Capture a new screenshot before the next consequential action.`;
     },
   ));
 
   registerTool(ctx.tools, textTool(
     'computer_type',
-    'Type literal text into the currently focused native control. Name a recent screenshot_id so the action remains tied to an observed desktop state.',
+    'Type literal text using a recent screenshot_id, window_id, or window-bound snapshot_id. Windows re-focuses an identified target before injecting; text-only models can use window/semantic evidence. macOS/Linux support desktop screenshot evidence. Observe again afterwards.',
     {
       type: 'object', additionalProperties: false,
-      required: ['screenshot_id', 'text'],
-      properties: { screenshot_id: { type: 'string' }, text: { type: 'string' } },
+      required: ['text'],
+      properties: { ...KEYBOARD_EVIDENCE_SCHEMA, text: { type: 'string', maxLength: 100000 } },
     },
     async (rawArgs, exec) => {
       const args = object(rawArgs);
-      const screenshotId = requiredString(args, 'screenshot_id');
-      // 这张图若是指名窗口截的，就带上那个窗口的身份：动作进程要先把它抢回前台再注入按键。
-      const focus = freshObservation(observations, exec, screenshotId, config).focus;
+      const { focus, evidence } = keyboardEvidence(observations, exec, args, config);
       const text = requiredString(args, 'text');
-      await computer(ctx).perform({ kind: 'type', text, focus }, exec.signal);
-      consumeAllObservations(observations, exec);
-      return `Typed ${text.length} characters using ${screenshotId}. Capture a new screenshot before the next consequential action.`;
+      if (text.length > 100000) throw new Error('text exceeds 100000 UTF-16 units');
+      await performInput({ kind: 'type', text, focus }, exec);
+      return `Typed ${text.length} characters using ${evidence}. Observe again before the next action.`;
     },
   ));
 
   registerTool(ctx.tools, textTool(
     'computer_key',
-    'Send one native key or key chord to the focused control. Name a recent screenshot_id so the action remains tied to an observed desktop state.',
+    'Send a native key/chord using a recent screenshot_id, window_id, or window-bound snapshot_id. Windows supports Insert/CapsLock, extended keys, hold_ms and repeat, and focuses an identified target before injecting. macOS/Linux support basic chords with desktop screenshot evidence. Observe again afterwards.',
     {
       type: 'object', additionalProperties: false,
-      required: ['screenshot_id', 'key'],
-      properties: { screenshot_id: { type: 'string' }, key: { type: 'string' }, modifiers: { type: 'array', items: { type: 'string', enum: ['alt', 'control', 'meta', 'shift'] } } },
+      required: ['key'],
+      properties: { ...KEYBOARD_EVIDENCE_SCHEMA, key: { type: 'string' }, modifiers: { type: 'array', items: { type: 'string', enum: MODIFIERS }, uniqueItems: true }, repeat: { type: 'integer', minimum: 1, maximum: 100 }, hold_ms: { type: 'integer', minimum: 0, maximum: 10000 } },
     },
     async (rawArgs, exec) => {
       const args = object(rawArgs);
-      const screenshotId = requiredString(args, 'screenshot_id');
-      const focus = freshObservation(observations, exec, screenshotId, config).focus;
+      const { focus, evidence } = keyboardEvidence(observations, exec, args, config);
       const key = requiredString(args, 'key');
-      const modifiers = arrayOfStrings(args, 'modifiers');
-      if (modifiers.some((modifier) => !['alt', 'control', 'meta', 'shift'].includes(modifier))) throw new Error('modifiers contains an unsupported key');
-      await computer(ctx).perform({ kind: 'key', key, modifiers, focus }, exec.signal);
-      consumeAllObservations(observations, exec);
-      return `Sent ${[...modifiers, key].join('+')} using ${screenshotId}. Capture a new screenshot before the next consequential action.`;
+      const options = keyOptions(args);
+      await performInput({ kind: 'key', key, ...options, focus }, exec);
+      return `Sent ${[...options.modifiers, key].join('+')} using ${evidence}. Observe again before the next action.`;
+    },
+  ));
+
+  registerTool(ctx.tools, textTool(
+    'computer_move',
+    'Move/hover at an image point on a recent foreground screenshot. The pointer change consumes prior observations; capture again to inspect hover UI.',
+    { type: 'object', additionalProperties: false, required: ['screenshot_id', 'x', 'y'], properties: { screenshot_id: { type: 'string' }, x: { type: 'number' }, y: { type: 'number' } } },
+    async (rawArgs, exec) => {
+      const args = object(rawArgs);
+      const observation = foregroundObservation(observations, exec, requiredString(args, 'screenshot_id'), config);
+      const point = mapScreenshotPoint(observation, args.x, args.y);
+      await performInput({ kind: 'move', point, focus: observation.focus }, exec);
+      return 'Moved pointer. Observe again to inspect hover effects.';
+    },
+  ));
+
+  registerTool(ctx.tools, textTool(
+    'computer_narrator',
+    'Windows Narrator: query status or send a fixed Microsoft Standard-layout command to a running reader. Commands require recent window_id, window-bound snapshot_id, or screenshot_id and focus that window. Choose the reader modifier (Insert/CapsLock). The virtual cursor and speech are not exposed by UIA; command delivery does not verify speech or cursor movement. This tool never starts Narrator or changes its settings. Observe semantics again after commands.',
+    {
+      type: 'object', additionalProperties: false, required: ['operation'],
+      properties: {
+        ...KEYBOARD_EVIDENCE_SCHEMA,
+        operation: { type: 'string', enum: ['status', 'command'] },
+        command: { type: 'string', enum: Object.keys(NARRATOR_COMMANDS) },
+        modifier: { type: 'string', enum: ['insert', 'capslock'] },
+      },
+    },
+    async (rawArgs, exec) => {
+      const args = object(rawArgs);
+      const operation = enumValue(args, 'operation', ['status', 'command']);
+      const provider = computer(ctx);
+      if (typeof provider.narratorStatus !== 'function') throw new Error('Narrator is unsupported on this platform');
+      if (operation === 'status') return describeJson(await provider.narratorStatus(exec.signal));
+      const action = narratorAction(requiredString(args, 'command'), args.modifier);
+      const { focus, evidence } = keyboardEvidence(observations, exec, args, config);
+      if (focus === undefined) throw new Error('Narrator commands require window-bound evidence; list windows or capture a named window first');
+      if ((await provider.narratorStatus(exec.signal)).running !== true) throw new Error('Narrator is not running in this Windows session; no command was sent');
+      try { await provider.perform({ ...action, focus }, exec.signal); }
+      finally { consumeAllObservations(observations, exec); }
+      return describeJson({ command: args.command, evidence, inputDelivered: true, virtualCursorObserved: false, speechCaptured: false, resultVerified: false });
+    },
+  ));
+
+  registerTool(ctx.tools, textTool(
+    'computer_input',
+    'Execute one bounded input sequence: move, mouse down/up, key down/up, chords, hold, waits, text and scroll. Windows supports this API. Validate all steps before executing; stop on the first failure and release this sequence\'s held inputs. Pointer steps require a foreground screenshot_id; keyboard-only sequences also accept a window_id or window-bound snapshot_id. Total explicit wait/hold <=10000ms, <=256 steps. Observe after completion or failure.',
+    { type: 'object', additionalProperties: false, required: ['steps'], properties: { ...KEYBOARD_EVIDENCE_SCHEMA, steps: INPUT_STEPS_SCHEMA } },
+    async (rawArgs, exec) => {
+      const args = object(rawArgs);
+      const { observation, focus } = keyboardEvidence(observations, exec, args, config);
+      const steps = inputSequenceArgs(args.steps, observation === undefined ? undefined : (x, y) => mapScreenshotPoint(observation, x, y));
+      await performInput({ kind: 'sequence', steps, focus }, exec);
+      return `Executed ${steps.length} input steps and released held input. Observe again before another action.`;
     },
   ));
 
   registerTool(ctx.tools, textTool(
     'computer_windows',
-    'List visible native windows and receive short-lived window_id values. Focus requires a recent window_id from this session; observe again after it changes the foreground window.',
+    'List native windows and receive short-lived session window_id values. Windows includes minimized windows (minimized:true); focus restores them. Windows also supports bounded child HWND enumeration, move/resize/minimize/maximize/restore/close. Control attempts consume evidence; list again afterwards. close requests application closure and does not prove it succeeded.',
     {
       type: 'object', additionalProperties: false,
       required: ['operation'],
-      properties: { operation: { type: 'string', enum: ['list', 'focus'] }, window_id: { type: 'string' } },
+      properties: { operation: { type: 'string', enum: ['list', 'focus', 'children', 'move', 'resize', 'minimize', 'maximize', 'restore', 'close'] }, window_id: { type: 'string' }, x: { type: 'integer' }, y: { type: 'integer' }, width: { type: 'integer', minimum: 1, maximum: 32768 }, height: { type: 'integer', minimum: 1, maximum: 32768 }, max_nodes: { type: 'integer', minimum: 1, maximum: 512 } },
     },
     async (rawArgs, exec) => {
       const args = object(rawArgs);
-      const operation = enumValue(args, 'operation', ['list', 'focus']);
+      const operation = enumValue(args, 'operation', ['list', 'focus', 'children', 'move', 'resize', 'minimize', 'maximize', 'restore', 'close']);
       if (operation === 'list') {
         const capturedAt = Date.now();
         const records = (await computer(ctx).listWindows(exec.signal)).map((nativeWindow) => {
@@ -831,46 +960,111 @@ export function apply(ctx, rawConfig) {
       }
       const windowId = requiredString(args, 'window_id');
       const record = freshWindow(observations, exec, windowId, config);
-      await computer(ctx).focusWindow(record.nativeWindow, exec.signal);
+      if (operation === 'children') {
+        const maxNodes = optionalInteger(args, 'max_nodes', 256);
+        if (maxNodes < 1 || maxNodes > 512) throw new Error('max_nodes must be 1..512');
+        const provider = computer(ctx);
+        if (typeof provider.childWindows !== 'function') throw new Error('child-window enumeration is unsupported on this platform');
+        const result = await provider.childWindows(record.nativeWindow, exec.signal, maxNodes);
+        const children = result.windows.map((nativeWindow) => ({ id: `child-${randomUUID()}`, nativeWindow }));
+        const capturedAt = Date.now();
+        rememberBounded(agentState(observations, exec).childWindowLists, `children-${randomUUID()}`, {
+          capturedAt, root: record, windows: new Map(children.map((child) => [child.id, child])),
+        }, config.maxObservationsPerAgent);
+        return describeJson({ captured_at: capturedAt, window_id: windowId, truncated: result.truncated, windows: children.map((child) => ({ ...child.nativeWindow, id: child.id })) });
+      }
+      if (operation === 'focus') await control(exec, () => computer(ctx).focusWindow(record.nativeWindow, exec.signal));
+      else {
+        const provider = computer(ctx);
+        if (typeof provider.manageWindow !== 'function') throw new Error('native window management is unsupported on this platform');
+        const action = { kind: operation };
+        if (operation === 'move') Object.assign(action, { x: optionalInteger(args, 'x'), y: optionalInteger(args, 'y') });
+        if (operation === 'resize') {
+          const width = optionalInteger(args, 'width'); const height = optionalInteger(args, 'height');
+          if (width < 1 || width > 32768 || height < 1 || height > 32768) throw new Error('window width/height must be 1..32768');
+          Object.assign(action, { width, height });
+        }
+        const result = await control(exec, () => provider.manageWindow(record.nativeWindow, action, exec.signal));
+        consumeAllObservations(observations, exec);
+        return describeJson({ operation, result });
+      }
       consumeAllObservations(observations, exec);
-      return `Focused native window ${record.window.title || windowId}. Capture a new screenshot before the next consequential action.`;
+      return `Focused native window ${record.window.title || windowId}. Observe again before the next action.`;
+    },
+  ));
+
+  registerTool(ctx.tools, textTool(
+    'computer_window_input',
+    'Windows targeted background click/scroll on a fresh child_window_id from computer_windows(operation:children). x/y are native pixels relative to that child client area. Recheck root/parent/PID/class/title; the helper does not request focus or move the global cursor, but the application may activate itself. Fixed messages with timeout report foregroundChanged; delivered does not prove the application acted. Read/observe the result afterwards. Handle identity has no provider runtime generation guarantee.',
+    {
+      type: 'object', additionalProperties: false, required: ['child_window_id', 'operation', 'x', 'y'],
+      properties: { child_window_id: { type: 'string' }, operation: { type: 'string', enum: ['click', 'scroll'] }, x: { type: 'integer' }, y: { type: 'integer' }, button: { type: 'string', enum: ['left', 'middle', 'right'] }, delta_x: { type: 'integer', minimum: -32768, maximum: 32767 }, delta_y: { type: 'integer', minimum: -32768, maximum: 32767 } },
+    },
+    async (rawArgs, exec) => {
+      const args = object(rawArgs);
+      const childId = requiredString(args, 'child_window_id');
+      let found;
+      for (const list of agentState(observations, exec).childWindowLists.values()) {
+        const child = list.windows.get(childId);
+        if (child === undefined) continue;
+        if (list.consumedAt !== undefined || Date.now() - list.capturedAt > config.maxObservationAgeMs) throw new Error('child window observation expired or consumed; list children again');
+        found = { list, child }; break;
+      }
+      if (found === undefined) throw new Error('child window is unavailable in this session; list children first');
+      const operation = enumValue(args, 'operation', ['click', 'scroll']);
+      const x = optionalInteger(args, 'x'); const y = optionalInteger(args, 'y');
+      const action = { kind: operation, x, y };
+      if (operation === 'click') action.button = enumValue(args, 'button', ['left', 'middle', 'right'], 'left');
+      else {
+        const deltaX = optionalInteger(args, 'delta_x', 0); const deltaY = optionalInteger(args, 'delta_y', 0);
+        if (deltaX < -32768 || deltaX > 32767 || deltaY < -32768 || deltaY > 32767 || (deltaX === 0 && deltaY === 0)) throw new Error('message deltas need a non-zero value within signed 16-bit bounds');
+        Object.assign(action, { deltaX, deltaY });
+      }
+      const provider = computer(ctx);
+      if (typeof provider.performWindowMessage !== 'function') throw new Error('targeted window messages are unsupported on this platform');
+      try {
+        return describeJson(await provider.performWindowMessage(found.list.root.nativeWindow, found.child.nativeWindow, action, exec.signal));
+      } finally { consumeAllObservations(observations, exec); }
     },
   ));
 
   registerTool(ctx.tools, textTool(
     'computer_accessibility',
-    'Capture a bounded native accessibility tree for the application shown in a recent screenshot. It returns a short-lived snapshot_id, the bound screenshot evidence, and stable element_id values for semantic lookup and native control actions. The tree is rooted at the window that screenshot captured; a plain desktop-region screenshot has no window, so the tree falls back to whichever application currently has focus.',
+    'Capture a bounded native accessibility tree independently of vision. Supply a recent window_id, an optional screenshot_id to bind both views, or neither for the focused application. backend selects UIA or Windows MSAA explicitly. Returned snapshot_id and element_id support reading and semantic actions without an image-capable model.',
     {
       type: 'object', additionalProperties: false,
-      required: ['screenshot_id'],
-      properties: { screenshot_id: { type: 'string' } },
+      properties: { screenshot_id: { type: 'string' }, window_id: { type: 'string' }, backend: { type: 'string', enum: ['native', 'uia', 'msaa'] } },
     },
     async (rawArgs, exec) => {
       const args = object(rawArgs);
-      const screenshotId = requiredString(args, 'screenshot_id');
-      const screenshot = freshObservation(observations, exec, screenshotId, config);
-      // 树必须从**这张截图那个窗口**扎根。
-      //
-      // 截图走 window_id 时，观测记录里带着那个窗口的 HWND（`focus.handle`，
-      // 来自 `record.nativeWindow.id`）。不把它传下去的话，UIA 会从"当前焦点元素"
-      // 往上找窗口——那是**调用这一刻谁在前台**，跟截图拍的是谁毫无关系。
-      // 多窗口/多屏时就会拿到另一个窗口的树，而两条证据用的是同一个 screenshot_id，
-      // 看起来完全自洽，只有细看 bounds 才发现对不上。（2026-09-20 踩过。）
-      const tree = await computer(ctx).accessibilitySnapshot(screenshot.focus?.handle, exec.signal);
+      const screenshotId = optionalNonBlankString(args, 'screenshot_id');
+      const windowId = optionalNonBlankString(args, 'window_id');
+      const backend = enumValue(args, 'backend', ['native', 'uia', 'msaa'], 'native');
+      const screenshot = screenshotId === undefined ? undefined : freshObservation(observations, exec, screenshotId, config);
+      const window = windowId === undefined ? undefined : freshWindow(observations, exec, windowId, config);
+      if (window !== undefined && screenshot?.focus !== undefined && window.nativeWindow.id !== screenshot.focus.handle) {
+        throw new Error('window_id and screenshot_id refer to different windows');
+      }
+      // 指定窗口时始终从该 HWND 扎根；独立观测不提窗，也不需要图像模型。
+      const focus = window === undefined ? screenshot?.focus : {
+        handle: window.nativeWindow.id, processId: window.nativeWindow.processId, title: window.nativeWindow.title,
+      };
+      const tree = await computer(ctx).accessibilitySnapshot(focus?.handle, exec.signal, { backend, window: window?.nativeWindow });
       const state = agentState(observations, exec);
       const capturedAt = Date.now();
       const snapshotId = `semantic-${randomUUID()}`;
       rememberBounded(state.semanticSnapshots, snapshotId, {
         capturedAt,
-        screenshotId,
-        screenshotHash: screenshot.contentHash,
+        ...(screenshot === undefined ? {} : { screenshotId, screenshotHash: screenshot.contentHash }),
+        focus,
+        backend,
         tree,
       }, config.maxSemanticSnapshots);
       return describeJson({
         snapshot_id: snapshotId,
         captured_at: capturedAt,
-        screenshot_id: screenshotId,
-        screenshot_hash: screenshot.contentHash,
+        backend: tree.backend ?? backend,
+        ...(screenshot === undefined ? {} : { screenshot_id: screenshotId, screenshot_hash: screenshot.contentHash }),
         tree,
       });
     },
@@ -916,64 +1110,73 @@ export function apply(ctx, rawConfig) {
   ));
 
   registerTool(ctx.tools, textTool(
-    'computer_element',
-    'Perform a native UI Automation action on an enabled element from a recent semantic snapshot. The screenshot_id must be the exact screenshot bound to that snapshot. Use scroll_into_view only for an offscreen element, then capture new screenshot and semantic evidence before any other action.',
+    'computer_read',
+    'Read native text, value, selection, range/grid state from an observed element without using an image. Optional text or start/end narrows TextPattern reading; row/column reads a grid cell. Password contents are redacted. Reading does not consume snapshot evidence.',
     {
-      type: 'object', additionalProperties: false,
-      required: ['screenshot_id', 'snapshot_id', 'element_id', 'operation'],
+      type: 'object', additionalProperties: false, required: ['snapshot_id', 'element_id'],
       properties: {
-        screenshot_id: { type: 'string' },
-        snapshot_id: { type: 'string' },
-        element_id: { type: 'string' },
-        operation: { type: 'string', enum: ['invoke', 'focus', 'set_value', 'toggle', 'expand', 'collapse', 'select', 'scroll_into_view'] },
-        value: { type: 'string', description: 'Only use with set_value; omit it for every other operation.' },
+        snapshot_id: { type: 'string' }, screenshot_id: { type: 'string' }, element_id: { type: 'string' },
+        max_chars: { type: 'integer', minimum: 1, maximum: 100000 },
+        text: { type: 'string' }, start: { type: 'integer', minimum: 0 }, end: { type: 'integer', minimum: 0 },
+        row: { type: 'integer', minimum: 0 }, column: { type: 'integer', minimum: 0 },
       },
     },
     async (rawArgs, exec) => {
       const args = object(rawArgs);
-      const screenshotId = requiredString(args, 'screenshot_id');
-      const screenshot = freshObservation(observations, exec, screenshotId, config);
-      const snapshotId = requiredString(args, 'snapshot_id');
-      const snapshot = freshSemanticSnapshot(observations, exec, snapshotId, config);
-      if (snapshot.screenshotId !== screenshotId || snapshot.screenshotHash !== screenshot.contentHash) {
-        throw new Error(`semantic snapshot '${snapshotId}' is not bound to screenshot '${screenshotId}'; capture accessibility immediately after that screenshot`);
+      const { snapshotId, snapshot } = semanticEvidence(observations, exec, args, config);
+      const elementId = requiredString(args, 'element_id');
+      const element = accessibilityElementById(snapshot.tree, elementId);
+      if (element === undefined) throw new Error(`element '${elementId}' is unavailable in semantic snapshot '${snapshotId}'`);
+      const maxChars = optionalInteger(args, 'max_chars', 16000);
+      if (maxChars < 1 || maxChars > 100000) throw new Error('max_chars must be between 1 and 100000');
+      const parameters = { maxChars, ...textRangeArgs(args) };
+      if (args.row !== undefined || args.column !== undefined) {
+        if (!Number.isInteger(args.row) || !Number.isInteger(args.column) || args.row < 0 || args.column < 0) throw new Error('row and column must be non-negative integers together');
+        Object.assign(parameters, { row: args.row, column: args.column });
       }
+      const result = await computer(ctx).performAccessibility({ kind: 'read', elementId, element, hwnd: snapshot.focus?.handle, ...parameters }, exec.signal);
+      return describeJson({ snapshot_id: snapshotId, element_id: elementId, result });
+    },
+  ));
+
+  registerTool(ctx.tools, textTool(
+    'computer_element',
+    'Perform a native accessibility action on an enabled element from a recent semantic snapshot. Independent snapshots require no image. A screenshot-bound snapshot retains its exact image binding. Observe again after every action; scroll_into_view exposes offscreen elements before other actions.',
+    {
+      type: 'object', additionalProperties: false,
+      required: ['snapshot_id', 'element_id', 'operation'],
+      properties: {
+        screenshot_id: { type: 'string' },
+        snapshot_id: { type: 'string' },
+        element_id: { type: 'string' },
+        operation: { type: 'string', enum: ELEMENT_OPERATIONS },
+        ...SEMANTIC_PARAMETERS,
+      },
+    },
+    async (rawArgs, exec) => {
+      const args = object(rawArgs);
+      const { snapshotId, snapshot } = semanticEvidence(observations, exec, args, config);
+      const screenshotId = snapshot.screenshotId;
       const elementId = requiredString(args, 'element_id');
       const element = accessibilityElementById(snapshot.tree, elementId);
       if (element === undefined) throw new Error(`element '${elementId}' is unavailable in semantic snapshot '${snapshotId}'`);
       if (!element.enabled) throw new Error(`element '${elementId}' is disabled`);
-      const operation = enumValue(args, 'operation', ['invoke', 'focus', 'set_value', 'toggle', 'expand', 'collapse', 'select', 'scroll_into_view']);
+      const operation = enumValue(args, 'operation', ELEMENT_OPERATIONS);
       if (element.offscreen && operation !== 'scroll_into_view') {
         throw new Error(`element '${elementId}' is offscreen; use scroll_into_view and capture new evidence before acting`);
       }
       if (!element.offscreen && operation === 'scroll_into_view') {
         throw new Error(`element '${elementId}' is already visible`);
       }
-      const patternByOperation = {
-        invoke: 'invoke',
-        focus: undefined,
-        set_value: 'value',
-        toggle: 'toggle',
-        expand: 'expand_collapse',
-        collapse: 'expand_collapse',
-        select: 'selection_item',
-        scroll_into_view: 'scroll_item',
-      };
-      const requiredPattern = patternByOperation[operation];
+      const requiredPattern = PATTERN_BY_OPERATION[operation];
       if (requiredPattern !== undefined && !element.patterns.includes(requiredPattern)) {
         throw new Error(`element '${elementId}' does not support ${operation}`);
       }
-      let value;
-      if (operation === 'set_value') {
-        if (typeof args.value !== 'string') throw new Error('value must be a string for set_value');
-        value = args.value;
-      } else if (args.value !== undefined && args.value !== '') {
-        throw new Error('value is only valid for set_value');
-      }
-      await computer(ctx).performAccessibility({ kind: operation, elementId, element, ...(value === undefined ? {} : { value }) }, exec.signal);
+      const parameters = semanticActionArgs(operation, args);
+      await control(exec, () => computer(ctx).performAccessibility({ kind: operation, elementId, element, hwnd: snapshot.focus?.handle, ...parameters }, exec.signal));
       consumeAllObservations(observations, exec);
       const label = element.name.length > 0 ? ` '${element.name}'` : '';
-      return `Performed ${operation} on native element${label} using ${snapshotId} and ${screenshotId}. Capture a new screenshot and semantic snapshot before the next consequential action.`;
+      return `Performed ${operation} on native element${label} using ${snapshotId}${screenshotId === undefined ? '' : ` and ${screenshotId}`}. Capture a new semantic snapshot before the next consequential action.`;
     },
   ));
 }

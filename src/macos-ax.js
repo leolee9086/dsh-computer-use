@@ -204,6 +204,30 @@ function performAction(element, names) {
   action.perform();
 }
 
+function readElement(element, action) {
+  if (action.text !== undefined || action.start !== undefined || action.end !== undefined || action.row !== undefined || action.column !== undefined) throw new Error('macOS AX reader does not expose text-range or grid-cell queries');
+  const max = action.maxChars;
+  if (!Number.isInteger(max) || max < 1 || max > 100000) throw new Error('macOS AX maxChars must be 1..100000');
+  const role = String(element.role());
+  const subrole = String(safe(() => element.subrole(), ''));
+  const password = /secure|password/i.test(role + subrole);
+  const result = { backend: 'ax', role, name: String(safe(() => element.name(), '')), password };
+  if (password) { result.redacted = true; return result; }
+  // 仅把 AX 提供的属性解释为内容；缺失属性不伪造空文本。
+  const attribute = name => safe(() => element.attributes.byName(name).value(), undefined);
+  const value = attribute('AXValue');
+  if (value !== undefined && value !== null) {
+    const text = String(value);
+    result.value = text.slice(0, max); result.value_truncated = text.length > max;
+  }
+  const selected = attribute('AXSelectedText');
+  if (selected !== undefined && selected !== null) {
+    const text = String(selected);
+    result.selection = [{ text: text.slice(0, max), truncated: text.length > max }];
+  }
+  return result;
+}
+
 function perform(payload) {
   const action = payload.action;
   const parsed = parseElementId(action.elementId);
@@ -213,6 +237,7 @@ function perform(payload) {
   const element = resolveElement(applicationProcess, parsed.path);
   verifyIdentity(element, action);
   switch (action.kind) {
+    case 'read': return readElement(element, action);
     case 'focus':
       element.focused = true;
       if (safe(() => element.focused(), false) !== true) {

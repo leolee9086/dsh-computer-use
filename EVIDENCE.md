@@ -1,62 +1,65 @@
-# Capability Evidence Matrix
+# Capability Evidence — 0.5.0
 
-This document records what the current project has actually verified. It is intentionally narrower than a benchmark claim: a working mechanism is not proof of parity with a commercial computer-use product or an open-source task benchmark.
+Verified on 2026-10-04. This records mechanisms and measured outcomes, not task-success parity with commercial computer-use systems. Interface references are listed in [CAPABILITY-MATRIX.md](references/CAPABILITY-MATRIX.md).
 
-## Verified Windows Capabilities
+## Validation environment and results
 
-| Capability | Implementation evidence | Reproduction |
+Windows, Node 22.19, project pnpm 12.6, Rust/cargo 1.98.1 and Python 3.13.7. Integration checks used the real Harness development checkout at commit `639ed01539` (release 0.2.0-rc.2 merge), not the running installed GUI host. A missing declared Harness `semver` dependency initially prevented CLI boot; frozen-lockfile installation repaired that test environment, after which the isolated profile check passed.
+
+| Check | Result | What it proves |
 | --- | --- | --- |
-| Model-visible desktop image | `computer_screenshot` stores direct PNG capture bytes as a DSH image attachment, reads the persisted normalized bytes back for verification, returns their SHA-256 hash, and rejects a route without declared image input. | `npm run verify` boots a temporary real Harness `ToolRuntime` and `LocalAttachmentStore`, executes the registered screenshot tool, checks its text-plus-image output, reads the durable attachment, and proves the returned hash follows persisted bytes. A successful live model-route screenshot remains pending because the prior route attempt ended with an upstream 503. |
-| Pixel-to-desktop coordinate safety | Screenshot records retain source bounds; coordinate actions require a fresh agent-scoped screenshot ID and are mapped by `mapScreenshotPoint`, which clamps a valid fractional image coordinate to the source rectangle's final physical pixel. | `npm run verify` covers origin offsets, downscaling, out-of-image rejection, and fractional coordinates at the attachment edge. |
-| Application semantic tree | Windows UI Automation snapshots climb from the focused element to its nearest native Window, then emit bounded control-view nodes with runtime IDs, process IDs, bounds, patterns, and focus state. | `node test/win32-smoke.mjs` exercised a real multi-display desktop and returned a Window-root tree. |
-| Semantic element lookup | `computer_find` performs bounded name/role/automation-ID matching and hides disabled or offscreen nodes by default. | `npm run verify` covers exact/contains matching, automation IDs, offscreen filtering, and empty optional selector normalization. |
-| Evidence-bound semantic action | A semantic snapshot is created only against one fresh screenshot and persists its ID plus SHA-256. `computer_element` rejects a different screenshot even when both observations are fresh. `computer_windows:list` creates short-lived agent-scoped window IDs; focus accepts only a listed ID and then consumes all observations for that agent. | `npm run verify` includes mismatched-screenshot rejection, single-use evidence tests, and rejection of unlisted or consumed window IDs. |
-| Foreground-window recovery | Windows enumerates eligible visible non-minimized top-level HWNDs, binds each agent-scoped model `window_id` to the observed native PID/title/bounds record, rechecks that identity before focus, then requests foreground normally and temporarily joins only the helper, current foreground, and target input queues if foreground-lock rules reject it. It verifies both identity and foreground handle before returning success. | `npm run verify` statically verifies EnumWindows/identity payload construction; `npm run smoke:windows` enumerated live top-level windows and focused the disposable WPF window with its full observed record. |
-| Tool-level semantic loop | The tool package binds screenshot, accessibility snapshot, lookup, and UIA action to one agent-scoped evidence record. Empty optional tool fields are normalized only when semantically empty; non-empty out-of-operation values still fail. Its final `tools.guard()` repeats a local `deny` after extensible pre-execution listeners. Default `ask` detects the current agent's authoritative `danger-full-access` permission preset and becomes allow; otherwise, a listener that short-circuits a local `ask` still triggers a tool-body approval request before the desktop provider. | `npm run verify` exercises assembled mismatched-evidence and single-use-action cases, then boots real `ToolRuntime` to verify denied, asked, and Full access operations after reordered pre-execution listeners. |
-| Bundle browser and desktop composition | The host browser bridge registers text/DOM-oriented `browser_*` tools process-wide; this bundle patch inserts the desktop consumer and workflow prompt alongside the host provider. | A temporary real DSH profile installed only this bundle and booted all three rows; a Loader probe observed the Windows `computer` provider, all 11 `computer_*` schemas, and the workflow prompt. No preset was mounted. |
-| Re-identification before action | Windows resolves a runtime ID again through a finite control-view traversal, compares current automation ID/name/class/role, and errors on mismatch. It does not fall back to coordinate control. Model-visible snapshots are bounded separately from a finite 5,000-node action traversal. | `node test/win32-semantic-focus-smoke.mjs` creates a disposable WPF window, re-focuses its UIA Edit element across separate bridge calls, then validates native `set_value`, `toggle`, and `invoke` actions through fresh status snapshots. `npm run verify` asserts the backend carries no PowerShell route at all (no script constant, no shell probe, no runtime C# compilation) — the search bound and identity re-check themselves are exercised by the smoke, not by matching source text. |
-| Pattern actions | Invoke, focus, set value, toggle, expand, collapse, select, and scroll-into-view are exposed only when their UIA patterns are present. | Unit tests cover unsupported pattern rejection and offscreen `scroll_into_view` dispatch. |
-| Cleanup boundary | Windows writes no script files at all: pointer, keyboard, window, and capture work runs in the bundled native helper, and UI Automation runs in-process through a C# bridge. The semantic action smoke removes its temporary WPF script and terminates only its own child process. | Inspect `src/windows.js`, `src/csharp.js`, and `test/win32-semantic-focus-smoke.mjs`. |
+| `pnpm run verify` | 55 JavaScript tests, all passed; all JS syntax checked | Coordinate mapping, input/configuration bounds, provider contracts, semantic evidence isolation and real DSH ToolRuntime approval/attachment behavior |
+| `python test/linux-reader-contracts.py` | 5 tests passed | Actual Python helper syntax and pure bounded reading/identity/password contracts; no AT-SPI bus runtime proof |
+| Rust fmt/check/test/release build | Passed; 3 Rust tests | Native sequence prevalidation/duration/duplicate-input contracts and successful Windows release build |
+| `pnpm run verify:profile` | Passed | A temporary real Loader profile mounted provider, all **18** tool schemas and workflow prompt; observation allow and control deny worked; temporary home removed |
+| `node test/win32-expansion-smoke.mjs` | 8 checks passed | WPF UIA document/selection/value/range/multiple-selection/invoke and stale identity |
+| `node test/win32-msaa-smoke.mjs` | 5 checks passed | Real WinForms MSAA tree/read/value-write/default action and PID rejection |
+| `node test/win32-native-expansion-smoke.mjs` | 10 checks passed | The staged release exe exercised PrintWindow, fixed child messages, window resize, input/release/foreground failure and minimized discovery/recovery |
 
-## Implemented, Pending Native Runtime Evidence
+The staged native exe SHA-256 is `9a86acbb39edde4d36972c913fb5b5dd594e50a8e944386016e63bdd8b10b789`. The release manifest records its version and per-source/Cargo hashes. `prepack` repeats JS verification and checks those bytes against the current sources.
 
-| Capability | Implementation status | Required proof |
+## Windows capability evidence
+
+| Capability | Implementation and observed result | Reproduction |
 | --- | --- | --- |
-| macOS window, pointer, and AX semantics | `src/macos.js` uses built-in `osascript -l JavaScript` with System Events only for windows with a non-empty native window identity. Opaque IDs bind PID/title/bounds/native ID; focus verifies one current match before foregrounding the process, revalidates after foregrounding, and rejects absent or ambiguous identity. It calls the bundled `macos-ax.js` JXA helper for bounded frontmost-window AX snapshots and action-time PID/name/role/bounds checks. The bundled `macos-input.js` helper emits interpolated CoreGraphics pointer, drag, and scroll events. | Run window/list/focus, pointer, AX snapshot, and a disposable native-control action smoke on a macOS desktop with Automation and Accessibility permission. Validate screenshot-to-Quartz coordinates on a multi-monitor layout with a display left of or above the primary. |
-| Linux X11 and AT-SPI semantics | `src/linux.js` records each visible XID's PID/title/bounds, skips windows that disappear during metadata lookup, re-validates the record before `windowactivate`, and verifies the active XID afterward. It calls bundled `linux-atspi.py` through `python3`/`python` plus `pyatspi` for lazily enumerated bounded snapshots and action-time process/path/identity checks; action paths are capped by the snapshot depth. | Run a real X11-compatible desktop smoke with a visible native control and AT-SPI bus; include an XID replacement/disappearance race and missing-`pyatspi` diagnostics. |
+| Model-visible image attachment | PNG is stored through the real DSH attachment service, then read back; returned SHA-256 follows persisted normalized bytes. The tool rejects routes without declared image input. | `pnpm run verify` uses real ToolRuntime and LocalAttachmentStore. Successful live vision-model consumption remains pending: a prior route request ended upstream with 503. |
+| Coordinate input | Fresh agent-scoped screenshot ID maps image pixels through actual source bounds, rejects out-of-image positions and safely clamps in-range fractional edge pixels. | JS mapping/evidence tests; earlier multi-display/region/crop/scale native capture probes. |
+| Independent semantic path | Focused application or Windows window-root snapshots need no screenshot or image route. Optional image binding retains exact screenshot ID/hash; different fresh images are rejected. Read returns bounded native content without consuming evidence. | Text-only tool-loop tests and real UIA/MSAA fixtures. |
+| UIA text/value/range/selection | WPF document text and selected `alpha beta` matched; ValuePattern write/read matched; slider RangeValue became 73; list selection count changed 1→2→1; button invoke changed status. Replaced expected name was rejected. | `win32-expansion-smoke.mjs`, 8 checks. Earlier owned WPF focus/set-value/toggle/invoke smoke also passed. |
+| Separate legacy MSAA | AccessibleObjectFromWindow/AccessibleChildren drive a separate tree. Legacy editor initial/read-after-write values matched; default action changed status; wrong process identity was rejected. | `win32-msaa-smoke.mjs`, 5 checks. No claim that every MSAA action preserves foreground. |
+| Sequence input and release | Actual Ctrl+A selected owned edit text, Unicode injection replaced it, and trailing held Control/mouse input was released at normal sequence end. F9 activated the fixture's cover; the next step stopped on lost foreground and Control was released. | `win32-native-expansion-smoke.mjs`; Rust validation tests plus JS duration/path/modifier contracts. Forced process termination is outside this release guarantee. |
+| PrintWindow | A blue target under a fully occluding magenta TopMost window produced target RGB 100/149/237, with foreground unchanged. A minimized target returned an explicit error. | Native expansion smoke uses a fresh temporary deployment of the staged release exe. |
+| Child HWND messages | A non-focusable Panel received fixed mouse messages without foreground change. Button handling activated its application and returned `foregroundChanged:true`. Wrong child PID was rejected. | Native expansion smoke. Delivery is distinct from business result; the fixture's resulting status was read separately. |
+| Window management | Resize changed actual bounds without activation. After minimize, a **new** list returned `minimized:true`; focus using that fresh record restored the target and verified foreground. | Native expansion smoke. Close remains a request, not proof of closure. |
+| Narrator | C# status compiled/called successfully and reported not running in Windows session 1. Fixed Standard bindings, Insert/CapsLock selection, stopped-reader no-input, cross-session rejection, single-use window evidence and approval rules passed. | Narrator/ToolRuntime contract tests. No Narrator process was started for voice/cursor testing. |
+| Control failure evidence | A provider that records a partial input then throws consumes the original window ID; a subsequent key action cannot reuse it. | Real ToolRuntime integration test. |
+| Approval/composition | Local deny is repeated by the final guard, ordinary asks cannot be silently bypassed, and default ask inherits authoritative Full access. Bundle installs host provider plus tools and workflow; it requires no preset. | Real ToolRuntime tests and temporary Loader profile probe. |
 
-## Current Boundaries
+Native smoke tests own their WPF/WinForms processes and temporary scripts and clean them afterward. Production Windows code invokes no PowerShell: capture/input/window work uses the source-available Rust helper; UIA/MSAA/Narrator use optional edge-js C# bridges compiled in-process.
 
-- Windows is the high-capability backend with native runtime evidence. macOS AX and Linux AT-SPI semantic adapters are implemented and contract-tested but need native-runtime evidence on those operating systems.
-- macOS composite-capture origin versus Quartz global pointer coordinates has not been verified on a layout with displays left of or above the primary; it remains an explicit native smoke requirement.
-- Browser-specific DOM automation and the desktop semantic loop coexist in one agent when the browser bridge and this bundle are installed. Their identifiers remain intentionally domain-specific; the workflow prompt requires fresh evidence at each boundary.
-- The snapshot is intentionally bounded by `maxAccessibilityNodes` and `maxAccessibilityDepth`; deeply virtualized or custom-rendered controls can be absent from UIA.
-- UIA metadata differs by application. `focusable` is a useful hint, not a guarantee that a provider accepts `SetFocus`; native action errors remain explicit.
-- No benchmark corpus, success-rate measurement, recovery-rate measurement, or baseline comparison has been run. The project must not be described as SOTA-equivalent until those measurements exist.
+During reruns, a fixture's foreground activation needed time to settle, and another Harness window changed desktop focus during a slow UIA read. The native smoke now checks foreground immediately after message delivery and waits for the owned cover's actual state before later assertions. Final staged-exe run passed all 10 checks. This is an interactive shared desktop, not an isolated benchmark machine.
 
-## Suggested Task Evaluation
+## Limits and pending native evidence
 
-Use a declared Windows task corpus with at least these categories:
+- UIA grid reads and special Scroll/Window/Transform patterns are implemented but have not each received a dedicated native fixture assertion. Bounds prevent unlimited tree work; custom-rendered or virtualized controls may expose no useful semantics.
+- UIA TextRange.Select changed foreground in the WPF smoke. Semantic operations and child message handlers can affect focus according to application behavior; background operation is not a blanket guarantee.
+- MSAA/child HWND paths cannot distinguish every same-property replacement generation. Read/action identity checks reduce stale targeting but do not create provider identity that the API lacks.
+- PrintWindow depends on application rendering and integrity. Low-integrity development exe versus Medium target gave Win32 error 5; identical bytes in a new Medium temporary deployment worked. No automatic elevation, label repair or relocation is performed. GPU/protected targets may fail or yield blank images.
+- Normal/handled-failure sequence cleanup is tested; crashes/forced managed cancellation can skip Rust destructors. In-process C# COM calls cannot be forcibly preempted by the subprocess deadline. See [SECURITY.md](SECURITY.md).
+- Narrator commands assume Microsoft Standard layout. Actual configured layout is unknown; virtual cursor and speech are not observed. Input delivery does not establish that the reader spoke or moved its cursor.
+- macOS AX and Linux AT-SPI have provider contracts, and Linux pure reader boundaries have Python tests. Their native desktops, permissions, accessibility buses and application action results remain untested. macOS capture origin versus Quartz coordinates on monitors left/above the primary remains pending.
+- Extended Windows input is not silently emulated on other systems: unsupported sequence/hold/repeat/path/modifier/window-binding options reject explicitly. Explicit UIA/MSAA requests on macOS/Linux reject too.
+- No task corpus, completion rate, recovery rate, action-count comparison or performance baseline was run. This release supports multiple paradigms; it has no SOTA-equivalence claim.
 
-1. Browser form navigation and safe text entry.
-2. Native dialog discovery, selection, and confirmation.
-3. Multi-window focus and context switching.
-4. Offscreen list-item discovery followed by semantic scroll and re-observation.
-5. Coordinate-only visual controls with changed screen-state recovery.
-6. Failure recovery after an element becomes stale or a UIA pattern disappears.
-
-For every task, record completion rate, median action count, screenshot count, semantic lookup count, recovery attempts, false actions, and elapsed time. Compare the same frozen task set and environment against named baselines before making a parity or SOTA claim.
-
-## Commands
+## Reproduce
 
 ```powershell
-npm run verify
-npm run verify:profile
-npm run smoke:windows
-npm run smoke:linux
-npm run smoke:macos
+pnpm run verify
+python test/linux-reader-contracts.py
+pnpm run verify:profile
+pnpm run smoke:windows
+pnpm run smoke:linux
+pnpm run smoke:macos
 ```
 
-The semantic focus smoke opens a uniquely titled disposable WPF window, focuses its empty test Edit control, sets its own text, toggles its own checkbox, invokes its own button, and confirms each status in fresh UIA snapshots before it removes its own child process and temporary script. It does not operate on user documents.
-
-The Linux and macOS commands self-skip on other operating systems; on their native host they fail loudly when the required capture, accessibility, or permission boundary is missing. Their native-runtime output should be appended to this matrix after running on each OS.
+Set `DSH_HARNESS_ROOT` to an actual Harness checkout for integration tests. Other-platform smoke commands skip on Windows; a skip is not a pass on that platform. A future task benchmark should freeze application/environment versions and report completion, false actions, median actions/screenshots, recovery attempts and elapsed time against named baselines on the same corpus.

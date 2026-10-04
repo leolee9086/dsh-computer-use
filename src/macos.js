@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ComputerUseError, requireWindowHandleUnsupported, unavailable, unsupported } from './errors.js';
 import { pngDimensions } from './geometry.js';
+import { assertBasicInput } from './input-actions.js';
 
 function appleString(value) {
   return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\r?\n/g, '\\n');
@@ -260,7 +261,7 @@ function boundsPayload(raw) {
 
 function axActionPayload(action) {
   if (action === null || typeof action !== 'object') throw new ComputerUseError('accessibility action is invalid');
-  const allowed = ['invoke', 'focus', 'set_value', 'toggle', 'expand', 'collapse', 'select', 'scroll_into_view'];
+  const allowed = ['invoke', 'focus', 'set_value', 'toggle', 'expand', 'collapse', 'select', 'scroll_into_view', 'read'];
   if (!allowed.includes(action.kind)) throw new ComputerUseError(`unsupported accessibility action '${action.kind}'`);
   if (typeof action.elementId !== 'string' || !/^ax:[1-9]\d*:\d+(,\d+)*$/.test(action.elementId)) {
     throw new ComputerUseError('macOS accessibility element id is invalid');
@@ -282,6 +283,10 @@ function axActionPayload(action) {
     if (typeof action.value !== 'string') throw new ComputerUseError('macOS set_value requires a string value');
     payload.value = action.value;
   }
+  if (action.kind === 'read') {
+    payload.maxChars = action.maxChars ?? 16000;
+    for (const key of ['text', 'start', 'end', 'row', 'column']) if (action[key] !== undefined) payload[key] = action[key];
+  }
   return payload;
 }
 
@@ -296,6 +301,8 @@ export class MacComputer {
       keyboard: true,
       windows: true,
       accessibility: true,
+      accessibilityBackends: ['ax'],
+      semanticReading: true,
     });
   }
 
@@ -367,6 +374,7 @@ export class MacComputer {
   }
 
   async perform(action, signal) {
+    assertBasicInput(action, 'macOS');
     const osascript = await this.runner.requireAny(['osascript', '/usr/bin/osascript'], 'macOS keyboard automation', signal);
     switch (action.kind) {
       case 'type':
@@ -433,7 +441,8 @@ export class MacComputer {
     throw unsupported('finding an image requires region capture, which the macOS backend does not provide yet');
   }
 
-  async accessibilitySnapshot(windowHandle, signal) {
+  async accessibilitySnapshot(windowHandle, signal, options = {}) {
+    if (options.backend !== undefined && options.backend !== 'native') throw unsupported('macOS supports its native AX backend only');
     requireWindowHandleUnsupported(windowHandle, 'macOS');
     return this.runAx({
       kind: 'snapshot',
@@ -443,6 +452,6 @@ export class MacComputer {
   }
 
   async performAccessibility(action, signal) {
-    await this.runAx({ kind: 'action', action: axActionPayload(action) }, signal);
+    return this.runAx({ kind: 'action', action: axActionPayload(action) }, signal);
   }
 }

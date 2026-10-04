@@ -99,7 +99,7 @@ function toolContext() {
       return undefined;
     },
   };
-  return { ctx, tools, calls, accessibilityHandles };
+  return { ctx, tools, calls, accessibilityHandles, computer, semanticTree };
 }
 
 const agent = {
@@ -341,4 +341,32 @@ test('semantic element action permits scroll_into_view for an offscreen matching
   }, exec);
   assert.match(result, /Performed scroll_into_view/);
   assert.equal(calls[0].kind, 'scroll_into_view');
+});
+
+test('text-only agents observe, read and invoke without a screenshot or llm route', async () => {
+  const { ctx, tools, calls, accessibilityHandles, computer } = toolContext();
+  const originalGet = ctx.get;
+  ctx.get = (name) => name === 'llm' ? undefined : originalGet(name);
+  computer.performAccessibility = async (action) => { calls.push(action); return { text: 'Native readable content' }; };
+  applyTools(ctx, { observeApproval: 'allow', controlApproval: 'allow' });
+  const exec = { agent: { session: {}, options: {} } };
+  const list = JSON.parse(await toolByName(tools, 'computer_windows').execute({ operation: 'list' }, exec));
+  const observed = JSON.parse(await toolByName(tools, 'computer_accessibility').execute({ window_id: list.windows[0].id }, exec));
+  assert.equal(observed.screenshot_id, undefined);
+  assert.equal(accessibilityHandles.at(-1), 'native-41');
+  const read = JSON.parse(await toolByName(tools, 'computer_read').execute({ snapshot_id: observed.snapshot_id, element_id: 'uia:42,9' }, exec));
+  assert.equal(read.result.text, 'Native readable content');
+  assert.equal(calls.at(-1).hwnd, 'native-41');
+  await toolByName(tools, 'computer_element').execute({ snapshot_id: observed.snapshot_id, element_id: 'uia:42,9', operation: 'invoke' }, exec);
+  await assert.rejects(() => toolByName(tools, 'computer_read').execute({ snapshot_id: observed.snapshot_id, element_id: 'uia:42,9' }, exec), /was consumed/);
+  assert.deepEqual(calls.map((call) => call.kind), ['read', 'invoke']);
+});
+
+test('semantic observations are isolated across agents and mismatched window/image is rejected', async () => {
+  const { ctx, tools } = toolContext();
+  applyTools(ctx, { observeApproval: 'allow', controlApproval: 'allow' });
+  const exec = { agent: { session: {}, options: {} } };
+  const observed = JSON.parse(await toolByName(tools, 'computer_accessibility').execute({}, exec));
+  await assert.rejects(() => toolByName(tools, 'computer_element').execute({ snapshot_id: observed.snapshot_id, element_id: 'uia:42,9', operation: 'invoke' }, { agent: { session: {} } }), /unavailable in this session/);
+  await assert.rejects(() => toolByName(tools, 'computer_read').execute({ snapshot_id: observed.snapshot_id, screenshot_id: 'unbound', element_id: 'uia:42,9' }, exec), /no screenshot binding/);
 });

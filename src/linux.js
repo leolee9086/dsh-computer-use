@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ComputerUseError, requireWindowHandleUnsupported, unavailable, unsupported } from './errors.js';
 import { assertFinitePoint, pngDimensions } from './geometry.js';
+import { assertBasicInput } from './input-actions.js';
 
 async function withCaptureFile(run) {
   const directory = await mkdtemp(join(tmpdir(), 'dsh-computer-use-'));
@@ -82,7 +83,7 @@ function atspiPayload(value) {
 function atspiActionPayload(action, maxDepth) {
   if (action === null || typeof action !== 'object') throw new ComputerUseError('accessibility action is invalid');
   if (!Number.isInteger(maxDepth) || maxDepth < 0) throw new ComputerUseError('AT-SPI accessibility action depth is invalid');
-  const allowed = ['invoke', 'focus', 'set_value', 'toggle', 'expand', 'collapse', 'select', 'scroll_into_view'];
+  const allowed = ['invoke', 'focus', 'set_value', 'toggle', 'expand', 'collapse', 'select', 'scroll_into_view', 'read'];
   if (!allowed.includes(action.kind)) throw new ComputerUseError(`unsupported accessibility action '${action.kind}'`);
   if (typeof action.elementId !== 'string' || !/^atspi:\d+(,\d+)*$/.test(action.elementId)) {
     throw new ComputerUseError('AT-SPI accessibility element id is invalid');
@@ -110,6 +111,10 @@ function atspiActionPayload(action, maxDepth) {
     if (typeof action.value !== 'string') throw new ComputerUseError('AT-SPI set_value requires a string value');
     payload.value = action.value;
   }
+  if (action.kind === 'read') {
+    payload.maxChars = action.maxChars ?? 16000;
+    for (const key of ['text', 'start', 'end', 'row', 'column']) if (action[key] !== undefined) payload[key] = action[key];
+  }
   return payload;
 }
 
@@ -124,6 +129,8 @@ export class LinuxComputer {
       keyboard: true,
       windows: true,
       accessibility: true,
+      accessibilityBackends: ['atspi'],
+      semanticReading: true,
     });
   }
 
@@ -217,6 +224,7 @@ export class LinuxComputer {
   }
 
   async perform(action, signal) {
+    assertBasicInput(action, 'Linux');
     const xdotool = await this.xdotool(signal);
     switch (action.kind) {
       case 'move': {
@@ -333,7 +341,8 @@ export class LinuxComputer {
     throw unsupported('finding an image requires region capture, which the Linux backend does not provide yet');
   }
 
-  async accessibilitySnapshot(windowHandle, signal) {
+  async accessibilitySnapshot(windowHandle, signal, options = {}) {
+    if (options.backend !== undefined && options.backend !== 'native') throw unsupported('Linux supports its native AT-SPI backend only');
     requireWindowHandleUnsupported(windowHandle, 'Linux');
     return this.runAtspi({
       kind: 'snapshot',
@@ -344,7 +353,7 @@ export class LinuxComputer {
   }
 
   async performAccessibility(action, signal) {
-    await this.runAtspi({
+    return this.runAtspi({
       kind: 'action',
       action: atspiActionPayload(action, this.config.maxAccessibilityDepth),
     }, signal);

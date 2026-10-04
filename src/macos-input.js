@@ -54,7 +54,8 @@ function sleep(milliseconds) {
 function click(action) {
   const point = pointOf(action.point, 'click point');
   const button = action.button || 'left';
-  const count = action.clickCount === 2 ? 2 : 1;
+  const count = action.clickCount ?? 1;
+  if (![1, 2, 3].includes(count)) throw new Error('clickCount must be 1, 2 or 3');
   post(mouseEvent('move', point, button));
   for (let index = 1; index <= count; index += 1) {
     post(mouseEvent('down', point, button, index));

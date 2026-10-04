@@ -32,7 +32,10 @@ export function resolveHostConfig(raw = {}) {
   if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
     throw new ComputerUseError('dsh-computer-use: host config must be an object');
   }
+  if (nonnegativeInteger(raw, 'actionDelayMs') > 10000) throw new ComputerUseError('dsh-computer-use: actionDelayMs must not exceed 10000');
+  if (raw.nativeHelperPath !== undefined && (typeof raw.nativeHelperPath !== 'string' || raw.nativeHelperPath.trim().length === 0)) throw new ComputerUseError('dsh-computer-use: nativeHelperPath must be a non-empty executable path');
   return Object.freeze({
+    ...(raw.nativeHelperPath === undefined ? {} : { nativeHelperPath: raw.nativeHelperPath }),
     screenshotMaxDimension: positiveInteger(raw, 'screenshotMaxDimension'),
     screenshotMaxBytes: positiveInteger(raw, 'screenshotMaxBytes'),
     commandTimeoutMs: positiveInteger(raw, 'commandTimeoutMs'),

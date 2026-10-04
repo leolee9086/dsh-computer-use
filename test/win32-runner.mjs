@@ -17,7 +17,7 @@ export function createRunner() {
 
     async runJson(argv, options = {}) {
       const stdout = await new Promise((resolve, reject) => {
-        const child = spawn(argv[0], argv.slice(1), { stdio: ['pipe', 'pipe', 'pipe'] });
+        const child = spawn(argv[0], argv.slice(1), { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
         const limit = options.stdoutMaxBytes ?? 16 * 1024 * 1024;
         let collected = '';
         let stderr = '';
@@ -48,7 +48,7 @@ export function createRunner() {
           settled = true;
           if (stderr.trim() !== '') process.stderr.write(stderr);
           if (code !== 0) {
-            reject(new Error(`${argv[0]} 以退出码 ${code} 结束`));
+            reject(new Error(`${argv[0]} 以退出码 ${code} 结束: ${stderr.trim()}`));
             return;
           }
           resolve(collected);

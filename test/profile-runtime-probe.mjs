@@ -40,14 +40,21 @@ function run(command, args, cwd, env) {
 const toolNames = [
   'computer_accessibility',
   'computer_click',
+  'computer_click_image',
   'computer_drag',
   'computer_element',
   'computer_find',
+  'computer_find_image',
+  'computer_input',
   'computer_key',
+  'computer_move',
+  'computer_narrator',
+  'computer_read',
   'computer_screenshot',
   'computer_scroll',
   'computer_status',
   'computer_type',
+  'computer_window_input',
   'computer_windows',
 ];
 

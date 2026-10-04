@@ -55,11 +55,16 @@ test('tool plugin registers the complete model-facing tool set', () => {
     'computer_element',
     'computer_find',
     'computer_find_image',
+    'computer_input',
     'computer_key',
+    'computer_move',
+    'computer_narrator',
+    'computer_read',
     'computer_screenshot',
     'computer_scroll',
     'computer_status',
     'computer_type',
+    'computer_window_input',
     'computer_windows',
   ]);
   assert.equal(listeners.length, 1);

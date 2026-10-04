@@ -26,8 +26,7 @@ public class Startup
             case "accessibility":
                 return Snapshot(input);
             case "accessibility-action":
-                Perform(input);
-                return new Dictionary<string, object> { { "ok", true } };
+                return Perform(input);
             default:
                 throw new InvalidOperationException("不支持的 UI Automation 操作 '" + kind + "'");
         }
@@ -147,6 +146,16 @@ public class Startup
         if (Supports(element, ExpandCollapsePattern.Pattern)) patterns.Add("expand_collapse");
         if (Supports(element, SelectionItemPattern.Pattern)) patterns.Add("selection_item");
         if (Supports(element, ScrollItemPattern.Pattern)) patterns.Add("scroll_item");
+        if (Supports(element, TextPattern.Pattern)) patterns.Add("text");
+        if (Supports(element, RangeValuePattern.Pattern)) patterns.Add("range_value");
+        if (Supports(element, SelectionPattern.Pattern)) patterns.Add("selection");
+        if (Supports(element, ScrollPattern.Pattern)) patterns.Add("scroll");
+        if (Supports(element, GridPattern.Pattern)) patterns.Add("grid");
+        if (Supports(element, GridItemPattern.Pattern)) patterns.Add("grid_item");
+        if (Supports(element, TablePattern.Pattern)) patterns.Add("table");
+        if (Supports(element, WindowPattern.Pattern)) patterns.Add("window");
+        if (Supports(element, TransformPattern.Pattern)) patterns.Add("transform");
+        if (Supports(element, DockPattern.Pattern)) patterns.Add("dock");
         return patterns;
     }
 
@@ -166,6 +175,11 @@ public class Startup
             { "automation_id", current.AutomationId },
             { "class_name", current.ClassName },
             { "process_id", current.ProcessId },
+            { "backend", "uia" },
+            { "native_window_handle", unchecked((uint)current.NativeWindowHandle).ToString() },
+            { "password", current.IsPassword },
+            { "help_text", current.HelpText },
+            { "item_status", current.ItemStatus },
             { "enabled", current.IsEnabled },
             { "focused", current.HasKeyboardFocus },
             { "focusable", current.IsKeyboardFocusable },
@@ -176,6 +190,26 @@ public class Startup
 
         var elementId = ElementId(element);
         if (elementId != null) node["element_id"] = elementId;
+        // 状态用于判断下一步，完整文档按需读取；密码控件不读取 Value/Text。
+        try { if (!current.IsPassword && Supports(element, ValuePattern.Pattern)) {
+            var value = ((ValuePattern)element.GetCurrentPattern(ValuePattern.Pattern)).Current;
+            node["value"] = value.Value.Length > 512 ? value.Value.Substring(0, 512) : value.Value;
+            node["read_only"] = value.IsReadOnly;
+        } } catch { }
+        try { if (Supports(element, TogglePattern.Pattern)) node["toggle_state"] = ((TogglePattern)element.GetCurrentPattern(TogglePattern.Pattern)).Current.ToggleState.ToString(); } catch { }
+        try { if (Supports(element, ExpandCollapsePattern.Pattern)) node["expand_state"] = ((ExpandCollapsePattern)element.GetCurrentPattern(ExpandCollapsePattern.Pattern)).Current.ExpandCollapseState.ToString(); } catch { }
+        try { if (Supports(element, RangeValuePattern.Pattern)) {
+            var range = ((RangeValuePattern)element.GetCurrentPattern(RangeValuePattern.Pattern)).Current;
+            node["range"] = new Dictionary<string, object> { { "value", range.Value }, { "minimum", range.Minimum }, { "maximum", range.Maximum }, { "small_change", range.SmallChange }, { "large_change", range.LargeChange }, { "read_only", range.IsReadOnly } };
+        } } catch { }
+        try { if (Supports(element, GridPattern.Pattern)) {
+            var grid = ((GridPattern)element.GetCurrentPattern(GridPattern.Pattern)).Current;
+            node["grid"] = new Dictionary<string, object> { { "rows", grid.RowCount }, { "columns", grid.ColumnCount } };
+        } } catch { }
+        try { if (Supports(element, ScrollPattern.Pattern)) {
+            var scroll = ((ScrollPattern)element.GetCurrentPattern(ScrollPattern.Pattern)).Current;
+            node["scroll"] = new Dictionary<string, object> { { "horizontal", scroll.HorizontalScrollPercent }, { "vertical", scroll.VerticalScrollPercent }, { "horizontal_view", scroll.HorizontalViewSize }, { "vertical_view", scroll.VerticalViewSize } };
+        } } catch { }
 
         try
         {
@@ -221,7 +255,7 @@ public class Startup
     /// 重新定位靠 runtime id（UIA 的稳定标识），并在施加动作**之前**核对
     /// automation id / 名称 / 类名 / 角色：元素被替换过就失败退出，
     /// 绝不把动作施加到一个仅仅相似的控件上。
-    private static void Perform(dynamic input)
+    private static object Perform(dynamic input)
     {
         string elementId = (string)input.action.elementId;
         if (elementId == null || !System.Text.RegularExpressions.Regex.IsMatch(elementId, @"^uia:-?\d+(,-?\d+)*$"))
@@ -255,6 +289,14 @@ public class Startup
             catch { ancestor = null; }
         }
 
+        var actionArgs = (IDictionary<string, object>)input.action;
+        // 指定窗口的后台语义动作必须限制到原窗口，不能沿当前焦点搜索其它应用。
+        if (actionArgs.ContainsKey("hwnd") && actionArgs["hwnd"] != null) {
+            var rootArgs = new System.Dynamic.ExpandoObject();
+            ((IDictionary<string, object>)rootArgs)["hwnd"] = actionArgs["hwnd"];
+            searchRoot = RootFromWindowHandle(rootArgs);
+            if (searchRoot.Current.ProcessId != processId) throw new InvalidOperationException("窗口进程身份在观测之后变了");
+        }
         var element = FindByRuntimeId(searchRoot, desktopRoot, processId, runtimeId, maxCandidates, walker);
         if (element == null)
             throw new InvalidOperationException("UI Automation 元素在配置的搜索范围内已不可用");
@@ -305,9 +347,103 @@ public class Startup
             case "scroll_into_view":
                 ((ScrollItemPattern)element.GetCurrentPattern(ScrollItemPattern.Pattern)).ScrollIntoView();
                 break;
+            case "read":
+                return ReadElement(element, actionArgs);
+            case "add_to_selection":
+                ((SelectionItemPattern)element.GetCurrentPattern(SelectionItemPattern.Pattern)).AddToSelection(); break;
+            case "remove_from_selection":
+                ((SelectionItemPattern)element.GetCurrentPattern(SelectionItemPattern.Pattern)).RemoveFromSelection(); break;
+            case "set_range":
+                ((RangeValuePattern)element.GetCurrentPattern(RangeValuePattern.Pattern)).SetValue(Number(actionArgs, "number")); break;
+            case "scroll":
+                ((ScrollPattern)element.GetCurrentPattern(ScrollPattern.Pattern)).Scroll(
+                    (ScrollAmount)Enum.Parse(typeof(ScrollAmount), (string)actionArgs["horizontal"]),
+                    (ScrollAmount)Enum.Parse(typeof(ScrollAmount), (string)actionArgs["vertical"])); break;
+            case "set_scroll":
+                ((ScrollPattern)element.GetCurrentPattern(ScrollPattern.Pattern)).SetScrollPercent(Number(actionArgs, "horizontal"), Number(actionArgs, "vertical")); break;
+            case "select_text":
+                TextRange(element, actionArgs).Select(); break;
+            case "scroll_text":
+                TextRange(element, actionArgs).ScrollIntoView(true); break;
+            case "window_state":
+                ((WindowPattern)element.GetCurrentPattern(WindowPattern.Pattern)).SetWindowVisualState(
+                    (WindowVisualState)Enum.Parse(typeof(WindowVisualState), (string)actionArgs["state"])); break;
+            case "close":
+                ((WindowPattern)element.GetCurrentPattern(WindowPattern.Pattern)).Close(); break;
+            case "move":
+                ((TransformPattern)element.GetCurrentPattern(TransformPattern.Pattern)).Move(Number(actionArgs, "x"), Number(actionArgs, "y")); break;
+            case "resize":
+                ((TransformPattern)element.GetCurrentPattern(TransformPattern.Pattern)).Resize(Number(actionArgs, "width"), Number(actionArgs, "height")); break;
             default:
                 throw new InvalidOperationException("不支持的 UI Automation 动作 '" + kind + "'");
         }
+        return new Dictionary<string, object> { { "ok", true } };
+    }
+
+    private static double Number(IDictionary<string, object> args, string key) {
+        double value = Convert.ToDouble(args[key]);
+        if (double.IsNaN(value) || double.IsInfinity(value)) throw new InvalidOperationException("数值必须有限");
+        return value;
+    }
+
+    // TextPattern 支持按字符范围与精确文本定位；偏移用 UIA TextUnit.Character 语义。
+    private static System.Windows.Automation.Text.TextPatternRange TextRange(AutomationElement element, IDictionary<string, object> args) {
+        if (element.Current.IsPassword) throw new InvalidOperationException("不能读取密码控件");
+        var pattern = (TextPattern)element.GetCurrentPattern(TextPattern.Pattern);
+        var range = pattern.DocumentRange.Clone();
+        if (args.ContainsKey("text") && !string.IsNullOrEmpty((string)args["text"])) {
+            range = range.FindText((string)args["text"], false, false);
+            if (range == null) throw new InvalidOperationException("文档中找不到指定文本");
+        } else if (args.ContainsKey("start")) {
+            int start = Convert.ToInt32(args["start"]), end = Convert.ToInt32(args["end"]);
+            if (start < 0 || end < start) throw new InvalidOperationException("文本范围无效");
+            range.MoveEndpointByRange(System.Windows.Automation.Text.TextPatternRangeEndpoint.End, range, System.Windows.Automation.Text.TextPatternRangeEndpoint.Start);
+            int moved = range.MoveEndpointByUnit(System.Windows.Automation.Text.TextPatternRangeEndpoint.End, System.Windows.Automation.Text.TextUnit.Character, end);
+            if (moved != end) throw new InvalidOperationException("文本范围超出文档");
+            moved = range.MoveEndpointByUnit(System.Windows.Automation.Text.TextPatternRangeEndpoint.Start, System.Windows.Automation.Text.TextUnit.Character, start);
+            if (moved != start) throw new InvalidOperationException("文本范围超出文档");
+        }
+        return range;
+    }
+
+    private static object ReadElement(AutomationElement element, IDictionary<string, object> args) {
+        var result = (Dictionary<string, object>)ConvertNode(element, 0, 0, 1, TreeWalker.ControlViewWalker, new Budget());
+        if (element.Current.IsPassword) { result["redacted"] = true; return result; }
+        int limit = args.ContainsKey("maxChars") ? Convert.ToInt32(args["maxChars"]) : 16000;
+        if (limit < 1 || limit > 100000) throw new InvalidOperationException("文本读取上限无效");
+        if ((args.ContainsKey("text") || args.ContainsKey("start")) && !Supports(element, TextPattern.Pattern)) throw new InvalidOperationException("该元素不支持 TextPattern 范围读取");
+        if ((args.ContainsKey("row") || args.ContainsKey("column")) && !Supports(element, GridPattern.Pattern)) throw new InvalidOperationException("该元素不支持 GridPattern 单元格读取");
+        if (Supports(element, ValuePattern.Pattern)) {
+            string value = ((ValuePattern)element.GetCurrentPattern(ValuePattern.Pattern)).Current.Value;
+            result["value"] = value.Length > limit ? value.Substring(0, limit) : value;
+            result["value_truncated"] = value.Length > limit;
+        }
+        if (Supports(element, TextPattern.Pattern)) {
+            var pattern = (TextPattern)element.GetCurrentPattern(TextPattern.Pattern);
+            string text = TextRange(element, args).GetText(limit + 1);
+            result["text"] = text.Length > limit ? text.Substring(0, limit) : text;
+            result["text_truncated"] = text.Length > limit;
+            var selections = new List<object>(); int remaining = limit;
+            foreach (var range in pattern.GetSelection()) {
+                if (selections.Count >= 32 || remaining < 1) break;
+                string selected = range.GetText(remaining);
+                selections.Add(new Dictionary<string, object> { { "text", selected }, { "bounds", range.GetBoundingRectangles() } });
+                remaining -= selected.Length;
+            }
+            result["selection"] = selections;
+            result["selection_support"] = pattern.SupportedTextSelection.ToString();
+        }
+        if (Supports(element, SelectionPattern.Pattern)) {
+            var selection = ((SelectionPattern)element.GetCurrentPattern(SelectionPattern.Pattern)).Current;
+            var ids = new List<object>(); foreach (var item in selection.GetSelection()) { if (ids.Count >= 128) break; ids.Add(ElementId(item)); }
+            result["selected_elements"] = ids;
+            result["multiple_selection"] = selection.CanSelectMultiple;
+        }
+        if (Supports(element, GridPattern.Pattern) && args.ContainsKey("row") && args.ContainsKey("column")) {
+            var cell = ((GridPattern)element.GetCurrentPattern(GridPattern.Pattern)).GetItem(Convert.ToInt32(args["row"]), Convert.ToInt32(args["column"]));
+            result["cell"] = ConvertNode(cell, 0, 0, 1, TreeWalker.ControlViewWalker, new Budget());
+        }
+        return result;
     }
 
     /// 在搜索根之下按 runtime id 找元素：深度优先，受候选数上限约束。

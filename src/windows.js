@@ -27,11 +27,18 @@ const KEY_CODES = {
   space: 0x20,
   tab: 0x09,
   up: 0x26,
+  insert: 0x2d, capslock: 0x14, numlock: 0x90, scrolllock: 0x91,
+  printscreen: 0x2c, pause: 0x13, apps: 0x5d,
+  rightalt: 0xa5, rightcontrol: 0xa3, rightshift: 0xa1,
+  numpadmultiply: 0x6a, numpadadd: 0x6b, numpadsubtract: 0x6d, numpaddecimal: 0x6e, numpaddivide: 0x6f,
+  semicolon: 0xba, equals: 0xbb, comma: 0xbc, minus: 0xbd, period: 0xbe, slash: 0xbf,
+  backtick: 0xc0, bracketleft: 0xdb, backslash: 0xdc, bracketright: 0xdd, quote: 0xde,
 };
 
 for (let code = 0; code < 26; code += 1) KEY_CODES[String.fromCharCode(65 + code).toLowerCase()] = 0x41 + code;
 for (let code = 0; code < 10; code += 1) KEY_CODES[String(code)] = 0x30 + code;
-for (let code = 1; code <= 12; code += 1) KEY_CODES[`f${code}`] = 0x6f + code;
+for (let code = 0; code < 10; code += 1) KEY_CODES[`numpad${code}`] = 0x60 + code;
+for (let code = 1; code <= 24; code += 1) KEY_CODES[`f${code}`] = 0x6f + code;
 Object.freeze(KEY_CODES);
 
 /**
@@ -66,19 +73,14 @@ function numericBounds(raw) {
  * 保留两条实现会让两边都难以维护、测试也覆盖不到，而且用户不知道自己实际在用哪个 ——
  * 那种「静默降级」是伪兼容，不如直接说清楚缺什么。
  */
-let resolvedHelperPath;
-let helperProbeDone = false;
-
 function resolveHelperPath(config) {
-  if (helperProbeDone) return resolvedHelperPath;
-  helperProbeDone = true;
-
+  // 不跨实例缓存路径：一个会话的显式配置不能被另一实例的首次探测遮蔽。
+  if (config?.nativeHelperPath !== undefined) {
+    if (typeof config.nativeHelperPath !== 'string' || !existsSync(config.nativeHelperPath)) throw new ComputerUseError('configured nativeHelperPath does not exist');
+    return config.nativeHelperPath;
+  }
   const here = dirname(fileURLToPath(import.meta.url));
-  const override = typeof config?.nativeHelperPath === 'string' && config.nativeHelperPath.length > 0
-    ? config.nativeHelperPath
-    : undefined;
   const candidates = [
-    override,
     // 开发期：仓库里 cargo 的输出目录
     join(here, '..', 'native', 'target', 'release', 'dsh-screen.exe'),
     // 发布期：跟包一起分发的预编译产物
@@ -89,15 +91,13 @@ function resolveHelperPath(config) {
   for (const candidate of candidates) {
     try {
       if (existsSync(candidate)) {
-        resolvedHelperPath = candidate;
-        return resolvedHelperPath;
+        return candidate;
       }
     } catch {
       // 权限或路径长度问题：当作这个候选不存在，继续试下一个
     }
   }
-  resolvedHelperPath = undefined;
-  return resolvedHelperPath;
+  return undefined;
 }
 
 /** helper 找不到时给出可操作的错误信息（而不是静默换实现） */
@@ -152,6 +152,7 @@ async function nativeScreenshot(runner, config, request, signal) {
     // 指名窗口时把「提到前台」一并交给 helper：聚焦与抓屏必须在同一次进程调用里完成，
     // 否则第二次 spawn 冒出来的控制台窗口会盖住刚聚焦好的目标（见 captureWindow 的说明）。
     if (request.focus !== undefined && request.focus !== null) payload.focus = request.focus;
+    if (request.background !== undefined && request.background !== null) payload.background = request.background;
 
     const meta = await runNativeHelper(
       runner, helperPath, ['screenshot', '--out', pngPath], payload, signal,
@@ -171,6 +172,7 @@ async function nativeScreenshot(runner, config, request, signal) {
       height: Number(meta.height),
       sourceBounds: numericBounds(meta.sourceBounds),
       capturedAt: Date.now(),
+      captureMode: meta.captureMode,
       ...(typeof meta.displayId === 'string' ? { displayId: meta.displayId } : {}),
     };
   } finally {
@@ -205,39 +207,73 @@ function keyCode(key) {
   return code;
 }
 
-function actionPayload(action, delayMs) {
+function nativeStep(step) {
+  switch (step.kind) {
+    case 'move': return { kind: 'move', ...assertFinitePoint(step.point, 'move point') };
+    case 'scroll': return { kind: 'scroll', ...assertFinitePoint(step.point, 'scroll point'), deltaX: step.deltaX, deltaY: step.deltaY };
+    case 'keyDown': case 'keyUp': return { kind: step.kind, key: keyCode(step.key) };
+    case 'mouseDown': case 'mouseUp': return { kind: step.kind, button: step.button };
+    case 'key': return { kind: 'key', key: keyCode(step.key), modifiers: (step.modifiers ?? []).map(keyCode), repeat: step.repeat ?? 1, holdMs: step.holdMs ?? 0 };
+    case 'type': return { kind: 'type', text: step.text };
+    case 'wait': return { kind: 'wait', ms: step.ms };
+    default: throw new ComputerUseError(`unknown input step '${step.kind}'`);
+  }
+}
+export function actionPayload(action, delayMs) {
+  let steps;
   switch (action.kind) {
-    case 'move': {
-      const point = assertFinitePoint(action.point, 'move point');
-      return { kind: 'move', ...point, delayMs };
-    }
+    case 'sequence': steps = action.steps.map(nativeStep); break;
+    case 'move': case 'key': case 'type': case 'scroll': steps = [nativeStep(action)]; break;
     case 'click': {
       const point = assertFinitePoint(action.point, 'click point');
-      return { kind: 'click', ...point, button: action.button, clickCount: action.clickCount, delayMs };
+      if (![1, 2, 3].includes(action.clickCount)) throw new ComputerUseError('clickCount must be 1, 2 or 3');
+      steps = [{ kind: 'move', ...point }];
+      for (let index = 0; index < action.clickCount; index += 1) {
+        steps.push({ kind: 'mouseDown', button: action.button });
+        if (action.holdMs > 0) steps.push({ kind: 'wait', ms: action.holdMs });
+        steps.push({ kind: 'mouseUp', button: action.button });
+        if (index + 1 < action.clickCount) steps.push({ kind: 'wait', ms: 60 });
+      }
+      break;
     }
     case 'drag': {
       const from = assertFinitePoint(action.from, 'drag source');
       const to = assertFinitePoint(action.to, 'drag target');
-      return { kind: 'drag', fromX: from.x, fromY: from.y, toX: to.x, toY: to.y, durationMs: action.durationMs, delayMs };
+      if (!Number.isInteger(action.durationMs) || action.durationMs < 0 || action.durationMs > 10000) throw new ComputerUseError('invalid drag duration');
+      const path = action.path;
+      // path 点是 screenshot 映射后的物理像素。未指定时按 16ms 左右插值，画布可见中间轨迹。
+      const maxInterpolatedPoints = Math.min(120, Math.floor((256 - 3 - 2 * (action.modifiers?.length ?? 0)) / 2));
+      const count = action.path?.length ?? Math.min(maxInterpolatedPoints, Math.max(1, Math.ceil(action.durationMs / 16)));
+      if (count < 1 || count > 120) throw new ComputerUseError('drag path must contain 1..120 points');
+      steps = [{ kind: 'move', ...from }, { kind: 'mouseDown', button: action.button ?? 'left' }];
+      for (let index = 1; index <= count; index += 1) {
+        const point = action.path === undefined ? {
+          x: Math.round(from.x + (to.x - from.x) * index / count),
+          y: Math.round(from.y + (to.y - from.y) * index / count),
+        } : assertFinitePoint(path[index - 1], 'drag path point');
+        const wait = Math.floor(action.durationMs * index / count) - Math.floor(action.durationMs * (index - 1) / count);
+        if (wait > 0) steps.push({ kind: 'wait', ms: wait });
+        steps.push({ kind: 'move', ...point });
+      }
+      steps.push({ kind: 'mouseUp', button: action.button ?? 'left' });
+      break;
     }
-    case 'scroll': {
-      const point = action.point === undefined ? { x: 0, y: 0 } : assertFinitePoint(action.point, 'scroll point');
-      return { kind: 'scroll', ...point, deltaX: action.deltaX, deltaY: action.deltaY, delayMs };
-    }
-    case 'type': return { kind: 'type', text: action.text, delayMs };
-    case 'key': return {
-      kind: 'key',
-      key: keyCode(action.key),
-      modifiers: action.modifiers.map(keyCode),
-      delayMs,
-    };
     default: throw new ComputerUseError(`unknown computer action '${action.kind}'`);
   }
+  if (action.kind !== 'key' && action.kind !== 'sequence' && action.modifiers?.length > 0) {
+    steps = [
+      ...action.modifiers.map((key) => ({ kind: 'keyDown', key: keyCode(key) })),
+      ...steps,
+      ...[...action.modifiers].reverse().map((key) => ({ kind: 'keyUp', key: keyCode(key) })),
+    ];
+  }
+  if (steps.length > 256) throw new ComputerUseError('input exceeds 256 native steps; shorten the drag path or reduce modifiers');
+  return { kind: 'sequence', steps, delayMs };
 }
 
 function accessibilityActionPayload(action, delayMs, maxCandidates) {
   if (action === null || typeof action !== 'object') throw new ComputerUseError('accessibility action is invalid');
-  const allowed = ['invoke', 'focus', 'set_value', 'toggle', 'expand', 'collapse', 'select', 'scroll_into_view'];
+  const allowed = ['invoke', 'focus', 'set_value', 'toggle', 'expand', 'collapse', 'select', 'scroll_into_view', 'read', 'add_to_selection', 'remove_from_selection', 'set_range', 'scroll', 'set_scroll', 'select_text', 'scroll_text', 'window_state', 'close', 'move', 'resize'];
   if (!allowed.includes(action.kind)) throw new ComputerUseError(`unsupported accessibility action '${action.kind}'`);
   if (typeof action.elementId !== 'string' || !/^uia:-?\d+(,-?\d+)*$/.test(action.elementId)) {
     throw new ComputerUseError('accessibility element id is invalid');
@@ -262,6 +298,10 @@ function accessibilityActionPayload(action, delayMs, maxCandidates) {
     if (typeof action.value !== 'string') throw new ComputerUseError('accessibility set_value requires a string value');
     payload.value = action.value;
   }
+  // 仅允许工具层验证过的具名参数进入 C#；不提供任意反射或脚本入口。
+  for (const key of ['hwnd', 'maxChars', 'text', 'start', 'end', 'row', 'column', 'number', 'horizontal', 'vertical', 'state', 'x', 'y', 'width', 'height']) {
+    if (action[key] !== undefined) payload[key] = action[key];
+  }
   return payload;
 }
 
@@ -276,7 +316,19 @@ export class WindowsComputer {
       keyboard: true,
       windows: true,
       accessibility: true,
+      accessibilityBackends: ['uia', 'msaa'],
+      semanticReading: true,
+      inputSequence: true,
+      backgroundCapture: true,
+      childWindows: true,
+      windowManagement: true,
+      narrator: true,
     });
+  }
+
+  async narratorStatus() {
+    const bridge = await loadCSharpFile('windows-narrator.cs');
+    return bridge({ kind: 'status' });
   }
 
   async listDisplays(signal) {
@@ -318,6 +370,7 @@ export class WindowsComputer {
       ...(Number.isInteger(window.processId) ? { processId: window.processId } : {}),
       ...(typeof window.application === 'string' ? { application: window.application } : {}),
       focused: window.focused === true,
+      minimized: window.minimized === true,
     }));
   }
 
@@ -351,7 +404,28 @@ export class WindowsComputer {
       region: null,
       scale: request?.scale ?? null,
       saveTo: request?.saveTo ?? null,
-      focus: { handle: target.id, processId: target.processId, title: target.title },
+      [request?.background === true ? 'background' : 'focus']: { handle: target.id, processId: target.processId, title: target.title },
+    }, signal);
+  }
+
+  async childWindows(rawTarget, signal, maxNodes = 256) {
+    const target = listedWindowTarget(rawTarget);
+    return runNativeHelper(this.runner, requireHelperPath(this.config), ['child-windows'], {
+      window: { handle: target.id, processId: target.processId, title: target.title }, maxNodes,
+    }, signal);
+  }
+
+  async performWindowMessage(rawTarget, child, action, signal) {
+    const target = listedWindowTarget(rawTarget);
+    return runNativeHelper(this.runner, requireHelperPath(this.config), ['window-message'], {
+      window: { handle: target.id, processId: target.processId, title: target.title }, child, action,
+    }, signal);
+  }
+
+  async manageWindow(rawTarget, action, signal) {
+    const target = listedWindowTarget(rawTarget);
+    return runNativeHelper(this.runner, requireHelperPath(this.config), ['manage-window'], {
+      window: { handle: target.id, processId: target.processId, title: target.title }, action,
     }, signal);
   }
 
@@ -389,7 +463,15 @@ export class WindowsComputer {
    *   不给才退回"当前焦点窗口"——那在单窗口时够用，多窗口时是错的。
    * @param signal - 取消信号。
    */
-  async accessibilitySnapshot(windowHandle, signal) {
+  async accessibilitySnapshot(windowHandle, signal, options = {}) {
+    if (options.backend === 'msaa') return this.msaaSnapshot(windowHandle, signal, options);
+    if (options.window !== undefined) {
+      const actual = (await this.listWindows(signal)).find((window) => window.id === options.window.id);
+      if (actual === undefined || actual.processId !== options.window.processId || actual.title !== options.window.title) {
+        throw new ComputerUseError('window identity changed since observation');
+      }
+    }
+    signal?.throwIfAborted();
     // 走进程内的 C# 桥（edge-js），不再 spawn PowerShell 现场编译 C#。
     const call = await loadCSharpFile('windows-uia.cs', { references: UIA_ASSEMBLIES });
     return call({
@@ -401,9 +483,30 @@ export class WindowsComputer {
     });
   }
 
+  async msaaSnapshot(windowHandle, signal, options = {}) {
+    signal?.throwIfAborted();
+    const call = await loadCSharpFile('windows-msaa.cs', { references: ['Accessibility'] });
+    return call({
+      kind: 'accessibility', hwnd: windowHandle ?? null,
+      maxNodes: this.config.maxAccessibilityNodes, maxDepth: this.config.maxAccessibilityDepth,
+      ...(options.window === undefined ? {} : { processId: options.window.processId, title: options.window.title }),
+    });
+  }
+
   async performAccessibility(action, signal) {
+    if (action.element?.backend === 'msaa') {
+      signal?.throwIfAborted();
+      if (!/^msaa:\d+:(root|\d+(\.\d+)*)$/.test(action.elementId) || !Number.isInteger(action.element.process_id) || action.element.process_id < 1) throw new ComputerUseError('MSAA element identity invalid');
+      const call = await loadCSharpFile('windows-msaa.cs', { references: ['Accessibility'] });
+      const element = action.element;
+      return call({
+        kind: 'accessibility-action', hwnd: element.native_window_handle, processId: element.process_id, title: element.window_title,
+        action: { ...action, elementId: action.elementId, name: element.name, role: element.role, className: element.class_name },
+      });
+    }
     const call = await loadCSharpFile('windows-uia.cs', { references: UIA_ASSEMBLIES });
-    await call({
+    signal?.throwIfAborted();
+    return call({
       kind: 'accessibility-action',
       action: accessibilityActionPayload(action, this.config.actionDelayMs, this.config.maxAccessibilityActionCandidates),
     });
