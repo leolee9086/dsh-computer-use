@@ -1,3 +1,6 @@
 # pnpm 12 从这里读取原生依赖的构建许可（原 package.json pnpm 字段已失效）。
 allowBuilds:
   edge-js: true
+  # Windows .NET Framework uses the bundled Electron prebuild. Its install
+  # script also attempts unrelated CoreCLR SDK builds; those are unnecessary.
+  electron-edge-js: false

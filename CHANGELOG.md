@@ -1,5 +1,14 @@
 # 变更记录
 
+## 0.5.1 — 2026-10-06
+
+- 修复 DSH 桌面端 Electron 44 中 UIA、MSAA 和讲述人状态无法加载的问题：普通 Node 使用 `edge-js`，Electron 使用匹配其原生 ABI 的 `electron-edge-js`，保留进程内 C# 调用。
+- 从实际桥依赖作用域解析 `edge-cs`，兼容 pnpm 隔离和 profile 提升布局。编译器搬迁同时保留 `edge-cs-base.dll`，内容哈希目录避免覆盖正在使用的版本。
+- 原生桥加载错误现在包含桥名称、运行时、平台、架构、ABI 和原始错误；修复 `ComputerUseError` 丢失 cause、把 options 对象误当 code 的问题。
+- 新增实际 Electron 可执行文件回归命令，检查桥选择、伴随程序集、讲述人只读状态、并发调用及 UIA/MSAA 控件结果。预编译 Windows .NET Framework 路径已验证不需要运行依赖的 CoreCLR 安装构建。
+
+验证：当前桌面端可执行文件的 Electron 44.0.0 / Node 24.18.1 / ABI 149 下，UIA 8 项、MSAA 5 项和原生桥 4 项检查通过。普通 Node 兼容性及交付检查见 [EVIDENCE.md](EVIDENCE.md)。
+
 ## 0.5.0 — 2026-10-04
 
 - 无障碍路径独立于图像：允许焦点应用或 Windows 窗口的语义快照，新增有界 `computer_read`，保留可选截图的精确绑定。文本模型可使用 UIA/MSAA 观测、读取、动作及窗口证据键盘。

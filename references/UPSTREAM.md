@@ -37,4 +37,10 @@ Midscene supplies the stronger cross-platform reference: a single device abstrac
 - FlaUI: `https://github.com/FlaUI/FlaUI` (MIT); pywinauto: `https://github.com/pywinauto/pywinauto` (BSD-3-Clause); GNOME pyatspi2: `https://github.com/GNOME/pyatspi2` (LGPL-2.1-or-later); Apple's AXUIElement reference: `https://developer.apple.com/documentation/applicationservices/axuielement`. These inform the native semantic adapters; their source is not imported.
 - Quicker remains a workflow and interaction reference only. Its code is not incorporated.
 
-All newly written source in this project is MIT-licensed. No upstream source file or native binary is copied verbatim.
+## Optional .NET bridge dependencies
+
+- `edge-js` 26.1.0: `https://github.com/agracio/edge-js`, MIT. Loads the ordinary Node native bridge for Windows UIA/MSAA/Narrator.
+- `electron-edge-js` 44.0.0: `https://github.com/agracio/electron-edge-js`, MIT. Loads the native bridge compiled for the Electron runtime; Electron 44 / ABI 149 was tested for 0.5.1.
+- Both resolve their C# compiler through the `edge-cs` dependency alias (`@agracio/edge-cs` 1.3.7 in the lockfile). They remain separately distributed optional dependencies with their upstream licenses and prebuilt artifacts.
+
+All newly written source in this project is MIT-licensed. This source tree includes no copied upstream source file or native binary; the optional bridge packages are installed as dependencies.

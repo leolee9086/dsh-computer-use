@@ -1,6 +1,6 @@
 # dsh-computer-use
 
-独立的 Cordis bundle，为 DeepSeek Harness 提供视觉、原生无障碍和 Windows 讲述人操作路径。0.5.0 注册 **18 个 `computer_*` 工具**；无障碍观测、阅读和语义动作可以独立使用，文本模型也能操作原生应用。
+独立的 Cordis bundle，为 DeepSeek Harness 提供视觉、原生无障碍和 Windows 讲述人操作路径。0.5.1 注册 **18 个 `computer_*` 工具**；无障碍观测、阅读和语义动作可以独立使用，文本模型也能操作原生应用。
 
 Windows 是经过本机运行时验证的主要后端。macOS AX、Linux AT-SPI 已实现并做契约测试，尚无这两个系统的原生运行时验收。接口覆盖与实测范围见 [EVIDENCE.md](EVIDENCE.md)；对标的官方接口见 [能力矩阵](references/CAPABILITY-MATRIX.md)。目前没有任务成功率基准，也没有 SOTA 等效结论。
 
@@ -70,17 +70,17 @@ macOS/Linux 的快照目前从焦点应用获取，不支持 Windows 形式的�
 
 ## 安装与组合
 
-在 Harness CLI 可用的环境中，将仓库或打包产物添加为 profile bundle，例如：
+在官方插件面板添加 GitHub 来源 `github:leolee9086/dsh-computer-use#v0.5.1`；CLI 可用时同样通过 Harness 的插件管理入口添加 profile bundle：
 
 ```powershell
-pnpm dsh plugin --profile web add <path-to-dsh-computer-use>
+pnpm dsh plugin --profile desktop add github:leolee9086/dsh-computer-use#v0.5.1
 ```
 
 bundle patch 同时激活 host `computer` 服务、工具和工作流提示词，不需要编辑任何 agent 预设。使用 Harness 正常重启入口加载新 host 代码，刷新网页不足以挂载它。包保持现有 `src` ESM 入口；浏览器入口将截图工具卡渲染为图片，加载器注册 ID 与包名一致。
 
 默认 `observeApproval` / `controlApproval` 都为 `ask`。权威 DSH 权限预设为 Full access（danger-full-access + approval never）时继承免提示；显式 `deny` 始终有效。Loader 对单行 `config` 整体替换，覆盖时需写全该行配置。截图只读/后台与焦点改变分开审批，讲述人 status / command 同样区分观察与控制。
 
-运行时只通过 Cordis 的服务契约取得 Harness 能力，不导入 Harness 实现。Windows 无障碍/讲述人依赖可选 `edge-js`，C# 在 Node 进程内编译并调用；视觉/窗口输入走仓库自带的 Rust exe。生产后端不走 PowerShell，也不使用系统剪贴板传图。
+运行时只通过 Cordis 的服务契约取得 Harness 能力，不导入 Harness 实现。Windows 无障碍/讲述人在普通 Node 中使用可选 `edge-js`，在 Electron 中使用可选 `electron-edge-js`，按实际运行时选择匹配的原生桥，C# 在宿主进程内编译并调用。0.5.1 已在 Electron 44 / ABI 149 及普通 Node 24 中实测；其他 Electron 版本需要依赖中对应版本的预编译产物，否则会返回包含运行时、ABI 和原始原因的加载错误。编译器搬迁保留 `edge-cs-base.dll` 伴随程序集，按内容哈希隔离版本；Windows .NET Framework 路径已验证可跳过依赖的安装脚本。视觉/窗口输入走仓库自带的 Rust exe。生产后端不走 PowerShell，也不使用系统剪贴板传图。
 
 ## 开发与交付验证
 
@@ -91,6 +91,8 @@ pnpm install
 pnpm run verify
 python test/linux-reader-contracts.py
 pnpm run smoke:windows
+# 用当前桌面端实际可执行文件检查 Electron 原生 ABI；按本机路径替换：
+pnpm run smoke:electron "C:\path\to\DeepSeek Harness.exe"
 pnpm run verify:profile
 # 修改原生源码后：
 cargo build --release --manifest-path native/Cargo.toml

@@ -16,6 +16,7 @@
 //      那个模式下有效（CoreCLR 要走 project.json 那一套）。这正是我们要的模式。
 //   3. **单个 edge 函数实例不能并发调用。** 见下面 Bridge 的说明 —— 这是池化存在的理由。
 
+import { createHash } from 'node:crypto';
 import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { availableParallelism, tmpdir } from 'node:os';
@@ -26,6 +27,10 @@ import { ComputerUseError } from './errors.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
+// Electron has a different native ABI even when its embedded Node has the same
+// major version. Select the matching package before loading any native code;
+// a failed Electron bridge must not fall back to the incompatible Node binary.
+const edgePackage = process.versions.electron ? 'electron-edge-js' : 'edge-js';
 
 /**
  * 一个 C# 源文件的并发调用池。
@@ -141,37 +146,54 @@ let edgeCsPrepared = false;
  * edge-cs 加载自己的原生 DLL 时对非 ASCII 路径支持不好，而本插件很可能被装在
  * `C:\Users\<中文用户名>\.dsh\...` 这类路径下 —— 那就是每次编译都失败。
  * 复制一份到 `%ALLUSERSPROFILE%` 下的 ASCII 路径即可绕开；目标目录按包名分开，
- * 免得和别的插件互相覆盖。必须在 `import('edge-js')` **之前**设好。
+ * 免得和别的插件互相覆盖。必须在加载选中的 edge 桥 **之前**设好。
  */
 function prepareEdgeCsNative() {
   if (edgeCsPrepared) return;
   edgeCsPrepared = true;
   try {
-    // 从 edge-js 自身的位置推它自带的 edge-cs：require.resolve 到 .dll 会被 package
-    // exports 挡住，而 edge-js 把 edge-cs 装在自己的 node_modules 里。
-    const edgeJsRoot = dirname(dirname(require.resolve('edge-js')));
-    const source = join(edgeJsRoot, 'node_modules', 'edge-cs', 'lib', 'edge-cs.dll');
-    if (!existsSync(source)) return;   // 布局不同就交给 edge-cs 自己找，不硬来
+    // Resolve from the selected bridge's dependency scope. pnpm's isolated
+    // layout and a hoisted profile need not put edge-cs inside the package.
+    const bridgeRequire = createRequire(require.resolve(edgePackage));
+    const compilerDirectory = dirname(bridgeRequire.resolve('edge-cs'));
+    if (!existsSync(join(compilerDirectory, 'edge-cs.dll'))) return;
 
-    const target = join(process.env.ALLUSERSPROFILE ?? tmpdir(), 'dsh-computer-use');
+    // New compiler releases split their managed implementation into a base
+    // assembly. CLR resolves it beside edge-cs.dll, so relocate the pair.
+    // Content-addressed directories also keep a new version from overwriting
+    // DLLs already loaded by another running Harness process.
+    const files = ['edge-cs.dll', 'edge-cs-base.dll']
+      .filter((file) => existsSync(join(compilerDirectory, file)));
+    const hash = createHash('sha256');
+    for (const file of files) hash.update(file).update(readFileSync(join(compilerDirectory, file)));
+    const target = join(process.env.ALLUSERSPROFILE ?? tmpdir(), 'dsh-computer-use', hash.digest('hex'));
     mkdirSync(target, { recursive: true });
-    const destination = join(target, 'edge-cs.dll');
-    copyFileSync(source, destination);
-    process.env.EDGE_CS_NATIVE = destination;
+    for (const file of files) {
+      const destination = join(target, file);
+      if (!existsSync(destination)) copyFileSync(join(compilerDirectory, file), destination);
+    }
+    // Publish the override only after all required compiler assemblies exist.
+    process.env.EDGE_CS_NATIVE = join(target, 'edge-cs.dll');
   } catch {
     // 复制失败不致命：路径本来就是 ASCII 时根本不需要这一步。
     // 真出问题会在编译时报出来，那时这条线索（路径含非 ASCII）才有用。
   }
 }
 
-/** 懒加载 edge-js。它在可选依赖里（原生模块，只有需要 C# 的能力才用得上）。 */
+/** Lazy-load the native bridge for this runtime only when C# is needed. */
 async function requireEdge() {
   prepareEdgeCsNative();
   try {
-    return (await import('edge-js')).default;
+    // createRequire anchors resolution in this installed package, for both
+    // isolated pnpm dependencies and the Harness's hoisted profile layout.
+    return require(edgePackage);
   } catch (cause) {
+    const runtime = process.versions.electron
+      ? `Electron ${process.versions.electron}` : `Node ${process.versions.node}`;
+    const detail = cause instanceof Error ? cause.message : String(cause);
     throw new ComputerUseError(
-      '这段能力需要 edge-js（在 Node 进程内调用 .NET）；它在可选依赖里，可能是安装时被跳过了',
+      `${edgePackage} could not load in ${runtime} (${process.platform}/${process.arch}, ABI ${process.versions.modules}): ${detail}`,
+      'COMPUTER_BRIDGE_LOAD_FAILED',
       { cause },
     );
   }

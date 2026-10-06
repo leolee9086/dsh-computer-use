@@ -1,6 +1,8 @@
 export class ComputerUseError extends Error {
-  constructor(message, code = 'COMPUTER_OPERATION_FAILED') {
-    super(message);
+  // Keep the public string code separate from ErrorOptions so a native bridge
+  // failure retains its original cause without turning code into an object.
+  constructor(message, code = 'COMPUTER_OPERATION_FAILED', options) {
+    super(message, options);
     this.name = 'ComputerUseError';
     this.code = code;
   }

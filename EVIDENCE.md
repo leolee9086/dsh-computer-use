@@ -1,4 +1,27 @@
-# Capability Evidence — 0.5.0
+# Capability Evidence — 0.5.1
+
+## Electron bridge repair — 2026-10-06
+
+The installed 0.5.0 bundle's UIA, MSAA and Narrator tools still failed after a genuine desktop restart. Its `edge-js` loader selected the ordinary Node 24 prebuild in Electron 44.0.0 (embedded Node 24.18.1, ABI 149), producing `ERR_DLOPEN_FAILED`. Ordinary bundled Node 24.21.0 uses ABI 137 and loaded that dependency successfully. A dependency-present flag or ordinary Node test was insufficient to verify the desktop host.
+
+0.5.1 selects `electron-edge-js` 44.0.0 for Electron and retains `edge-js` for ordinary Node. The compiler is resolved from the selected dependency scope, and relocation preserves both `edge-cs.dll` and `edge-cs-base.dll` in a content-addressed directory. Missing optional dependencies expose the runtime/ABI and original resolution error with a string error code and preserved cause.
+
+Using the actual installed desktop executable with `ELECTRON_RUN_AS_NODE=1`, the permanent `smoke:electron` command passed on Electron 44.0.0 / ABI 149:
+
+| Check | Measured result |
+| --- | --- |
+| Native bridge | Matching Electron binary loaded; compiler companion DLL present; Narrator status returned; 12 concurrent calls completed |
+| WPF UIA | All 8 document/selection/value/range/multiple-selection/invoke/stale-identity checks passed |
+| WinForms MSAA | All 5 tree/read/value-write/default-action/PID-rejection checks passed |
+| Ordinary bundled Node 24.21.0 / ABI 137 | The same bridge, UIA and MSAA fixtures passed using `edge-js` |
+
+The 0.5.1 release gate passed 49 JavaScript syntax checks, all 56 regression tests (including the real DSH ToolRuntime), and native artifact/source hash verification before packaging.
+
+Dependencies were fetched with install scripts skipped. The tested Windows .NET Framework path does not need the dependency's CoreCLR SDK builds. Narrator reported not running in Windows session 1; these checks establish state querying, not speech or virtual-cursor behavior. Each fixture owned its PID/HWND and read resulting application state. UIA text selection changed foreground as in the earlier fixture; no blanket foreground-preservation guarantee is claimed.
+
+These are native runtime fixture tests of the repaired package using the desktop executable. The running profile must be updated through the official plugin manager and reloaded before its live tools can be marked fixed. Other Electron versions are not established by this Electron 44 result.
+
+## Previous 0.5.0 validation
 
 Verified on 2026-10-04. This records mechanisms and measured outcomes, not task-success parity with commercial computer-use systems. Interface references are listed in [CAPABILITY-MATRIX.md](references/CAPABILITY-MATRIX.md).
 
@@ -35,7 +58,7 @@ The staged native exe SHA-256 is `9a86acbb39edde4d36972c913fb5b5dd594e50a8e94438
 | Control failure evidence | A provider that records a partial input then throws consumes the original window ID; a subsequent key action cannot reuse it. | Real ToolRuntime integration test. |
 | Approval/composition | Local deny is repeated by the final guard, ordinary asks cannot be silently bypassed, and default ask inherits authoritative Full access. Bundle installs host provider plus tools and workflow; it requires no preset. | Real ToolRuntime tests and temporary Loader profile probe. |
 
-Native smoke tests own their WPF/WinForms processes and temporary scripts and clean them afterward. Production Windows code invokes no PowerShell: capture/input/window work uses the source-available Rust helper; UIA/MSAA/Narrator use optional edge-js C# bridges compiled in-process.
+Native smoke tests own their WPF/WinForms processes and temporary scripts and clean them afterward. Production Windows code invokes no PowerShell: capture/input/window work uses the source-available Rust helper; UIA/MSAA/Narrator use the optional runtime-matched edge-js/electron-edge-js C# bridge compiled in-process.
 
 During reruns, a fixture's foreground activation needed time to settle, and another Harness window changed desktop focus during a slow UIA read. The native smoke now checks foreground immediately after message delivery and waits for the owned cover's actual state before later assertions. Final staged-exe run passed all 10 checks. This is an interactive shared desktop, not an isolated benchmark machine.
 
