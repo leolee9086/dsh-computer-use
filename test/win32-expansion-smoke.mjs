@@ -43,7 +43,11 @@ const until = async (fn) => {
 };
 try {
   const window = await until(async () => (await driver.listWindows()).find((w) => w.title === title && w.processId === child.pid));
-  const snapshot = () => driver.accessibilitySnapshot(window.id, undefined, { window });
+  // 已完成的动作可能稍后投送属性事件；只重取被打断的只读采集，不重复动作。
+  const snapshot = () => until(async () => {
+    try { return await driver.accessibilitySnapshot(window.id, undefined, { window }); }
+    catch (error) { if (error.executionState === 'not_started' && /snapshot_changed/.test(error.message)) return undefined; throw error; }
+  });
   const find = async (id) => {
     const element = flattenAccessibilityTree(await snapshot()).find((e) => e.automation_id === id || e.name === id);
     assert.ok(element, `missing ${id}`); return element;

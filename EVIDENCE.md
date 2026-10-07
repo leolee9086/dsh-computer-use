@@ -1,6 +1,60 @@
-# Capability Evidence — 0.5.2
+# Capability Evidence — 0.5.3
 
 ## Current validation — 2026-10-07
+
+The dynamic-tree repair establishes immutable result pagination on Windows UIA/MSAA. It does **not** establish a transactionally atomic snapshot of the source application. Results report `source_atomic:false`; the provider advertises `semanticSnapshots:true` and `semanticSourceAtomic:false`. These are separate guarantees, and the second remains unimplemented.
+
+Windows now defaults to `consistency:"snapshot"`: collect the bounded scope, reread all covered summaries in order (including native-query misses), compare fingerprints and change versions, then seal the retained rows. No elements are published before validation completes. Frozen pages share a result ID and SHA-256; they do not reacquire data from the provider. The digest covers validated summaries and order before action tokens are registered. Explicit `consistency:"live"` retains streaming acquisition and reports unverified page consistency.
+
+| Check | Measured result | What it establishes |
+| --- | --- | --- |
+| `pnpm run verify` | 54 JavaScript syntax checks; all 62 tests passed | Existing budgets, worker lifecycle and real ToolRuntime contracts; frozen continuation preserves result identity/time and cannot restore consumed action evidence; AX/AT-SPI reject unsupported consistency selection before launching |
+| `pnpm run verify:profile` | Temporary real Loader profile passed | All 18 tools, workflow prompt, snapshot capability fields, allowed observation and explicit control denial mounted; temporary home removed |
+| Actual Electron 44.0.0 / Node 24.18.1 / ABI 149 | Complete sequential bridge, WPF, MSAA, live-tree and frozen-tree suite passed | Runtime-matched bridge with 12 concurrent calls; existing focus/value/toggle/invoke, 8 WPF and 5 MSAA checks; live paging, virtualization, blocked-worker termination and recovery remain usable |
+| Immutable native pages | 10,020 UIA rows and 10,001 MSAA rows, each in 31 pages | Same result ID/digest across pages; source renaming and silent insert/delete/reorder after sealing do not alter retained rows; each continuation reports zero native acquisition, visited and validated calls |
+| Provider counters on frozen UIA continuations | Property reads, pattern reads, navigations and runtime-ID reads all zero | Pagination reads retained data without consulting the live provider, even after the owned source changes |
+| Changes during unpublished capture | Silent/event name changes, insertion, deletion and reorder passed; MSAA same-count reorder/name changes passed | Full covered-node verification catches these changes outside the eight live navigation anchors, publishes no elements and discards the generation; its old cursor cannot resume |
+| Native query misses | A previously nonmatching covered node becoming a match invalidated capture; a fresh capture returned that match | Verification includes nonmatches rather than only checking rows that were retained for output |
+| Identity and output bounds | Renamed frozen UIA target action rejected with stale_target; a nonempty frozen page with continuation stayed within 4,096 serialized bytes | Historical data does not bypass the current target check; page byte accounting includes reference and consistency metadata |
+
+The first full Electron run stopped on a WPF `snapshot_changed` while property events were being delivered. No rows from that generation were published. The fixture now reacquires only interrupted read-only observations marked `not_started`; it never repeats an action. The subsequent complete Electron run passed. GUI fixtures own their HWNDs/PIDs and run sequentially; existing application documents are not test targets. The same frozen native fixture also passed in ordinary Node 22.19 using the actual official Cordis local subprocess service and production ManagedRunner.
+
+### Frozen capture cost
+
+The final successful Electron run measured time from starting acquisition to the first frozen page, including any tool-level progress continuations. Output pages contain at most 333 rows; the owned source contains approximately ten thousand. A smaller query sample followed the controlled mutations and resize.
+
+| Scope | Covered nodes | Returned rows in result | First frozen page ms | Tool calls | Instrumented native calls across capture/validation |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| UIA full bounded fixture | 10,020 | 10,020 | 10,928 | 1 | 60,120 |
+| MSAA full bounded fixture | 10,001 | 10,001 | 38,842 | 2 | 140,013 |
+| UIA exact query on resized fixture | 167 | 1 | 170 | 1 | 1,000 |
+
+MSAA returned an empty progress page before the default 30-second tool deadline, then continued the same capture to validation/sealing in a second call. These are ordered samples on a shared desktop, with the hash-compiled worker already cached, not latency distributions, cold-compiler measurements or universal application speedups. Instrumented worker calls count selected client operations, not hidden provider/OS work. Full-scope collection and rereading increase first-page cost; frozen continuations make no further acquisition calls. The historical 0.5.2 comparison below measures a 300-node **live** page and is not evidence of the new default's first-page speed.
+
+### Guarantees and remaining work
+
+A frozen result guarantees that all delivered pages use the same retained rows. Two matching bounded reads and event checks cannot prove that all source fields existed together at a single instant: generic UIA/MSAA provide no whole-tree transaction here, and unreported transient changes can evade that evidence. Source-wide atomicity remains unimplemented and would require a reliable provider transaction or versioned snapshot facility.
+
+Each worker retains at most four captures/results, at most 20,000 covered nodes and 32 MB estimated retained data per capture, and 64 MB in total. These are retention accounting budgets, not exact CLR heap/RSS limits. Captures and sealed results each have an absolute 120-second lifetime; paging does not renew it. Pool eviction expires the affected continuations/references. Coverage reports partial when depth/node/retention budgets truncate the verified scope; complete coverage is distinct from source atomicity and does not materialize all virtualized items.
+
+The current action, input, platform and rendering boundaries remain as described in [SECURITY.md](SECURITY.md). In particular, MSAA cannot distinguish every identical replacement generation; macOS/Linux native desktop evidence and individual special UIA patterns are still pending. This change does not supply task-success or SOTA-equivalence evidence.
+
+### Reproduce 0.5.3
+
+Run from the repository, selecting an actual Harness checkout through `DSH_HARNESS_ROOT` when it is not adjacent:
+
+```powershell
+pnpm run verify
+pnpm run verify:profile
+pnpm run smoke:snapshots
+pnpm run smoke:electron "C:\path\to\DeepSeek Harness.exe"
+pnpm run native:stage
+pnpm pack --pack-destination .local
+```
+
+`prepack` repeats JavaScript verification and checks the staged native executable/source manifest against 0.5.3. The Rust sources and executable bytes are unchanged; executable SHA-256 remains `9a86acbb39edde4d36972c913fb5b5dd594e50a8e944386016e63bdd8b10b789`. Worker compilation includes the new [fixed-result implementation](src/windows-semantic-snapshot.cs) in its source hash and compiler input. No live deployment installation or host restart is part of this verification.
+
+## Historical 0.5.2 validation — 2026-10-07
 
 The 0.5.2 checks exercise scoped observation invalidation, reusable window identities, file-only capture and bounded Windows native acquisition. UIA/MSAA now use independent .NET Framework workers through the official Cordis local subprocess service and the production ManagedRunner. Narrator retains the optional runtime-matched in-process bridge. The historical sections below record earlier versions; their single-use window-ID rules, in-process UIA/MSAA limitation and absence of a performance comparison do not describe 0.5.2.
 

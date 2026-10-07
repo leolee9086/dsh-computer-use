@@ -11,7 +11,7 @@ using System.Web.Script.Serialization;
 using System.Windows.Automation;
 using Accessibility;
 
-internal static class SemanticWorker
+internal static partial class SemanticWorker
 {
     internal static readonly JavaScriptSerializer Json = new JavaScriptSerializer { MaxJsonLength = 16000000, RecursionLimit = 128 };
     static readonly string Generation = Guid.NewGuid().ToString("N");
@@ -49,8 +49,9 @@ internal static class SemanticWorker
 
     sealed class Window {
         public IntPtr Hwnd; public uint Pid; public string Title, Class, Backend;
-        public int Version; public Target Root; public DateTime Touched;
+        public int Version, SnapshotVersion; public Target Root; public DateTime Touched;
         public StructureChangedEventHandler Handler;
+        public AutomationPropertyChangedEventHandler PropertyHandler;
     }
     // UIA 引用/运行时身份，或独立 MSAA 对象+child VARIANT。没有整树动作搜索。
     sealed class Target {
@@ -148,10 +149,13 @@ internal static class SemanticWorker
             if (hwnd == IntPtr.Zero) return;
             var root = GetAncestor(hwnd, 2);
             lock (WindowLock) foreach (var window in Windows.Values)
-                if (window.Backend == "msaa" && window.Hwnd == root) Interlocked.Increment(ref window.Version);
+                if (window.Backend == "msaa" && window.Hwnd == root) {
+                    Interlocked.Increment(ref window.SnapshotVersion);
+                    if (ev <= 0x8004) Interlocked.Increment(ref window.Version);
+                }
         };
         var pump = new Thread(delegate() {
-            var hook = SetWinEventHook(0x8001, 0x8004, IntPtr.Zero, EventCallback, 0, 0, 0);
+            var hook = SetWinEventHook(0x8000, 0x8017, IntPtr.Zero, EventCallback, 0, 0, 0);
             Message message; while (GetMessage(out message, IntPtr.Zero, 0, 0)) { }
             if (hook != IntPtr.Zero) UnhookWinEvent(hook);
         });
@@ -191,8 +195,26 @@ internal static class SemanticWorker
                 NativeCalls++;
                 var root = AutomationElement.FromHandle(hwnd).GetUpdatedCache(Cache);
                 window.Root = new Target { Uia = root, Window = window, Id = RuntimeId(root) };
-                window.Handler = delegate(object sender, StructureChangedEventArgs e) { Interlocked.Increment(ref window.Version); };
+                window.Handler = delegate(object sender, StructureChangedEventArgs e) {
+                    Interlocked.Increment(ref window.Version); Interlocked.Increment(ref window.SnapshotVersion);
+                };
+                // 属性变化也使正在采集的代次作废；不把普通焦点/状态改变伪装成结构变化。
+                window.PropertyHandler = delegate(object sender, AutomationPropertyChangedEventArgs e) { Interlocked.Increment(ref window.SnapshotVersion); };
                 Automation.AddStructureChangedEventHandler(root, TreeScope.Subtree, window.Handler);
+                Automation.AddAutomationPropertyChangedEventHandler(root, TreeScope.Subtree, window.PropertyHandler,
+                    AutomationElement.NameProperty, AutomationElement.ControlTypeProperty, AutomationElement.AutomationIdProperty,
+                    AutomationElement.ClassNameProperty, AutomationElement.ProcessIdProperty, AutomationElement.NativeWindowHandleProperty,
+                    AutomationElement.IsEnabledProperty, AutomationElement.IsOffscreenProperty, AutomationElement.IsPasswordProperty,
+                    AutomationElement.HasKeyboardFocusProperty, AutomationElement.IsKeyboardFocusableProperty, AutomationElement.BoundingRectangleProperty,
+                    AutomationElement.IsInvokePatternAvailableProperty, AutomationElement.IsValuePatternAvailableProperty,
+                    AutomationElement.IsTogglePatternAvailableProperty, AutomationElement.IsExpandCollapsePatternAvailableProperty,
+                    AutomationElement.IsSelectionItemPatternAvailableProperty, AutomationElement.IsScrollItemPatternAvailableProperty,
+                    AutomationElement.IsTextPatternAvailableProperty, AutomationElement.IsRangeValuePatternAvailableProperty,
+                    AutomationElement.IsSelectionPatternAvailableProperty, AutomationElement.IsScrollPatternAvailableProperty,
+                    AutomationElement.IsGridPatternAvailableProperty, AutomationElement.IsGridItemPatternAvailableProperty,
+                    AutomationElement.IsTablePatternAvailableProperty, AutomationElement.IsWindowPatternAvailableProperty,
+                    AutomationElement.IsTransformPatternAvailableProperty, AutomationElement.IsDockPatternAvailableProperty,
+                    AutomationElement.IsVirtualizedItemPatternAvailableProperty, AutomationElement.IsItemContainerPatternAvailableProperty);
             }
             Windows[key] = window;
         }
@@ -200,7 +222,9 @@ internal static class SemanticWorker
     }
     static void DropWindow(string key, Window window) {
         Interlocked.Increment(ref window.Version);
+        Interlocked.Increment(ref window.SnapshotVersion);
         if (window.Handler != null) Automation.RemoveStructureChangedEventHandler(window.Root.Uia, window.Handler);
+        if (window.PropertyHandler != null) Automation.RemoveAutomationPropertyChangedEventHandler(window.Root.Uia, window.PropertyHandler);
         Windows.Remove(key);
     }
     static void ValidateWindow(Window window) {
@@ -459,6 +483,7 @@ internal static class SemanticWorker
             { "coverage", new Dictionary<string, object> { { "status", status }, { "reason", reason }, { "scope", page.Scope }, { "max_depth", page.Depth }, { "virtualized_items", "unrealized items are not traversed; use item_container/realize explicitly" } } },
             { "visited_nodes", visited }, { "returned_nodes", rows.Count }, { "elapsed_ms", clock.ElapsedMilliseconds },
             { "native_calls", NativeCalls }, { "worker_generation", Generation },
+            { "consistency", new Dictionary<string, object> { { "mode", "live" }, { "status", "unverified" }, { "source_atomic", false } } },
             { "window", new Dictionary<string, object> { { "handle", page.Window.Hwnd.ToInt64().ToString() }, { "processId", (int)page.Window.Pid }, { "title", page.Window.Title } } }
         };
     }
@@ -533,7 +558,9 @@ internal static class SemanticWorker
             try {
                 var args = Json.Deserialize<Dictionary<string, object>>(line); id = args["id"];
                 string owner = Text(args, "owner"); if (owner.Length == 0) throw new InvalidOperationException("session owner required");
-                object result = Text(args, "kind") == "acquire" ? Acquire(args, owner) : Act(args, owner);
+                string consistency = Text(args, "consistency", "snapshot");
+                if (consistency != "snapshot" && consistency != "live") throw new InvalidOperationException("consistency must be snapshot or live");
+                object result = Text(args, "kind") == "acquire" ? (consistency == "snapshot" ? AcquireSnapshot(args, owner) : Acquire(args, owner)) : Act(args, owner);
                 Console.WriteLine(Json.Serialize(new Dictionary<string, object> { { "id", id }, { "result", result }, { "execution_state", ActionStarted ? "completed" : "not_started" } }));
             } catch (Exception error) {
                 Console.WriteLine(Json.Serialize(new Dictionary<string, object> { { "id", id }, { "error", error.Message }, { "execution_state", ActionStarted ? "unknown" : "not_started" } }));

@@ -364,6 +364,40 @@ test('text-only agents observe, read and invoke without a screenshot or llm rout
   assert.deepEqual(calls.map((call) => call.kind), ['read', 'invoke']);
 });
 
+test('frozen continuations preserve result identity and cannot restore consumed control evidence', async () => {
+  const { ctx, tools, computer, semanticTree, calls } = toolContext();
+  computer.capabilities = { semanticPaging: true, semanticSnapshots: true };
+  const acquired = [];
+  const finished = Date.now();
+  computer.accessibilitySnapshot = async (_window, _signal, options) => {
+    acquired.push(options);
+    const tree = structuredClone(semanticTree);
+    Object.defineProperty(tree, 'acquisition', { value: {
+      backend: 'uia', result_id: 'fixed-result', next_cursor: options.cursor ? undefined : 'next-fixed-page',
+      worker_generation: 'generation', coverage: { status: options.cursor ? 'complete' : 'partial' },
+      consistency: { mode: 'snapshot', status: 'frozen', result_id: 'fixed-result', sha256: 'stable-digest', capture_finished_at: finished, source_atomic: false },
+    } });
+    return tree;
+  };
+  applyTools(ctx, { observeApproval: 'allow', controlApproval: 'allow' });
+  const exec = { agent: { session: agent.session, options: {} } };
+  const screenshot = await toolByName(tools, 'computer_screenshot').execute({}, exec);
+  const readPage = (args) => toolByName(tools, 'computer_accessibility').execute(args, exec).then(JSON.parse);
+  const first = await readPage({ screenshot_id: screenshot.screenshot_id });
+  assert.equal(acquired[0].consistency, 'snapshot');
+  assert.equal(first.result_id, 'fixed-result');
+  assert.equal(first.consistency.source_atomic, false);
+  const continuation = { snapshot_id: first.snapshot_id, cursor: first.next_cursor };
+  await assert.rejects(() => readPage({ ...continuation, consistency: 'live' }), /cursor consistency changed/);
+  await toolByName(tools, 'computer_element').execute({ snapshot_id: first.snapshot_id, element_id: 'uia:42,9', operation: 'invoke' }, exec);
+  const second = await readPage(continuation);
+  assert.equal(second.result_id, first.result_id); assert.equal(second.captured_at, finished);
+  assert.equal(second.consistency.sha256, first.consistency.sha256);
+  assert.equal(acquired[1].consistency, 'snapshot');
+  await assert.rejects(() => toolByName(tools, 'computer_element').execute({ snapshot_id: second.snapshot_id, element_id: 'uia:42,9', operation: 'invoke' }, exec), /was consumed/);
+  assert.equal(calls.length, 1, 'reading archived pages cannot grant new action permission');
+});
+
 test('semantic observations are isolated across agents and mismatched window/image is rejected', async () => {
   const { ctx, tools } = toolContext();
   applyTools(ctx, { observeApproval: 'allow', controlApproval: 'allow' });

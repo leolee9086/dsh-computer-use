@@ -209,10 +209,10 @@ export function mapScreenshotPoint(observation, x, y) {
   };
 }
 
-function freshObservation(states, exec, screenshotId, config) {
+function freshObservation(states, exec, screenshotId, config, readFrozen = false) {
   const record = agentState(states, exec).observations.get(screenshotId);
   if (record === undefined) throw new Error(`screenshot '${screenshotId}' is unavailable in this session; capture a new screenshot`);
-  if (record.consumedAt !== undefined) {
+  if (!readFrozen && record.consumedAt !== undefined) {
     throw new Error(`screenshot '${screenshotId}' was consumed by an action affecting its layout; capture the relevant surface again`);
   }
   const age = Date.now() - record.capturedAt;
@@ -222,10 +222,10 @@ function freshObservation(states, exec, screenshotId, config) {
   return record;
 }
 
-function freshSemanticSnapshot(states, exec, snapshotId, config) {
+function freshSemanticSnapshot(states, exec, snapshotId, config, readFrozen = false) {
   const record = agentState(states, exec).semanticSnapshots.get(snapshotId);
   if (record === undefined) throw new Error(`accessibility snapshot '${snapshotId}' is unavailable in this session; capture a new semantic snapshot`);
-  if (record.consumedAt !== undefined) {
+  if (!(readFrozen && record.consistency?.status === 'frozen') && record.consumedAt !== undefined) {
     throw new Error(`accessibility snapshot '${snapshotId}' was consumed by an action affecting its state; observe the relevant branch again`);
   }
   const age = Date.now() - record.capturedAt;
@@ -516,15 +516,17 @@ export function apply(ctx, rawConfig) {
   const acquireSemantic = async (args, exec, query) => {
     const state = agentState(observations, exec);
     const previousId = optionalNonBlankString(args, 'snapshot_id');
-    const previous = previousId === undefined ? undefined : freshSemanticSnapshot(observations, exec, previousId, config);
     const cursor = optionalNonBlankString(args, 'cursor');
+    // 只读续页可以阅读已被动作影响的历史封存结果；动作证据仍走默认严格检查。
+    const previous = previousId === undefined ? undefined : freshSemanticSnapshot(observations, exec, previousId, config, cursor !== undefined);
+    const readFrozen = cursor !== undefined && previous?.consistency?.status === 'frozen';
     const rootId = optionalNonBlankString(args, 'root_element_id');
     if ((cursor !== undefined || rootId !== undefined) && previous === undefined) throw new Error('cursor/root_element_id requires its snapshot_id');
     if (cursor !== undefined && (previous.nextCursor !== cursor || rootId !== undefined)) throw new Error('cursor must be the next_cursor of that page; omit root_element_id');
     const root = rootId === undefined ? undefined : accessibilityElementById(previous.tree, rootId);
     if (rootId !== undefined && root === undefined) throw new Error('root_element_id is not in the specified observation');
     const screenshotId = optionalNonBlankString(args, 'screenshot_id') ?? previous?.screenshotId;
-    const screenshot = screenshotId === undefined ? undefined : freshObservation(observations, exec, screenshotId, config);
+    const screenshot = screenshotId === undefined ? undefined : freshObservation(observations, exec, screenshotId, config, readFrozen);
     const windowId = optionalNonBlankString(args, 'window_id');
     const window = windowId === undefined ? undefined : freshWindow(observations, exec, windowId, config);
     const backend = enumValue(args, 'backend', ['native', 'uia', 'msaa'], previous?.backend ?? 'native');
@@ -537,14 +539,16 @@ export function apply(ctx, rawConfig) {
     const provider = computer(ctx);
     if ((root !== undefined || cursor !== undefined || query !== undefined) && provider.capabilities.semanticPaging !== true) throw new Error('native semantic paging/query is unsupported on this backend');
     const options = acquisitionArgs(args);
+    if (options.consistency !== undefined && provider.capabilities.semanticSnapshots !== true) throw new Error('semantic consistency selection is unsupported on this backend');
+    options.consistency ??= cursor === undefined ? (provider.capabilities.semanticSnapshots ? 'snapshot' : undefined) : previous.consistencyMode;
     if (cursor !== undefined) {
-      for (const [parameter, stored] of [['scope', 'scope'], ['maxDepth', 'maxDepth'], ['detail', 'detail']]) {
+      for (const [parameter, stored] of [['scope', 'scope'], ['maxDepth', 'maxDepth'], ['detail', 'detail'], ['consistency', 'consistencyMode']]) {
         if (options[parameter] !== undefined && options[parameter] !== previous[stored]) throw new Error(`cursor ${parameter} changed; start a new observation`);
       }
       if (screenshotId !== previous.screenshotId) throw new Error('cursor screenshot binding changed');
       query ??= previous.query;
     }
-    const signature = cursor === undefined ? JSON.stringify({ backend, root: root?.element_id, query, scope: options.scope ?? 'subtree', depth: options.maxDepth }) : previous.signature;
+    const signature = cursor === undefined ? JSON.stringify({ backend, root: root?.element_id, query, scope: options.scope ?? 'subtree', depth: options.maxDepth, consistency: options.consistency }) : previous.signature;
     if (cursor !== undefined && query !== undefined && JSON.stringify(query) !== JSON.stringify(previous.query)) throw new Error('cursor query changed; start a new query');
     const tree = await provider.accessibilitySnapshot(focus?.handle, exec.signal, { ...options, backend, owner: state.owner, root, cursor,
       signature, workerGeneration: cursor === undefined ? undefined : previous.workerGeneration,
@@ -552,11 +556,17 @@ export function apply(ctx, rawConfig) {
       window: window?.nativeWindow ?? (focus === undefined ? undefined : { id: focus.handle, processId: focus.processId, title: focus.title }),
     });
     const metadata = tree.acquisition;
+    if (readFrozen && (metadata?.result_id !== previous.resultId || metadata?.consistency?.sha256 !== previous.consistency.sha256 || metadata?.consistency?.status !== 'frozen')) {
+      throw new Error('cursor result changed; discard the inconsistent page and start a new observation');
+    }
     const actualFocus = focus ?? metadata?.window;
     const snapshotId = `semantic-${randomUUID()}`;
-    const capturedAt = Date.now();
+    const capturedAt = metadata?.consistency?.capture_finished_at ?? Date.now();
     flattenAccessibilityTree(tree);
     const snapshot = { capturedAt, focus: actualFocus, backend: metadata?.backend ?? tree.backend ?? backend, tree,
+      consistency: metadata?.consistency ?? { mode: 'live', status: 'unverified', source_atomic: false },
+      consistencyMode: options.consistency, resultId: metadata?.result_id,
+      ...(readFrozen && previous.consumedAt !== undefined ? { consumedAt: previous.consumedAt } : {}),
       ...(screenshot === undefined ? {} : { screenshotId, screenshotHash: screenshot.contentHash }),
       coverage: metadata?.coverage ?? { status: 'unknown', reason: 'backend_does_not_report_coverage' },
       nextCursor: metadata?.next_cursor, workerGeneration: metadata?.worker_generation, signature, query: cursor === undefined ? query : previous.query,
@@ -567,8 +577,8 @@ export function apply(ctx, rawConfig) {
     rememberBounded(state.semanticSnapshots, snapshotId, snapshot, config.maxSemanticSnapshots);
     return { snapshot_id: snapshotId, captured_at: capturedAt, backend: snapshot.backend,
       ...(screenshot === undefined ? {} : { screenshot_id: screenshotId, screenshot_hash: screenshot.contentHash }),
-      coverage: snapshot.coverage, next_cursor: snapshot.nextCursor,
-      ...(metadata === undefined ? {} : { visited_nodes: metadata.visited_nodes, returned_nodes: metadata.returned_nodes, elapsed_ms: metadata.elapsed_ms, native_calls: metadata.native_calls, host_timing: metadata.host_timing }),
+      coverage: snapshot.coverage, consistency: snapshot.consistency, result_id: snapshot.resultId, next_cursor: snapshot.nextCursor,
+      ...(metadata === undefined ? {} : { visited_nodes: metadata.visited_nodes, validated_nodes: metadata.validated_nodes, returned_nodes: metadata.returned_nodes, elapsed_ms: metadata.elapsed_ms, native_calls: metadata.native_calls, host_timing: metadata.host_timing }),
       ...(query === undefined ? { tree } : { matches: flattenAccessibilityTree(tree) }),
     };
   };

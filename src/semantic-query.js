@@ -7,7 +7,8 @@ export const SEMANTIC_ACQUISITION_SCHEMA = Object.freeze({
   max_nodes: { type: 'integer', minimum: 1, maximum: 20000 },
   max_depth: { type: 'integer', minimum: 0, maximum: 128 },
   timeout_ms: { type: 'integer', minimum: 100, maximum: 120000 },
-  cursor: { type: 'string', description: 'next_cursor from a page. Continue with its snapshot_id; structure changes expire it.' },
+  consistency: { type: 'string', enum: ['snapshot', 'live'], description: 'Windows default snapshot validates and freezes a bounded result before paging. live reads the changing tree and does not guarantee page consistency.' },
+  cursor: { type: 'string', description: 'next_cursor from a page; continue with its snapshot_id. Frozen cursors read the same result; incomplete captures and live cursors expire on relevant changes.' },
 });
 
 export function acquisitionArgs(args) {
@@ -26,6 +27,10 @@ export function acquisitionArgs(args) {
   }
   if (args.detail !== undefined && args.detail !== 'summary') throw new Error('detail must be summary; use computer_read for detailed state');
   if (args.detail !== undefined) result.detail = args.detail;
+  if (args.consistency !== undefined) {
+    if (!['snapshot', 'live'].includes(args.consistency)) throw new Error('consistency must be snapshot or live');
+    result.consistency = args.consistency;
+  }
   return result;
 }
 
@@ -35,6 +40,7 @@ export function basicAcquisitionOptions(options, config, platform) {
   if (options.root !== undefined || options.cursor !== undefined || options.query !== undefined || (options.scope !== undefined && options.scope !== 'subtree')) {
     throw new Error(`${platform} native subtree roots, children-only scope, paging and native queries are unsupported`);
   }
+  if (options.consistency !== undefined) throw new Error(`${platform} frozen semantic results and consistency selection are unsupported`);
   const args = acquisitionArgs({ max_nodes: options.maxNodes, max_depth: options.maxDepth, timeout_ms: options.timeoutMs, detail: options.detail });
   return { maxNodes: args.maxNodes ?? config.maxAccessibilityNodes, maxDepth: args.maxDepth ?? config.maxAccessibilityDepth,
     timeoutMs: args.timeoutMs ?? config.commandTimeoutMs };

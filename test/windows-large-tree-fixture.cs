@@ -16,12 +16,14 @@ public class LargeTreeForm : Form
     public static void ResetStats() { Interlocked.Exchange(ref PropertyReads, 0); Interlocked.Exchange(ref PatternReads, 0); Interlocked.Exchange(ref Navigations, 0); Interlocked.Exchange(ref RuntimeIds, 0); }
     public static string Stats() { return "{\"property_reads\":"+PropertyReads+",\"pattern_reads\":"+PatternReads+",\"navigations\":"+Navigations+",\"runtime_ids\":"+RuntimeIds+"}"; }
     public static int LegacyCount = 10000;
+    public static readonly List<int> LegacyOrder = new List<int>();
+    public static readonly Dictionary<int, string> LegacyNames = new Dictionary<int, string>();
     public static LargeTreeForm Instance;
     public readonly RawNode Root;
     public LargeTreeForm() {
         Instance = this; Text = "DSH semantic large-tree fixture"; Width = 500; Height = 300;
         Root = new RawNode(this, null, -1, 0);
-        for (int i=0; i<10000; i++) Root.Children.Add(new RawNode(this, Root, i, 1));
+        for (int i=0; i<10000; i++) { Root.Children.Add(new RawNode(this, Root, i, 1)); LegacyOrder.Add(i); }
         var branch = new RawNode(this, Root, 10000, 1); Root.Children.Add(branch);
         for (int depth=2; depth<=13; depth++) { var child = new RawNode(this, branch, 10000+depth, depth); branch.Children.Add(child); branch = child; }
     }
@@ -36,14 +38,17 @@ public class LargeTreeForm : Form
         LargeTreeForm OwnerForm;
         public LegacyRoot(LargeTreeForm owner):base(owner) { OwnerForm=owner; }
         public override int GetChildCount() { return LegacyCount; }
-        public override AccessibleObject GetChild(int index) { return index>=0 && index<LegacyCount ? new LegacyChild(this,index) : null; }
+        public override AccessibleObject GetChild(int index) { return index>=0 && index<LegacyCount ? new LegacyChild(this, index < LegacyOrder.Count ? LegacyOrder[index] : index) : null; }
         public override string Name { get { return "MSAA large-tree root"; } }
     }
     public class LegacyChild : AccessibleObject {
         AccessibleObject RootObject; int Index;
         public LegacyChild(AccessibleObject parent, int index) { RootObject=parent; Index=index; }
         public override AccessibleObject Parent { get { return RootObject; } }
-        public override string Name { get { if (Blocking && Index==9998) Thread.Sleep(60000); return "Legacy item "+Index; } }
+        public override string Name { get {
+            if (Blocking && Index==9998) Thread.Sleep(60000);
+            string renamed; return LegacyNames.TryGetValue(Index, out renamed) ? renamed : "Legacy item "+Index;
+        } }
         public override AccessibleRole Role { get { return AccessibleRole.PushButton; } }
         public override AccessibleStates State { get { return AccessibleStates.Focusable | AccessibleStates.Offscreen; } }
         public override Rectangle Bounds { get { return new Rectangle(20,20,10,10); } }
@@ -64,6 +69,37 @@ public class LargeTreeForm : Form
                 else if (line=="reset_stats") { ResetStats(); Console.WriteLine("stats-reset"); }
                 else if (line=="stats") Console.WriteLine(Stats());
                 else if (line=="change_legacy") { LegacyCount++; NotifyWinEvent(0x8004, form.Handle, -4, 0); Console.WriteLine("legacy-changed"); }
+                // 静默变更故意不发事件：测试完整复读能捕捉八个前缀锚点以外的变化。
+                else if (line.StartsWith("resize:")) {
+                    int count = int.Parse(line.Substring(7));
+                    form.BeginInvoke((Action)delegate() {
+                        form.Root.Children.RemoveRange(count, form.Root.Children.Count-count);
+                        LegacyCount=count; LegacyOrder.RemoveRange(count,LegacyOrder.Count-count);
+                        Console.WriteLine("resized"); Console.Out.Flush();
+                    });
+                }
+                else if (line.StartsWith("rename:") || line.StartsWith("rename_event:") || line.StartsWith("rename_legacy:")) {
+                    var parts = line.Split(new [] { ':' }, 3); int index=int.Parse(parts[1]);
+                    form.BeginInvoke((Action)delegate() {
+                        if (parts[0]=="rename_legacy") LegacyNames[index]=parts[2];
+                        else {
+                            var node=form.Root.Children.Find(item=>item.ItemIndex==index); string old=node.DisplayName; node.DisplayName=parts[2];
+                            if (parts[0]=="rename_event") AutomationInteropProvider.RaiseAutomationPropertyChangedEvent(node,
+                                new AutomationPropertyChangedEventArgs(AutomationElementIdentifiers.NameProperty,old,parts[2]));
+                        }
+                        Console.WriteLine("renamed"); Console.Out.Flush();
+                    });
+                }
+                else if (line=="reorder_silent" || line=="reorder_legacy_silent" || line=="insert_silent" || line=="remove_silent") {
+                    string change=line;
+                    form.BeginInvoke((Action)delegate() {
+                        if (change=="reorder_silent") { var old=form.Root.Children[12]; form.Root.Children[12]=form.Root.Children[13]; form.Root.Children[13]=old; }
+                        else if (change=="reorder_legacy_silent") { int old=LegacyOrder[12]; LegacyOrder[12]=LegacyOrder[13]; LegacyOrder[13]=old; }
+                        else if (change=="insert_silent") form.Root.Children.Insert(24,new RawNode(form,form.Root,20001,1));
+                        else form.Root.Children.RemoveAt(24);
+                        Console.WriteLine("mutated"); Console.Out.Flush();
+                    });
+                }
                 else if (line=="change") form.BeginInvoke((Action)delegate() {
                     form.Root.Children.Insert(0, new RawNode(form,form.Root,20001,1));
                     AutomationInteropProvider.RaiseStructureChangedEvent(form.Root, new StructureChangedEventArgs(StructureChangeType.ChildrenInvalidated, form.Root.GetRuntimeId()));
@@ -81,6 +117,8 @@ public class RawNode : IRawElementProviderSimple, IRawElementProviderFragmentRoo
 {
     LargeTreeForm Form; RawNode ParentNode; int Index, Depth;
     public readonly List<RawNode> Children = new List<RawNode>();
+    public string DisplayName;
+    public int ItemIndex { get { return Index; } }
     public RawNode(LargeTreeForm form, RawNode parent, int index, int depth) { Form=form; ParentNode=parent; Index=index; Depth=depth; }
     public ProviderOptions ProviderOptions { get { return ProviderOptions.ServerSideProvider; } }
     public IRawElementProviderSimple HostRawElementProvider { get { return ParentNode == null ? AutomationInteropProvider.HostProviderFromHandle(Form.Handle) : null; } }
@@ -95,7 +133,7 @@ public class RawNode : IRawElementProviderSimple, IRawElementProviderFragmentRoo
         Interlocked.Increment(ref LargeTreeForm.PropertyReads);
         if (id==AutomationElementIdentifiers.NameProperty.Id) {
             if (LargeTreeForm.Blocking && Index==9998) Thread.Sleep(60000);
-            return Index==-1 ? "UIA large-tree root" : Depth==13 ? "Deep target" : "Item "+Index;
+            return DisplayName ?? (Index==-1 ? "UIA large-tree root" : Depth==13 ? "Deep target" : "Item "+Index);
         }
         if (id==AutomationElementIdentifiers.AutomationIdProperty.Id) return "item-"+Index;
         if (id==AutomationElementIdentifiers.ControlTypeProperty.Id) return Index==-1 || Children.Count>0 ? ControlType.Pane.Id : ControlType.Button.Id;

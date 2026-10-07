@@ -28,7 +28,7 @@ test('AX and AT-SPI honor per-call budgets and reject unsupported acquisition sh
     await provider.accessibilitySnapshot(undefined, undefined, { maxNodes: 19, maxDepth: 2, timeoutMs: 700 });
     assert.equal(launches[0].payload.maxNodes, 19); assert.equal(launches[0].payload.maxDepth, 2);
     assert.equal(launches[0].options.timeoutMs, 700);
-    for (const unsupported of [{ root: {} }, { cursor: 'next' }, { query: { name: 'target' } }, { scope: 'children' }]) {
+    for (const unsupported of [{ root: {} }, { cursor: 'next' }, { query: { name: 'target' } }, { scope: 'children' }, { consistency: 'snapshot' }, { consistency: 'live' }]) {
       await assert.rejects(provider.accessibilitySnapshot(undefined, undefined, unsupported), /unsupported/);
     }
     assert.equal(launches.length, 1); assert.equal(provider.capabilities.semanticPaging, false);

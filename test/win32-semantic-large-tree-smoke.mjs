@@ -48,7 +48,7 @@ async function fixture(executable) {
 }
 async function acquire(window, options) {
   const started = performance.now();
-  const tree = await computer.accessibilitySnapshot(window.hwnd, signal, { owner, ...options });
+  const tree = await computer.accessibilitySnapshot(window.hwnd, signal, { owner, consistency: 'live', ...options });
   const page = tree.acquisition;
   metrics.push({ backend: page.backend, scope: options?.scope ?? 'subtree', query: options?.query,
     elapsed_ms: Math.round(performance.now() - started), native_elapsed_ms: page.elapsed_ms, host_timing: page.host_timing,
@@ -84,7 +84,7 @@ try {
       response_bytes: Buffer.byteLength(JSON.stringify(acquired.acquisition ?? acquired)),
       host_timing: acquired.acquisition?.host_timing, provider: JSON.parse(await window.command('stats')) });
   }
-  const bytePage = await computer.semantics.call({ kind: 'acquire', owner, backend: 'uia', hwnd: window.hwnd,
+  const bytePage = await computer.semantics.call({ kind: 'acquire', owner, backend: 'uia', consistency: 'live', hwnd: window.hwnd,
     maxNodes: 300, maxDepth: 6, maxBytes: 4096 }, signal);
   assert.equal(bytePage.coverage.reason, 'byte_limit');
   assert.ok(bytePage.next_cursor && bytePage.elements.length > 0);

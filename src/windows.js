@@ -322,6 +322,8 @@ export class WindowsComputer {
       accessibilityBackends: ['uia', 'msaa'],
       semanticReading: true,
       semanticPaging: true,
+      semanticSnapshots: true,
+      semanticSourceAtomic: false,
       semanticQuery: true,
       semanticWorkerIsolation: true,
       inputSequence: true,
@@ -471,8 +473,10 @@ export class WindowsComputer {
    */
   async accessibilitySnapshot(windowHandle, signal, options = {}) {
     const backend = options.backend === 'msaa' ? 'msaa' : 'uia';
-    const page = await this.semantics.call({
-      kind: 'acquire', backend, hwnd: windowHandle ?? null,
+    const consistency = options.consistency ?? 'snapshot';
+    if (!['snapshot', 'live'].includes(consistency)) throw new ComputerUseError('consistency must be snapshot or live');
+    const request = {
+      kind: 'acquire', backend, consistency, hwnd: windowHandle ?? null,
       owner: options.owner ?? 'driver',
       maxNodes: options.maxNodes ?? this.config.maxAccessibilityNodes,
       maxDepth: options.maxDepth ?? this.config.maxAccessibilityDepth,
@@ -483,8 +487,27 @@ export class WindowsComputer {
       workerGeneration: options.workerGeneration ?? options.root?.worker_generation,
       signature: options.signature, query: options.query,
       ...(options.window === undefined ? {} : { processId: options.window.processId, title: options.window.title }),
-    }, signal, options.timeoutMs ?? this.config.commandTimeoutMs);
-    // 页面只构造本次返回的行；原生游标保留未采集部分，不把总树拖回 Host。
+    };
+    const started = performance.now();
+    const deadline = started + (options.timeoutMs ?? this.config.commandTimeoutMs);
+    const work = { visited_nodes: 0, validated_nodes: 0, native_calls: 0, elapsed_ms: 0 };
+    const timing = { queue_ms: 0, startup_ms: 0, elapsed_ms: 0 };
+    let page;
+    do {
+      // 同一采集代次的分段推进共用一个截止，不给每个分段重新发放30秒。
+      // 失败直接返回调用方；这里继续的是未完成的采集，不重试任何动作或失败。
+      const remaining = Math.max(1, Math.floor(deadline - performance.now()));
+      page = await this.semantics.call(request, signal, remaining);
+      for (const key of Object.keys(work)) work[key] += page[key] ?? 0;
+      timing.queue_ms += page.host_timing?.queue_ms ?? 0;
+      timing.startup_ms += page.host_timing?.startup_ms ?? 0;
+      if (page.consistency?.mode !== 'snapshot' || page.consistency.status === 'frozen' || !page.next_cursor) break;
+      request.cursor = page.next_cursor; request.workerGeneration = page.worker_generation;
+      // 接近截止时交付无元素的进度页，允许显式续采；原生单次阻塞仍由进程截止终止。
+    } while (deadline - performance.now() >= 150);
+    timing.elapsed_ms = Math.round(performance.now() - started);
+    Object.assign(page, work, { host_timing: timing });
+    // Host 只收到本页。固定结果集与验证日志留在有界工作进程中，不拼接总树。
     const byId = new Map(page.elements.map((row) => [row.element_id, { ...row, children: [] }]));
     const roots = [];
     for (const row of byId.values()) {

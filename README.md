@@ -1,6 +1,6 @@
 # dsh-computer-use
 
-独立的 Cordis bundle，为 DeepSeek Harness 提供视觉、原生无障碍和 Windows 讲述人操作路径。0.5.2 注册 **18 个 `computer_*` 工具**；无障碍观测、阅读和语义动作可以独立使用，文本模型也能操作原生应用。
+独立的 Cordis bundle，为 DeepSeek Harness 提供视觉、原生无障碍和 Windows 讲述人操作路径。0.5.3 注册 **18 个 `computer_*` 工具**；无障碍观测、阅读和语义动作可以独立使用，文本模型也能操作原生应用。
 
 Windows 是经过本机运行时验证的主要后端。macOS AX、Linux AT-SPI 已实现并做契约测试，尚无这两个系统的原生运行时验收。接口覆盖与实测范围见 [EVIDENCE.md](EVIDENCE.md)；对标的官方接口见 [能力矩阵](references/CAPABILITY-MATRIX.md)。目前没有任务成功率基准，也没有 SOTA 等效结论。
 
@@ -30,7 +30,7 @@ Windows 是经过本机运行时验证的主要后端。macOS AX、Linux AT-SPI 
 
 ### 概览、分支与续页
 
-获取默认是 summary：返回基本属性、边界、模式可用性和子节点覆盖情况，完整文档与模式状态由 `computer_read` 获取。每页默认最多 300 节点、深度 6、1 MB 原生响应、30 秒；`max_nodes`、`max_depth`、`timeout_ms` 可以逐次指定。`scope:"children"` 只浏览直属子节点，`scope:"subtree"` 浏览有界子树。
+获取默认是 summary：返回基本属性、边界、模式可用性和子节点覆盖情况，完整文档与模式状态由 `computer_read` 获取。Windows 默认 `consistency:"snapshot"`：在所选范围内采集并校验，封存后从同一固定结果集分页。每页默认最多 300 节点、范围深度 6、1 MB 原生响应；一次工具调用的排队、启动及分段采集共用 30 秒截止。`max_nodes` 同时限定每次原生采集/验证分段的节点数和输出页大小，`max_depth`、`timeout_ms` 可逐次指定。`scope:"children"` 只浏览直属子节点，`scope:"subtree"` 浏览有界子树。
 
 ```json
 {"window_id":"<已观测窗口ID>","max_nodes":100,"max_depth":2}
@@ -42,15 +42,19 @@ Windows 是经过本机运行时验证的主要后端。macOS AX、Linux AT-SPI 
 {"snapshot_id":"<分支所在快照ID>","root_element_id":"<已观测元素ID>","scope":"children","max_nodes":100}
 ```
 
-返回的 `coverage` 标明 complete、partial 或 unknown 及原因。`next_cursor` 表示仍有遍历状态；用该页的 `snapshot_id` 续取：
+返回的 `coverage` 标明 complete、partial 或 unknown 及原因，`consistency` 独立标明 collecting、validating 或 frozen。未完成校验时返回空元素和 `capture_in_progress`，可继续同一采集代次。封存页返回固定的 `result_id`、SHA-256 和采集起止时间；`next_cursor` 表示仍有采集进度或未交付的封存页，用该页的 `snapshot_id` 续取：
 
 ```json
 {"snapshot_id":"<上一页快照ID>","cursor":"<上一页next_cursor>","max_nodes":100}
 ```
 
-原生遍历保留栈和兄弟位置，续页直接推进该位置。每页注册独立快照，不向结果拼接整棵树。游标绑定会话、窗口、后端、工作进程代次、结构版本、查询及深度/scope/detail/截图绑定；改变这些条件时开始新获取。命中节点、字节、时间或深度预算时，部分覆盖不能证明全树不存在目标。深度之外的分支需要显式展开或增加深度。
+采集和验证各保留原生 DFS 栈；收集后复读覆盖范围的全部字段及顺序，包括查询未命中节点，变化事件或复读差异使未交付代次报 `snapshot_changed` 并丢弃。第一页交付前完成校验，之后所有页只读封存行，UI 的插入、删除、重排、改名不会混入这一结果。每页注册独立的工具观测，保留同一结果身份；动作失效后的历史分页可继续阅读，但不会恢复已失效的动作证据。游标绑定会话、后端、工作进程代次、查询、consistency 及深度/scope/detail/截图绑定，改变条件需开始新获取。
 
-动态界面的多页结果不是原子快照。UIA 结构事件、MSAA WinEvent/子节点数和有界导航锚点帮助检测变化，检测到后旧游标和元素引用报失效；提供者不发事件、变化又发生在锚点之外时，不能保证检测所有修改。锚点检查最多验证各活动分支已见的 8 个兄弟节点，不重新扫描所有前页。
+每个工作进程最多保留 4 个采集/封存结果，每个结果覆盖最多 20,000 节点，保留数据估算预算 32 MB，合计预算 64 MB。采集和封存各自有 120 秒绝对时效，访问不延长它；池淘汰会使相应游标与引用失效。节点/保留数据上限命中时只封存已验证范围，返回 `capture_node_limit` / `capture_byte_limit` 和 partial；输出页大小不会扩大全树覆盖。深度之外的分支需显式展开或增加深度。
+
+`frozen` 保证多页来自同一个不可变结果，`source_atomic:false` 说明源 UI 采集不是事务快照。UIA/MSAA 没有全树事务接口，两次相符的读取及事件校验仍不能证明所有字段曾在源程序的同一瞬间同时存在。需要源程序某一瞬间的全树原子状态时，须由提供者提供事务或可靠的版本化快照接口；此结果不提供该保证。采集范围是否查完由 coverage 表示，与这两层一致性分别判断。
+
+显式 `consistency:"live"` 保留逐页读取活树的方式，首屏只需本页采集，输出一致性为 unverified。结构事件及每个活动分支最多 8 个导航锚点用于使游标过期；它不能保证页间一致性。固定结果集增加首屏采集/复读成本，封存后续页不再访问提供者，可按范围和所需保证选择模式。
 
 ### 查询与已观测元素动作
 
@@ -60,9 +64,9 @@ Windows 是经过本机运行时验证的主要后端。macOS AX、Linux AT-SPI 
 {"source":"native","window_id":"<已观测窗口ID>","automation_id":"Commit","match":"exact","max_nodes":1000,"max_depth":12}
 ```
 
-查询同样返回覆盖范围和游标；续查询可省略原条件并继承它们。UIA 精确查询对预算内每个访问节点使用 `PropertyCondition` / `FindFirst(TreeScope.Element)`；包含查询使用缓存字段筛选。缓存仅覆盖当前元素的基本字段及模式可用性，不使用无界 `FindAll(Descendants)`。原生查询仍有遍历成本，不承诺任意提供者下的常数时间查找。
+查询同样返回覆盖范围、一致性和游标；续查询可省略原条件并继承它们。固定结果集在原生工作进程内按缓存字段筛选，完整验证同时包含未命中节点，最终只交付命中行；live 模式的 UIA 精确条件使用 `PropertyCondition` / `FindFirst(TreeScope.Element)`。缓存仅覆盖当前元素的基本字段及模式可用性，不使用无界 `FindAll(Descendants)`。原生查询仍有遍历成本，不承诺任意提供者下的常数时间查找。
 
-正常 Windows 动作使用工作进程注册的原生元素引用，复核窗口生命周期、结构版本、UIA runtime ID 和身份字段后直接调用目标，不从窗口根重扫。引用按会话和进程代次隔离；每个工作进程最多保留 8 个窗口、20000 个元素引用、32 个游标，引用时效 120 秒。
+正常 Windows 动作使用工作进程注册的原生元素引用，复核窗口生命周期、结构版本、UIA runtime ID 和身份字段后直接调用目标，不从窗口根重扫。引用按会话和进程代次隔离；每个工作进程最多保留 8 个窗口、20000 个元素引用和 32 个 live 游标，另有最多 4 个固定结果集的续页入口；引用时效 120 秒。
 
 UIA 读取包括 TextPattern 文档/选择/字符范围、ValuePattern、范围值、选择集、scroll/window 状态和 grid 信息/单元格。动作包括多选增删、范围值、scroll、文本选择/滚入视图、窗口状态/关闭与 transform 移动/缩放，均要求对应模式。
 
@@ -116,7 +120,7 @@ helper 不主动请求前台，应用的消息处理仍可能自行激活窗口�
 | 原子输入序列/路径拖动/扩展 hold/repeat | 已实现及核心真机检查 | 明确拒绝 | 明确拒绝 |
 | PrintWindow/子 HWND/窗口管理/讲述人 | Windows 专属 | 明确拒绝 | 明确拒绝 |
 
-macOS/Linux 的快照从焦点应用获取，不支持 Windows 形式的目标窗口语义根、`root_element_id`、`scope:"children"`、游标或 `source:"native"` 查询；默认快照内查找仍可用。显式 UIA/MSAA 后端请求会报错。macOS AX 不提供本接口的字符范围或 grid 读取；Linux 不提供 grid 读取。macOS 多屏左/上方显示器的截图原点与 Quartz 坐标仍待原生验收。
+macOS/Linux 的快照从焦点应用获取，不支持 Windows 形式的目标窗口语义根、`root_element_id`、`scope:"children"`、游标、consistency 选择或 `source:"native"` 查询；默认快照内查找仍可用。显式 UIA/MSAA 后端请求会报错。macOS AX 不提供本接口的字符范围或 grid 读取；Linux 不提供 grid 读取。macOS 多屏左/上方显示器的截图原点与 Quartz 坐标仍待原生验收。
 
 运行时只通过 Cordis 的服务契约取得 Harness 能力，不导入 Harness 实现。Windows UIA/MSAA 在独立 .NET Framework 控制台进程中运行，首次按源码哈希用系统 `csc.exe` 编译，使用 `ctx.subprocess` 管理 UTF-8 JSON 行管道。`semanticWorkerCount` 默认 2，显式范围 1..4；队列和启动计入调用截止时间。超时或取消会终止对应工作进程并等待退出确认，旧代次引用失效；没有确认退出时不创建替代进程。原生协议区分 `not_started`、`completed` 和 `unknown`；执行错误说明未开始或结果未知，未知结果不自动重试。
 
@@ -143,6 +147,7 @@ pnpm install
 pnpm run verify
 python test/linux-reader-contracts.py
 pnpm run smoke:semantics
+pnpm run smoke:snapshots
 pnpm run smoke:windows
 # 用当前桌面端实际可执行文件检查 Electron 原生 ABI；按本机路径替换：
 pnpm run smoke:electron "C:\path\to\DeepSeek Harness.exe"
@@ -153,6 +158,6 @@ pnpm run native:stage
 pnpm pack --pack-destination .local
 ```
 
-`verify` 检查所有 JS 文件并运行单元/提供者合同及真实 ToolRuntime 回归。`verify:profile` 使用独立临时 DSH home 检查真实 Loader、18 工具及提示词，清理后不影响既有 profile。`smoke:semantics` 用真实 Cordis 本地子进程服务测试万节点 UIA/MSAA、分页/分支/查询/引用/虚拟化、阻塞终止和恢复，并与旧采集算法测量同一提供者的调用量与响应大小。Electron smoke 包含这项测试及已有 WPF/WinForms 动作。Windows 动作 smoke 只操作标题唯一、由自己创建的进程，结束后清理自己的进程和临时目录。
+`verify` 检查所有 JS 文件并运行单元/提供者合同及真实 ToolRuntime 回归。`verify:profile` 使用独立临时 DSH home 检查真实 Loader、18 工具及提示词，清理后不影响既有 profile。`smoke:semantics` 用真实 Cordis 本地子进程服务测试万节点 UIA/MSAA、分页/分支/查询/引用/虚拟化、阻塞终止和恢复，并与旧采集算法测量同一提供者的调用量与响应大小。`smoke:snapshots` 验证两种后端万节点固定分页、未交付代次变化丢弃、查询未命中节点复核、静默插删/重排/属性更新、封存后原生采集零调用，以及历史结果不能绕过实时目标校验。Electron smoke 包含两项大树测试及已有 WPF/WinForms 动作。Windows 动作 smoke 只操作标题唯一、由自己创建的进程，结束后清理自己的进程和临时目录。
 
 `native:stage` 复制 release exe 并记录二进制与 Rust 源文件哈希；`prepack` 要求回归成功且产物清单匹配当前版本/源码。打包不含构建缓存或本地检查点。来源、许可与风险边界见 [UPSTREAM.md](references/UPSTREAM.md)、[LICENSE](LICENSE)、[SECURITY.md](SECURITY.md)，变更见 [CHANGELOG.md](CHANGELOG.md)。

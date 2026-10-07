@@ -18,12 +18,13 @@ async function assembly(name) {
 }
 
 export async function compileSemanticWorker(runner, signal) {
-  const [worker, legacy] = await Promise.all([
+  const [worker, snapshot, legacy] = await Promise.all([
     readFile(new URL('./windows-semantic-worker.cs', import.meta.url), 'utf8'),
+    readFile(new URL('./windows-semantic-snapshot.cs', import.meta.url), 'utf8'),
     readFile(new URL('./windows-uia.cs', import.meta.url), 'utf8'),
   ]);
   const source = legacy.replace('public class Startup', 'public class NativeUia');
-  const hash = createHash('sha256').update(worker).update(source).digest('hex').slice(0, 24);
+  const hash = createHash('sha256').update(worker).update(snapshot).update(source).digest('hex').slice(0, 24);
   let build = builds.get(hash);
   if (build === undefined) {
     build = (async () => {
@@ -32,13 +33,14 @@ export async function compileSemanticWorker(runner, signal) {
       if (existsSync(executable)) return executable;
       await mkdir(directory, { recursive: true });
       const workerPath = join(directory, 'worker.cs');
+      const snapshotPath = join(directory, 'snapshot.cs');
       const uiaPath = join(directory, 'uia.cs');
-      await Promise.all([writeFile(workerPath, worker, 'utf8'), writeFile(uiaPath, source, 'utf8')]);
+      await Promise.all([writeFile(workerPath, worker, 'utf8'), writeFile(snapshotPath, snapshot, 'utf8'), writeFile(uiaPath, source, 'utf8')]);
       const references = await Promise.all(['UIAutomationClient', 'UIAutomationTypes', 'WindowsBase', 'Accessibility'].map(assembly));
       const compiler = join(process.env.WINDIR ?? 'C:\\Windows', 'Microsoft.NET', 'Framework64', 'v4.0.30319', 'csc.exe');
       if (!existsSync(compiler)) throw new ComputerUseError('Windows .NET Framework C# compiler is unavailable');
       await runner.run([compiler, '/nologo', '/noconfig', '/target:exe', '/platform:x64', '/main:SemanticWorker', `/out:${executable}`,
-        '/r:System.dll', '/r:System.Core.dll', '/r:Microsoft.CSharp.dll', '/r:System.Web.Extensions.dll', ...references.map((path) => `/r:${path}`), workerPath, uiaPath], { signal });
+        '/r:System.dll', '/r:System.Core.dll', '/r:Microsoft.CSharp.dll', '/r:System.Web.Extensions.dll', ...references.map((path) => `/r:${path}`), workerPath, snapshotPath, uiaPath], { signal });
       return executable;
     })();
     builds.set(hash, build);

@@ -33,10 +33,10 @@ const until = async (fn) => {
 };
 try {
   const window = await until(async () => (await driver.listWindows()).find((w) => w.processId === child.pid && w.title === title));
-  // 只重取明确被结构事件打断的只读快照；可能执行过的动作始终不重试。
+  // 只重取明确被结构/属性事件打断的只读采集；可能执行过的动作始终不重试。
   const nodes = async () => until(async () => {
     try { return flattenAccessibilityTree(await driver.accessibilitySnapshot(window.id, undefined, { backend: 'msaa', window })); }
-    catch (error) { if (/cursor_stale/.test(error.message)) return undefined; throw error; }
+    catch (error) { if (error.executionState === 'not_started' && /cursor_stale|snapshot_changed/.test(error.message)) return undefined; throw error; }
   });
   const find = async (name) => { const all = await nodes(); const e = all.find((e) => e.name === name && (name === 'Legacy editor' ? e.role === 'Edit' : e.role === 'Button')); assert.ok(e, `missing ${name}: ${JSON.stringify(all.map((e) => ({name:e.name,role:e.role,patterns:e.patterns})))}`); return e; };
   let editor = await find('Legacy editor');
