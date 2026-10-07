@@ -1,6 +1,6 @@
 {
   "name": "dsh-computer-use",
-  "version": "0.5.3",
+  "version": "0.5.4",
   "private": true,
   "description": "Independent visual, accessibility and Windows Narrator computer-use plugins for DeepSeek Harness",
   "type": "module",
@@ -30,6 +30,7 @@
     "smoke:windows": "node test/win32-csharp-smoke.mjs && node test/win32-smoke.mjs && node test/win32-semantic-focus-smoke.mjs && node test/win32-expansion-smoke.mjs && node test/win32-msaa-smoke.mjs && node test/win32-native-expansion-smoke.mjs",
     "smoke:semantics": "node test/win32-semantic-large-tree-smoke.mjs",
     "smoke:snapshots": "node test/win32-semantic-snapshot-smoke.mjs",
+    "smoke:lifetimes": "node test/win32-semantic-lifetime-smoke.mjs",
     "smoke:electron": "node scripts/smoke-electron.mjs",
     "smoke:linux": "node test/linux-smoke.mjs",
     "smoke:macos": "node test/macos-smoke.mjs",

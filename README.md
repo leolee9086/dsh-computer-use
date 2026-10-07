@@ -1,6 +1,6 @@
 # dsh-computer-use
 
-独立的 Cordis bundle，为 DeepSeek Harness 提供视觉、原生无障碍和 Windows 讲述人操作路径。0.5.3 注册 **18 个 `computer_*` 工具**；无障碍观测、阅读和语义动作可以独立使用，文本模型也能操作原生应用。
+独立的 Cordis bundle，为 DeepSeek Harness 提供视觉、原生无障碍和 Windows 讲述人操作路径。0.5.4 注册 **18 个 `computer_*` 工具**；无障碍观测、阅读和语义动作可以独立使用，文本模型也能操作原生应用。
 
 Windows 是经过本机运行时验证的主要后端。macOS AX、Linux AT-SPI 已实现并做契约测试，尚无这两个系统的原生运行时验收。接口覆盖与实测范围见 [EVIDENCE.md](EVIDENCE.md)；对标的官方接口见 [能力矩阵](references/CAPABILITY-MATRIX.md)。目前没有任务成功率基准，也没有 SOTA 等效结论。
 
@@ -50,7 +50,7 @@ Windows 是经过本机运行时验证的主要后端。macOS AX、Linux AT-SPI 
 
 采集和验证各保留原生 DFS 栈；收集后复读覆盖范围的全部字段及顺序，包括查询未命中节点，变化事件或复读差异使未交付代次报 `snapshot_changed` 并丢弃。第一页交付前完成校验，之后所有页只读封存行，UI 的插入、删除、重排、改名不会混入这一结果。每页注册独立的工具观测，保留同一结果身份；动作失效后的历史分页可继续阅读，但不会恢复已失效的动作证据。游标绑定会话、后端、工作进程代次、查询、consistency 及深度/scope/detail/截图绑定，改变条件需开始新获取。
 
-每个工作进程最多保留 4 个采集/封存结果，每个结果覆盖最多 20,000 节点，保留数据估算预算 32 MB，合计预算 64 MB。采集和封存各自有 120 秒绝对时效，访问不延长它；池淘汰会使相应游标与引用失效。节点/保留数据上限命中时只封存已验证范围，返回 `capture_node_limit` / `capture_byte_limit` 和 partial；输出页大小不会扩大全树覆盖。深度之外的分支需显式展开或增加深度。
+每个工作进程最多保留 4 个采集/封存结果，每个结果覆盖最多 20,000 节点，保留数据估算预算 32 MB，合计预算 64 MB。采集和封存各自有 120 秒绝对时效，访问不延长它；时效及淘汰顺序使用单调时钟，采集/验证的原生读取后、封存前和构造输出页前后都检查到期，已到期代次报 `cursor_stale` 并丢弃；池淘汰会使相应游标与引用失效。节点/保留数据上限命中时只封存已验证范围，返回 `capture_node_limit` / `capture_byte_limit` 和 partial；输出页大小不会扩大全树覆盖。深度之外的分支需显式展开或增加深度。
 
 `frozen` 保证多页来自同一个不可变结果，`source_atomic:false` 说明源 UI 采集不是事务快照。UIA/MSAA 没有全树事务接口，两次相符的读取及事件校验仍不能证明所有字段曾在源程序的同一瞬间同时存在。需要源程序某一瞬间的全树原子状态时，须由提供者提供事务或可靠的版本化快照接口；此结果不提供该保证。采集范围是否查完由 coverage 表示，与这两层一致性分别判断。
 
@@ -148,6 +148,7 @@ pnpm run verify
 python test/linux-reader-contracts.py
 pnpm run smoke:semantics
 pnpm run smoke:snapshots
+pnpm run smoke:lifetimes
 pnpm run smoke:windows
 # 用当前桌面端实际可执行文件检查 Electron 原生 ABI；按本机路径替换：
 pnpm run smoke:electron "C:\path\to\DeepSeek Harness.exe"
@@ -158,6 +159,6 @@ pnpm run native:stage
 pnpm pack --pack-destination .local
 ```
 
-`verify` 检查所有 JS 文件并运行单元/提供者合同及真实 ToolRuntime 回归。`verify:profile` 使用独立临时 DSH home 检查真实 Loader、18 工具及提示词，清理后不影响既有 profile。`smoke:semantics` 用真实 Cordis 本地子进程服务测试万节点 UIA/MSAA、分页/分支/查询/引用/虚拟化、阻塞终止和恢复，并与旧采集算法测量同一提供者的调用量与响应大小。`smoke:snapshots` 验证两种后端万节点固定分页、未交付代次变化丢弃、查询未命中节点复核、静默插删/重排/属性更新、封存后原生采集零调用，以及历史结果不能绕过实时目标校验。Electron smoke 包含两项大树测试及已有 WPF/WinForms 动作。Windows 动作 smoke 只操作标题唯一、由自己创建的进程，结束后清理自己的进程和临时目录。
+`verify` 检查所有 JS 文件并运行单元/提供者合同及真实 ToolRuntime 回归。`verify:profile` 使用独立临时 DSH home 检查真实 Loader、18 工具及提示词，清理后不影响既有 profile。`smoke:semantics` 用真实 Cordis 本地子进程服务测试万节点 UIA/MSAA、分页/分支/查询/引用/虚拟化、阻塞终止和恢复，并与旧采集算法测量同一提供者的调用量与响应大小。`smoke:snapshots` 验证两种后端万节点固定分页、未交付代次变化丢弃、查询未命中节点复核、静默插删/重排/属性更新、封存后原生采集零调用，以及历史结果不能绕过实时目标校验。`smoke:lifetimes` 将自建窗口的真实属性读取延迟 1200ms，并把测试进程私有的代次起点移到距期限 1000ms，验证分段内到期丢弃、旧游标拒绝、引用清除及同进程恢复；还验证未来的展示时间戳不会延长封存时效，不修改机器时钟或生产时效常量。Electron smoke 包含这些验收及已有 WPF/WinForms 动作。Windows 动作 smoke 只操作标题唯一、由自己创建的进程，结束后清理自己的进程和临时目录。
 
 `native:stage` 复制 release exe 并记录二进制与 Rust 源文件哈希；`prepack` 要求回归成功且产物清单匹配当前版本/源码。打包不含构建缓存或本地检查点。来源、许可与风险边界见 [UPSTREAM.md](references/UPSTREAM.md)、[LICENSE](LICENSE)、[SECURITY.md](SECURITY.md)，变更见 [CHANGELOG.md](CHANGELOG.md)。

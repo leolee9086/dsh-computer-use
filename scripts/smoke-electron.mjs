@@ -11,7 +11,7 @@ if (process.platform !== 'win32' || !executable || !existsSync(executable)) {
 }
 const root = fileURLToPath(new URL('../', import.meta.url));
 // Own-window GUI checks run sequentially to avoid interfering with each other.
-for (const file of ['win32-csharp-smoke.mjs', 'win32-semantic-focus-smoke.mjs', 'win32-expansion-smoke.mjs', 'win32-msaa-smoke.mjs', 'win32-semantic-large-tree-smoke.mjs', 'win32-semantic-snapshot-smoke.mjs']) {
+for (const file of ['win32-csharp-smoke.mjs', 'win32-semantic-focus-smoke.mjs', 'win32-expansion-smoke.mjs', 'win32-msaa-smoke.mjs', 'win32-semantic-large-tree-smoke.mjs', 'win32-semantic-snapshot-smoke.mjs', 'win32-semantic-lifetime-smoke.mjs']) {
   const result = spawnSync(resolve(executable), [resolve(root, 'test', file)], {
     cwd: root,
     env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', DSH_EXPECT_ELECTRON: '1' },

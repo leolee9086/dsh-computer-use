@@ -12,6 +12,8 @@ public class LargeTreeForm : Form
 {
     public static bool Blocking, BlockingAction;
     public static int Invocations;
+    public static volatile int DelayedIndex = -2, DelayMilliseconds;
+    public static void DelayRead(int index) { if (index == DelayedIndex && DelayMilliseconds > 0) Thread.Sleep(DelayMilliseconds); }
     public static int PropertyReads, PatternReads, Navigations, RuntimeIds;
     public static void ResetStats() { Interlocked.Exchange(ref PropertyReads, 0); Interlocked.Exchange(ref PatternReads, 0); Interlocked.Exchange(ref Navigations, 0); Interlocked.Exchange(ref RuntimeIds, 0); }
     public static string Stats() { return "{\"property_reads\":"+PropertyReads+",\"pattern_reads\":"+PatternReads+",\"navigations\":"+Navigations+",\"runtime_ids\":"+RuntimeIds+"}"; }
@@ -47,6 +49,7 @@ public class LargeTreeForm : Form
         public override AccessibleObject Parent { get { return RootObject; } }
         public override string Name { get {
             if (Blocking && Index==9998) Thread.Sleep(60000);
+            DelayRead(Index);
             string renamed; return LegacyNames.TryGetValue(Index, out renamed) ? renamed : "Legacy item "+Index;
         } }
         public override AccessibleRole Role { get { return AccessibleRole.PushButton; } }
@@ -65,6 +68,10 @@ public class LargeTreeForm : Form
                 if (line=="block") { Blocking=true; Console.WriteLine("blocked-enabled"); }
                 else if (line=="unblock") { Blocking=false; Console.WriteLine("blocked-disabled"); }
                 else if (line=="block_action") { BlockingAction=true; Console.WriteLine("action-block-enabled"); }
+                else if (line.StartsWith("delay:")) {
+                    var parts = line.Split(':'); DelayedIndex=int.Parse(parts[1]); DelayMilliseconds=int.Parse(parts[2]);
+                    Console.WriteLine("delay-set");
+                }
                 else if (line=="count") Console.WriteLine("count:"+Invocations);
                 else if (line=="reset_stats") { ResetStats(); Console.WriteLine("stats-reset"); }
                 else if (line=="stats") Console.WriteLine(Stats());
@@ -133,6 +140,7 @@ public class RawNode : IRawElementProviderSimple, IRawElementProviderFragmentRoo
         Interlocked.Increment(ref LargeTreeForm.PropertyReads);
         if (id==AutomationElementIdentifiers.NameProperty.Id) {
             if (LargeTreeForm.Blocking && Index==9998) Thread.Sleep(60000);
+            LargeTreeForm.DelayRead(Index);
             return DisplayName ?? (Index==-1 ? "UIA large-tree root" : Depth==13 ? "Deep target" : "Item "+Index);
         }
         if (id==AutomationElementIdentifiers.AutomationIdProperty.Id) return "item-"+Index;

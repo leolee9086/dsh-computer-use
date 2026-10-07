@@ -1,6 +1,34 @@
-# Capability Evidence — 0.5.3
+# Capability Evidence — 0.5.4
 
 ## Current validation — 2026-10-07
+
+The 0.5.4 repair closes an in-segment lifetime gap in fixed semantic captures. Previously expiration was checked only at the segment entry: a native read starting before the 120-second capture limit could finish after it and still seal/publish the result. Acquisition now checks its monotonic lifetime after native reads and before sealing. Page construction checks before and after retaining output rows. Expiration discards the generation, cursors and registered references. UTC timestamps remain presentation metadata; lifetime and fixed-result eviction ordering use `Stopwatch` and are not extended by wall-clock adjustments.
+
+| Check | Measured result | What it establishes |
+| --- | --- | --- |
+| Old-code regression reproduction | The real UIA test failed with `expired capture/result was delivered instead of discarded` before the production fix | A 1200ms owned-provider property read crossing a capture with 1000ms remaining exposed the missing in-segment expiration check |
+| Native lifetime smoke, UIA and MSAA | Both passed in ordinary Node and actual Electron | Expiration during native acquisition publishes no result and removes the generation; its cursor cannot resume; references are removed; the same native process can begin another capture |
+| Monotonic frozen lifetime | Both backends passed | A frozen generation with an expired monotonic timestamp is rejected even when its UTC display timestamp is in the future; its continuation/references are discarded |
+| `pnpm run verify` | 55 JavaScript syntax checks; all 62 tests passed | Existing tool/runtime, worker deadlines, coverage, identity and consumed-evidence contracts remain valid |
+| `pnpm run verify:profile` | Temporary real Loader profile passed | All 18 tools and workflow prompt mounted; observation allowed, explicit control denied; semanticSnapshots:true and semanticSourceAtomic:false remain accurate |
+| Actual Electron 44.0.0 / Node 24.18.1 / ABI 149 | Complete sequential bridge, WPF, MSAA, live-tree, frozen-tree and lifetime suite passed | Runtime-matched bridge and all previously verified native behavior remain usable after the lifetime change |
+| Immutable native pagination | 10,020 UIA rows and 10,001 MSAA rows, each in 31 pages | Result ID/digest remain fixed across pages; post-seal source changes do not change retained rows; continuations still make zero provider acquisition calls |
+
+The lifetime fixture compiles the production C# sources with a separate test entry. Only that entry moves its process-private capture timestamps near the deadline and verifies the registries; it does not modify the machine clock or the production 120000ms lifetime constant. The owned window delays the name property of node 12 for 1200ms. The delay is disabled by default in the shared large-tree provider. The pre-fix regression was run against the same test before changing production code; both UIA/MSAA then passed after the repair. These checks validate expiration and immutable result pagination, not source-wide transactional atomicity.
+
+The successful 0.5.4 Electron run measured the first frozen page as follows:
+
+| Scope | Covered nodes | Returned rows in result | First frozen page ms | Tool calls | Instrumented native calls across capture/validation |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| UIA full bounded fixture | 10,020 | 10,020 | 10,945 | 1 | 60,120 |
+| MSAA full bounded fixture | 10,001 | 10,001 | 39,099 | 2 | 140,013 |
+| UIA exact query on resized fixture | 167 | 1 | 171 | 1 | 1,000 |
+
+These are ordered samples on a shared desktop with the compiled worker cached, not universal or cold-compiler latency claims. MSAA continues the same unpublished generation across two tool calls under the default 30-second per-call deadline. Source-wide atomicity remains unimplemented: a two-pass check and change events do not prove all source fields coexisted at one instant. The retention/coverage/action boundaries described below remain applicable; this version additionally enforces in-segment capture expiration and monotonic fixed-result lifetime.
+
+Reproduce from the repository with `pnpm run verify`, `pnpm run verify:profile`, `pnpm run smoke:lifetimes`, and `pnpm run smoke:electron "C:\path\to\DeepSeek Harness.exe"`. Stage and pack with `pnpm run native:stage` and `pnpm pack --pack-destination .local`; prepack checks the current version against the native executable/source manifest. Rust/executable bytes are unchanged.
+
+## Historical 0.5.3 validation — 2026-10-07
 
 The dynamic-tree repair establishes immutable result pagination on Windows UIA/MSAA. It does **not** establish a transactionally atomic snapshot of the source application. Results report `source_atomic:false`; the provider advertises `semanticSnapshots:true` and `semanticSourceAtomic:false`. These are separate guarantees, and the second remains unimplemented.
 

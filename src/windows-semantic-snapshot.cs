@@ -31,7 +31,9 @@ internal static partial class SemanticWorker
         public List<SnapshotEvidence> Evidence = new List<SnapshotEvidence>();
         public List<SnapshotRow> Rows = new List<SnapshotRow>();
         public HashSet<string> Seen = new HashSet<string>();
-        public DateTime Started = DateTime.UtcNow, Finished, Touched = DateTime.UtcNow;
+        public DateTime Started = DateTime.UtcNow, Finished;
+        // 展示时间使用UTC；时效及淘汰顺序使用单调时钟，系统校时不会延长代次。
+        public long StartedTick = Stopwatch.GetTimestamp(), FinishedTick, TouchedTick = Stopwatch.GetTimestamp();
         public long Bytes; public bool DepthLimited, PrefixOnly;
     }
     sealed class SnapshotContinuation {
@@ -47,10 +49,19 @@ internal static partial class SemanticWorker
             string token = Text(row.Node, "native_token"); if (token.Length > 0) Elements.Remove(token);
         }
     }
+    static bool SnapshotExpired(SnapshotCapture capture, long now) {
+        long start = capture.Stage == "frozen" ? capture.FinishedTick : capture.StartedTick;
+        return (now - start) * 1000.0 / Stopwatch.Frequency >= LifetimeMs;
+    }
+    static long SnapshotAlive(SnapshotCapture capture) {
+        long now = Stopwatch.GetTimestamp();
+        if (SnapshotExpired(capture, now))
+            throw new InvalidOperationException("cursor_stale: snapshot lifetime exceeded; retained generation discarded");
+        return now;
+    }
     static void SweepSnapshots() {
-        var old = new List<SnapshotCapture>();
-        foreach (var capture in Snapshots.Values)
-            if ((DateTime.UtcNow - (capture.Stage == "frozen" ? capture.Finished : capture.Started)).TotalMilliseconds > LifetimeMs) old.Add(capture);
+        var old = new List<SnapshotCapture>(); long now = Stopwatch.GetTimestamp();
+        foreach (var capture in Snapshots.Values) if (SnapshotExpired(capture, now)) old.Add(capture);
         foreach (var capture in old) DropSnapshot(capture);
     }
     static void ReserveSnapshot(SnapshotCapture keep, long addition) {
@@ -59,7 +70,7 @@ internal static partial class SemanticWorker
             long total = addition; SnapshotCapture oldest = null;
             foreach (var capture in Snapshots.Values) {
                 total += capture.Bytes;
-                if (capture != keep && (oldest == null || capture.Touched < oldest.Touched)) oldest = capture;
+                if (capture != keep && (oldest == null || capture.TouchedTick < oldest.TouchedTick)) oldest = capture;
             }
             if (total <= SnapshotPoolByteLimit) return;
             if (oldest == null) throw new InvalidOperationException("snapshot pool byte limit exceeded");
@@ -67,9 +78,12 @@ internal static partial class SemanticWorker
         }
     }
     static void SnapshotUnchanged(SnapshotCapture capture) {
+        SnapshotAlive(capture);
         ValidateWindow(capture.Window);
         if (capture.Version != Thread.VolatileRead(ref capture.Window.SnapshotVersion))
             throw new InvalidOperationException("snapshot_changed: source changed while collecting or validating; unpublished result discarded");
+        // 原生读取或窗口复核可能跨过期限，不能只依赖分段入口的清理。
+        SnapshotAlive(capture);
     }
     static void StartSnapshotPass(SnapshotCapture capture) {
         capture.Root.SummaryCached = false;
@@ -102,11 +116,13 @@ internal static partial class SemanticWorker
             row.Bytes = Encoding.UTF8.GetByteCount(Json.Serialize(row.Node)) + 1;
         }
         SnapshotUnchanged(capture);
+        capture.FinishedTick = SnapshotAlive(capture);
         capture.Finished = DateTime.UtcNow; capture.Stage = "frozen"; capture.Stack.Clear(); capture.Seen.Clear();
         // 复读日志到这里已完成其职责。保留摘要及计数，释放每个节点的验证数据。
         capture.CheckIndex = capture.Evidence.Count; capture.Evidence.Clear();
     }
     static object SnapshotResult(SnapshotCapture capture, int offset, int maxRows, int maxBytes, Stopwatch clock, int visited, int validated) {
+        SnapshotAlive(capture);
         var rows = new List<object>(); int bytes = 2048 + Encoding.UTF8.GetByteCount(Json.Serialize(capture.Window.Title));
         bool frozen = capture.Stage == "frozen"; int nextOffset = offset;
         if (frozen) {
@@ -119,6 +135,7 @@ internal static partial class SemanticWorker
                 rows.Add(row.Node); bytes += row.Bytes; nextOffset++;
             }
         }
+        SnapshotAlive(capture);
         string cursor = null;
         if (!frozen || nextOffset < capture.Rows.Count) {
             cursor = Guid.NewGuid().ToString("N");
@@ -169,7 +186,7 @@ internal static partial class SemanticWorker
             }
             while (Snapshots.Count >= SnapshotLimit) {
                 SnapshotCapture oldest = null;
-                foreach (var current in Snapshots.Values) if (oldest == null || current.Touched < oldest.Touched) oldest = current;
+                foreach (var current in Snapshots.Values) if (oldest == null || current.TouchedTick < oldest.TouchedTick) oldest = current;
                 DropSnapshot(oldest);
             }
             capture = new SnapshotCapture { Window = window, Root = root, Owner = owner, Signature = Text(args, "signature"),
@@ -179,7 +196,7 @@ internal static partial class SemanticWorker
             if (args.ContainsKey("query")) capture.Query = (Dictionary<string, object>)args["query"];
             Snapshots[capture.Id] = capture; StartSnapshotPass(capture);
         }
-        capture.Touched = DateTime.UtcNow; int visited = 0, validated = 0, spent = 0;
+        capture.TouchedTick = Stopwatch.GetTimestamp(); int visited = 0, validated = 0, spent = 0;
         try {
             while (capture.Stage != "frozen" && spent < maxNodes && clock.ElapsedMilliseconds < time) {
                 SnapshotUnchanged(capture);
