@@ -36,6 +36,7 @@ function modelElement(raw) {
     focusable: raw.focusable === true,
     offscreen: raw.offscreen === true,
     patterns: patternNames(raw.patterns),
+    patterns_known: raw.patterns_known ?? Array.isArray(raw.patterns),
   };
   if (Number.isInteger(raw.process_id) && raw.process_id > 0) element.process_id = raw.process_id;
   const processPath = stringValue(raw.process_path);
@@ -43,15 +44,24 @@ function modelElement(raw) {
   const bounds = finiteBounds(raw.bounds);
   if (bounds !== undefined) element.bounds = bounds;
   // 这些字段来自原生 provider，是阅读与选操作所需的状态；保留明确的后端身份。
-  for (const key of ['backend', 'native_window_handle', 'window_title', 'password', 'help_text', 'item_status', 'value', 'read_only', 'toggle_state', 'expand_state', 'range', 'grid', 'scroll', 'state', 'default_action']) {
+  for (const key of ['native_token', 'worker_generation', 'patterns_known', 'child_state', 'children_truncated', 'parent_id', 'depth', 'backend', 'native_window_handle', 'window_title', 'password', 'help_text', 'item_status', 'value', 'read_only', 'toggle_state', 'expand_state', 'range', 'grid', 'scroll', 'state', 'default_action']) {
     if (raw[key] !== undefined) element[key] = raw[key];
   }
   return element;
 }
 
 /** Flatten a native accessibility tree into model-safe actionable element rows. */
+const indexes = new WeakMap();
+
+export function accessibilityIndex(tree) {
+  flattenAccessibilityTree(tree);
+  return indexes.get(tree);
+}
+
 export function flattenAccessibilityTree(tree) {
   if (tree === null || typeof tree !== 'object') return [];
+  const cached = indexes.get(tree);
+  if (cached !== undefined) return cached.rows;
   const seen = new Set();
   const result = [];
   const pending = [tree];
@@ -67,6 +77,18 @@ export function flattenAccessibilityTree(tree) {
       for (let index = current.children.length - 1; index >= 0; index -= 1) pending.push(current.children[index]);
     }
   }
+  const byId = new Map(result.map((row) => [row.element_id, row]));
+  const exact = new Map();
+  for (const field of ['name', 'role', 'automation_id']) {
+    const values = new Map();
+    for (const row of result) {
+      const key = normalized(row[field]);
+      if (!values.has(key)) values.set(key, []);
+      values.get(key).push(row);
+    }
+    exact.set(field, values);
+  }
+  indexes.set(tree, { rows: result, byId, exact });
   return result;
 }
 
@@ -104,17 +126,29 @@ export function findAccessibilityElements(tree, rawQuery, maxResults) {
   if (!['exact', 'contains'].includes(query.match)) throw new Error('match must be exact or contains');
   if (!Number.isInteger(maxResults) || maxResults < 1) throw new Error('maxResults must be a positive integer');
 
-  return flattenAccessibilityTree(tree).filter((element) => (
-    (query.includeOffscreen || !element.offscreen)
-    && element.enabled
-    && matches(element.name, query.name, query.match)
-    && matches(element.role, query.role, query.match)
-    && matches(element.automation_id, query.automationId, query.match)
-  )).slice(0, maxResults);
+  let candidates = flattenAccessibilityTree(tree);
+  if (query.match === 'exact') {
+    const index = accessibilityIndex(tree);
+    for (const [field, value] of [['name', query.name], ['role', query.role], ['automation_id', query.automationId]]) {
+      if (value !== undefined) {
+        const rows = index.exact.get(field).get(normalized(value)) ?? [];
+        if (rows.length < candidates.length) candidates = rows;
+      }
+    }
+  }
+  const result = [];
+  for (const element of candidates) {
+    if ((query.includeOffscreen || !element.offscreen) && element.enabled
+      && matches(element.name, query.name, query.match)
+      && matches(element.role, query.role, query.match)
+      && matches(element.automation_id, query.automationId, query.match)) result.push(element);
+    if (result.length >= maxResults) break;
+  }
+  return result;
 }
 
 /** Find one actionable element by the opaque id returned from a semantic snapshot. */
 export function accessibilityElementById(tree, elementId) {
   if (typeof elementId !== 'string' || elementId.length === 0) throw new Error('element_id must be a non-empty string');
-  return flattenAccessibilityTree(tree).find((element) => element.element_id === elementId);
+  return accessibilityIndex(tree)?.byId.get(elementId);
 }

@@ -317,66 +317,60 @@ public class Startup
             && current.ControlType.ProgrammaticName.Replace("ControlType.", "") != expectedRole)
             throw new InvalidOperationException("UI Automation 元素的角色在观测之后变了");
 
-        string kind = (string)input.action.kind;
-        switch (kind)
-        {
-            case "invoke":
-                ((InvokePattern)element.GetCurrentPattern(InvokePattern.Pattern)).Invoke();
-                break;
-            case "focus":
-                element.SetFocus();
-                break;
-            case "set_value":
-                var valuePattern = (ValuePattern)element.GetCurrentPattern(ValuePattern.Pattern);
-                if (valuePattern.Current.IsReadOnly)
-                    throw new InvalidOperationException("UI Automation 的 value 模式是只读的");
-                valuePattern.SetValue((string)input.action.value);
-                break;
-            case "toggle":
-                ((TogglePattern)element.GetCurrentPattern(TogglePattern.Pattern)).Toggle();
-                break;
-            case "expand":
-                ((ExpandCollapsePattern)element.GetCurrentPattern(ExpandCollapsePattern.Pattern)).Expand();
-                break;
-            case "collapse":
-                ((ExpandCollapsePattern)element.GetCurrentPattern(ExpandCollapsePattern.Pattern)).Collapse();
-                break;
-            case "select":
-                ((SelectionItemPattern)element.GetCurrentPattern(SelectionItemPattern.Pattern)).Select();
-                break;
-            case "scroll_into_view":
-                ((ScrollItemPattern)element.GetCurrentPattern(ScrollItemPattern.Pattern)).ScrollIntoView();
-                break;
-            case "read":
-                return ReadElement(element, actionArgs);
-            case "add_to_selection":
-                ((SelectionItemPattern)element.GetCurrentPattern(SelectionItemPattern.Pattern)).AddToSelection(); break;
-            case "remove_from_selection":
-                ((SelectionItemPattern)element.GetCurrentPattern(SelectionItemPattern.Pattern)).RemoveFromSelection(); break;
-            case "set_range":
-                ((RangeValuePattern)element.GetCurrentPattern(RangeValuePattern.Pattern)).SetValue(Number(actionArgs, "number")); break;
-            case "scroll":
-                ((ScrollPattern)element.GetCurrentPattern(ScrollPattern.Pattern)).Scroll(
-                    (ScrollAmount)Enum.Parse(typeof(ScrollAmount), (string)actionArgs["horizontal"]),
-                    (ScrollAmount)Enum.Parse(typeof(ScrollAmount), (string)actionArgs["vertical"])); break;
-            case "set_scroll":
-                ((ScrollPattern)element.GetCurrentPattern(ScrollPattern.Pattern)).SetScrollPercent(Number(actionArgs, "horizontal"), Number(actionArgs, "vertical")); break;
-            case "select_text":
-                TextRange(element, actionArgs).Select(); break;
-            case "scroll_text":
-                TextRange(element, actionArgs).ScrollIntoView(true); break;
-            case "window_state":
-                ((WindowPattern)element.GetCurrentPattern(WindowPattern.Pattern)).SetWindowVisualState(
-                    (WindowVisualState)Enum.Parse(typeof(WindowVisualState), (string)actionArgs["state"])); break;
-            case "close":
-                ((WindowPattern)element.GetCurrentPattern(WindowPattern.Pattern)).Close(); break;
-            case "move":
-                ((TransformPattern)element.GetCurrentPattern(TransformPattern.Pattern)).Move(Number(actionArgs, "x"), Number(actionArgs, "y")); break;
-            case "resize":
-                ((TransformPattern)element.GetCurrentPattern(TransformPattern.Pattern)).Resize(Number(actionArgs, "width"), Number(actionArgs, "height")); break;
-            default:
-                throw new InvalidOperationException("不支持的 UI Automation 动作 '" + kind + "'");
+        return PerformDirect(element, actionArgs);
+    }
+
+    // 常驻语义工作进程持有已经观测的元素引用。它完成身份校验后直接调用这里，
+    // 不再为每个动作从窗口根扫描 runtime id；旧 edge 入口仍可独立测试。
+    public static object PerformDirect(AutomationElement element, IDictionary<string, object> actionArgs, Action onDispatch = null)
+    {
+        string kind = (string)actionArgs["kind"];
+        if (kind == "read") return ReadElement(element, actionArgs);
+        if (!element.Current.IsEnabled) throw new InvalidOperationException("UI Automation 元素已禁用");
+        // 先解析参数、获取目标模式和验证状态，最后才标记可能有副作用的投送。
+        // readonly/unsupported 等明确的执行前错误因此保留 not_started。
+        Action mutate;
+        switch (kind) {
+            case "invoke": { var p = (InvokePattern)element.GetCurrentPattern(InvokePattern.Pattern); mutate = () => p.Invoke(); break; }
+            case "focus": mutate = () => element.SetFocus(); break;
+            case "set_value": {
+                var p = (ValuePattern)element.GetCurrentPattern(ValuePattern.Pattern);
+                if (p.Current.IsReadOnly) throw new InvalidOperationException("UI Automation 的 value 模式是只读的");
+                string value = (string)actionArgs["value"]; mutate = () => p.SetValue(value); break;
+            }
+            case "toggle": { var p = (TogglePattern)element.GetCurrentPattern(TogglePattern.Pattern); mutate = () => p.Toggle(); break; }
+            case "expand": case "collapse": { var p = (ExpandCollapsePattern)element.GetCurrentPattern(ExpandCollapsePattern.Pattern); mutate = () => { if (kind == "expand") p.Expand(); else p.Collapse(); }; break; }
+            case "select": case "add_to_selection": case "remove_from_selection": {
+                var p = (SelectionItemPattern)element.GetCurrentPattern(SelectionItemPattern.Pattern);
+                mutate = () => { if (kind == "select") p.Select(); else if (kind == "add_to_selection") p.AddToSelection(); else p.RemoveFromSelection(); }; break;
+            }
+            case "scroll_into_view": { var p = (ScrollItemPattern)element.GetCurrentPattern(ScrollItemPattern.Pattern); mutate = () => p.ScrollIntoView(); break; }
+            case "set_range": {
+                var p = (RangeValuePattern)element.GetCurrentPattern(RangeValuePattern.Pattern); double value = Number(actionArgs, "number");
+                if (p.Current.IsReadOnly) throw new InvalidOperationException("UI Automation 的 range 模式是只读的");
+                if (value < p.Current.Minimum || value > p.Current.Maximum) throw new InvalidOperationException("range value 超出目标范围");
+                mutate = () => p.SetValue(value); break;
+            }
+            case "scroll": {
+                var p = (ScrollPattern)element.GetCurrentPattern(ScrollPattern.Pattern);
+                var h = (ScrollAmount)Enum.Parse(typeof(ScrollAmount), (string)actionArgs["horizontal"]);
+                var v = (ScrollAmount)Enum.Parse(typeof(ScrollAmount), (string)actionArgs["vertical"]);
+                mutate = () => p.Scroll(h, v); break;
+            }
+            case "set_scroll": { var p = (ScrollPattern)element.GetCurrentPattern(ScrollPattern.Pattern); double h = Number(actionArgs, "horizontal"), v = Number(actionArgs, "vertical"); mutate = () => p.SetScrollPercent(h, v); break; }
+            case "select_text": case "scroll_text": { var range = TextRange(element, actionArgs); mutate = () => { if (kind == "select_text") range.Select(); else range.ScrollIntoView(true); }; break; }
+            case "window_state": { var p = (WindowPattern)element.GetCurrentPattern(WindowPattern.Pattern); var state = (WindowVisualState)Enum.Parse(typeof(WindowVisualState), (string)actionArgs["state"]); mutate = () => p.SetWindowVisualState(state); break; }
+            case "close": { var p = (WindowPattern)element.GetCurrentPattern(WindowPattern.Pattern); mutate = () => p.Close(); break; }
+            case "move": case "resize": {
+                var p = (TransformPattern)element.GetCurrentPattern(TransformPattern.Pattern);
+                double x = Number(actionArgs, kind == "move" ? "x" : "width"), y = Number(actionArgs, kind == "move" ? "y" : "height");
+                if (kind == "move" && !p.Current.CanMove || kind == "resize" && !p.Current.CanResize) throw new InvalidOperationException("目标不支持该 transform 操作");
+                mutate = () => { if (kind == "move") p.Move(x,y); else p.Resize(x,y); }; break;
+            }
+            default: throw new InvalidOperationException("不支持的 UI Automation 动作 '" + kind + "'");
         }
+        if (onDispatch != null) onDispatch();
+        mutate();
         return new Dictionary<string, object> { { "ok", true } };
     }
 

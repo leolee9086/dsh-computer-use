@@ -4,6 +4,8 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { SemanticWorkerPool } from './semantic-worker.js';
+import { resolveHostConfig } from './config.js';
 import { loadCSharpFile } from './csharp.js';
 import { ComputerUseError, unsupported } from './errors.js';
 import { assertFinitePoint } from './geometry.js';
@@ -308,7 +310,8 @@ function accessibilityActionPayload(action, delayMs, maxCandidates) {
 export class WindowsComputer {
   constructor(runner, config) {
     this.runner = runner;
-    this.config = config;
+    this.config = resolveHostConfig(config);
+    this.semantics = new SemanticWorkerPool(runner, this.config);
     this.capabilities = Object.freeze({
       platform: 'win32',
       screenshot: true,
@@ -318,6 +321,9 @@ export class WindowsComputer {
       accessibility: true,
       accessibilityBackends: ['uia', 'msaa'],
       semanticReading: true,
+      semanticPaging: true,
+      semanticQuery: true,
+      semanticWorkerIsolation: true,
       inputSequence: true,
       backgroundCapture: true,
       childWindows: true,
@@ -464,36 +470,50 @@ export class WindowsComputer {
    * @param signal - 取消信号。
    */
   async accessibilitySnapshot(windowHandle, signal, options = {}) {
-    if (options.backend === 'msaa') return this.msaaSnapshot(windowHandle, signal, options);
-    if (options.window !== undefined) {
-      const actual = (await this.listWindows(signal)).find((window) => window.id === options.window.id);
-      if (actual === undefined || actual.processId !== options.window.processId || actual.title !== options.window.title) {
-        throw new ComputerUseError('window identity changed since observation');
-      }
+    const backend = options.backend === 'msaa' ? 'msaa' : 'uia';
+    const page = await this.semantics.call({
+      kind: 'acquire', backend, hwnd: windowHandle ?? null,
+      owner: options.owner ?? 'driver',
+      maxNodes: options.maxNodes ?? this.config.maxAccessibilityNodes,
+      maxDepth: options.maxDepth ?? this.config.maxAccessibilityDepth,
+      maxBytes: this.config.maxAccessibilityBytes,
+      maxResults: options.maxResults ?? options.maxNodes ?? this.config.maxAccessibilityNodes,
+      scope: options.scope ?? 'subtree', detail: options.detail ?? 'summary',
+      cursor: options.cursor, rootToken: options.root?.native_token,
+      workerGeneration: options.workerGeneration ?? options.root?.worker_generation,
+      signature: options.signature, query: options.query,
+      ...(options.window === undefined ? {} : { processId: options.window.processId, title: options.window.title }),
+    }, signal, options.timeoutMs ?? this.config.commandTimeoutMs);
+    // 页面只构造本次返回的行；原生游标保留未采集部分，不把总树拖回 Host。
+    const byId = new Map(page.elements.map((row) => [row.element_id, { ...row, children: [] }]));
+    const roots = [];
+    for (const row of byId.values()) {
+      const parent = byId.get(row.parent_id);
+      if (parent === undefined) roots.push(row); else parent.children.push(row);
     }
-    signal?.throwIfAborted();
-    // 走进程内的 C# 桥（edge-js），不再 spawn PowerShell 现场编译 C#。
-    const call = await loadCSharpFile('windows-uia.cs', { references: UIA_ASSEMBLIES });
-    return call({
-      kind: 'accessibility',
-      maxNodes: this.config.maxAccessibilityNodes,
-      maxDepth: this.config.maxAccessibilityDepth,
-      // 空字符串 / undefined 都当成"没指定"，由 C# 侧回退。
-      hwnd: typeof windowHandle === 'string' && windowHandle.length > 0 ? windowHandle : null,
-    });
+    const tree = roots.length === 1 ? roots[0] : { backend, children: roots };
+    Object.defineProperty(tree, 'acquisition', { value: page, enumerable: false });
+    return tree;
   }
 
   async msaaSnapshot(windowHandle, signal, options = {}) {
-    signal?.throwIfAborted();
-    const call = await loadCSharpFile('windows-msaa.cs', { references: ['Accessibility'] });
-    return call({
-      kind: 'accessibility', hwnd: windowHandle ?? null,
-      maxNodes: this.config.maxAccessibilityNodes, maxDepth: this.config.maxAccessibilityDepth,
-      ...(options.window === undefined ? {} : { processId: options.window.processId, title: options.window.title }),
-    });
+    return this.accessibilitySnapshot(windowHandle, signal, { ...options, backend: 'msaa' });
   }
 
+  async dispose() { await this.semantics.dispose(); }
+
   async performAccessibility(action, signal) {
+    if (typeof action.element?.native_token === 'string') {
+      const { element, elementId, owner, ...parameters } = action;
+      const expected = Object.fromEntries(['name', 'role', 'automation_id', 'class_name', 'process_id'].filter((key) => element[key] !== undefined).map((key) => [key, element[key]]));
+      return this.semantics.call({ kind: 'act', owner: owner ?? 'driver', token: element.native_token,
+        workerGeneration: element.worker_generation, expected, action: parameters }, signal);
+    }
+    throw new ComputerUseError('stale_target: observe this element with the current semantic worker before acting');
+  }
+
+  // 旧桥只用于兼容性诊断，生产操作必须使用观测时登记的工作进程引用。
+  async legacyPerformAccessibility(action, signal) {
     if (action.element?.backend === 'msaa') {
       signal?.throwIfAborted();
       if (!/^msaa:\d+:(root|\d+(\.\d+)*)$/.test(action.elementId) || !Number.isInteger(action.element.process_id) || action.element.process_id < 1) throw new ComputerUseError('MSAA element identity invalid');

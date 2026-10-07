@@ -112,7 +112,10 @@ window.__ModuleLoader__.load({
 			} else if (loading && atts.length > 0) {
 				bodyChildren = react.createElement("div", { style: S.hint }, "正在加载图片…");
 			} else if (atts.length === 0) {
-				bodyChildren = react.createElement("pre", { style: S.mono }, "（本次调用未返回图片）");
+				const text = Array.isArray(block && block.content)
+					? block.content.filter((entry) => entry && entry.type === "text").map((entry) => entry.text).join("\n") : "";
+				// 文件输出或错误仍显示完整文字结果，提供可见的路径与尺寸。
+				bodyChildren = react.createElement("pre", { style: S.mono }, text || "正在获取截图…");
 			} else {
 				bodyChildren = atts.map((att, i) => react.createElement("img", {
 					key: String(i) + String(att.attachmentId || ""),

@@ -144,6 +144,7 @@ try {
   checks.push('background minimized explicit error; new list discovers minimized target and focus restores it');
   console.log(JSON.stringify({ fixture: { pid: processFixture.pid, title }, beforeForeground: before, checks }, null, 2));
 } finally {
+  await driver.dispose();
   processFixture.kill();
   await new Promise((resolve) => processFixture.exitCode !== null ? resolve() : processFixture.once('exit', resolve));
   await rm(directory, { recursive: true, force: true });

@@ -45,3 +45,4 @@ console.log(JSON.stringify({
     children: accessibility.children?.length ?? 0,
   },
 }, null, 2));
+await computer.dispose();

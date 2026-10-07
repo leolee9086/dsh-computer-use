@@ -14,4 +14,5 @@ test('host config rejects unsafe numeric values', () => {
   assert.throws(() => resolveHostConfig({ screenshotMaxBytes: 0 }), /positive integer/);
   assert.throws(() => resolveHostConfig({ maxAccessibilityActionCandidates: 0 }), /positive integer/);
   assert.throws(() => resolveHostConfig({ actionDelayMs: -1 }), /non-negative integer/);
+  assert.throws(() => resolveHostConfig({ semanticWorkerCount: 5 }), /1\.\.4/);
 });

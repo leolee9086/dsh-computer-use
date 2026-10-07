@@ -17,6 +17,24 @@ const config = Object.freeze({
   maxAccessibilityActionCandidates: 5_000,
 });
 
+test('AX and AT-SPI honor per-call budgets and reject unsupported acquisition shapes before launching', async () => {
+  for (const Provider of [LinuxComputer, MacComputer]) {
+    const launches = [];
+    const runner = { requireAny: async () => 'helper', runJson: async (argv, options) => {
+      launches.push({ payload: JSON.parse(Buffer.from(argv.at(-1), 'base64').toString('utf8')), options });
+      return { element_id: 'fixture' };
+    } };
+    const provider = new Provider(runner, config);
+    await provider.accessibilitySnapshot(undefined, undefined, { maxNodes: 19, maxDepth: 2, timeoutMs: 700 });
+    assert.equal(launches[0].payload.maxNodes, 19); assert.equal(launches[0].payload.maxDepth, 2);
+    assert.equal(launches[0].options.timeoutMs, 700);
+    for (const unsupported of [{ root: {} }, { cursor: 'next' }, { query: { name: 'target' } }, { scope: 'children' }]) {
+      await assert.rejects(provider.accessibilitySnapshot(undefined, undefined, unsupported), /unsupported/);
+    }
+    assert.equal(launches.length, 1); assert.equal(provider.capabilities.semanticPaging, false);
+  }
+});
+
 test('Linux window enumeration marks the active xdotool window', async () => {
   const runner = {
     async requireAny() { return 'xdotool'; },

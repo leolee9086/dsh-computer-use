@@ -1,6 +1,66 @@
-# Capability Evidence — 0.5.1
+# Capability Evidence — 0.5.2
 
-## Electron bridge repair — 2026-10-06
+## Current validation — 2026-10-07
+
+The 0.5.2 checks exercise scoped observation invalidation, reusable window identities, file-only capture and bounded Windows native acquisition. UIA/MSAA now use independent .NET Framework workers through the official Cordis local subprocess service and the production ManagedRunner. Narrator retains the optional runtime-matched in-process bridge. The historical sections below record earlier versions; their single-use window-ID rules, in-process UIA/MSAA limitation and absence of a performance comparison do not describe 0.5.2.
+
+| Check | Result | What it establishes |
+| --- | --- | --- |
+| `pnpm run verify` | 53 JavaScript syntax checks; all 61 regression tests passed | Coordinate/configuration bounds, scoped invalidation and identity reuse, text-only semantics, AX/AT-SPI per-call budgets and rejection of unsupported shapes, real DSH ToolRuntime attachment/approval/file-output contracts |
+| Worker lifecycle contracts | All four protocol tests passed | Queued timeout does not release its predecessor; action timeout waits for exit confirmation and expires references; unconfirmed termination prevents replacement; cancellation before startup sends no native request |
+| `pnpm run verify:profile` | Temporary real Loader profile passed | Provider, all 18 tools and workflow prompt mounted; observation allow and explicit control deny worked; the isolated home was removed |
+| Actual Electron 44.0.0, embedded Node 24.18.1 / ABI 149 | Bridge plus WPF, WinForms and large-tree suite passed | Runtime-matched Narrator bridge and 12 concurrent calls; actual semantic focus/set-value/toggle/invoke; 8 WPF document/selection/value/range/multiple-selection/invoke/identity checks; 5 independent MSAA tree/read/write/default-action/PID checks |
+| Controlled native large trees | 10,020 UIA rows in 74 pages; 10,001 MSAA rows; 136 acquisition samples | Continuation without replay, deep and observed-root branches, children scope, native exact/contains queries, result/node/depth budgets, late reference action, offscreen invoke and explicit ItemContainer/VirtualizedItem operations |
+| Native byte budget | Nonempty partial page and continuation under a 4,096-byte budget passed | Measured serialized rows include reference tokens, worker generation and parent IDs; the implementation also rejects an oversized first row rather than yielding a non-progress cursor |
+| Native blocking and recovery | UIA/MSAA blocked reads and UIA blocked action passed | A 500ms deadline terminates the worker and confirms exit; a new owned fixture remains usable; an already-dispatched action reports unknown, is invoked once and is not automatically retried |
+
+The final large-tree run after the depth-boundary continuation fix used the actual Electron executable, waited for process completion and passed the same native checks. An earlier successful run also used ordinary Node 22.19 with the real managed subprocess backend. GUI fixtures run sequentially and own their windows/processes; no existing application document is a test target.
+
+MSAA optional string fields treat only explicit `DISP_E_MEMBERNOTFOUND` / `E_NOTIMPL` as unsupported. Value reads report `value_supported`, and absent description/help/default-action fields are omitted. Other COM failures propagate. Startup structure events can invalidate a read-only snapshot; the fixture may reacquire that observation, while production actions are never automatically retried.
+
+### Measured acquisition work
+
+The [controlled provider](test/windows-large-tree-fixture.cs) counts actual calls to GetPropertyValue, GetPatternProvider, Navigate and GetRuntimeId. Each sample resets those counters. The [large-tree test](test/win32-semantic-large-tree-smoke.mjs) compares the existing ConvertNode algorithm in a separate [baseline executable](test/windows-legacy-baseline.cs) with the new worker on the same UIA window, at 300 returned nodes and depth 6. The successful final run produced:
+
+| Sample | Elapsed ms | Response bytes | Property reads | Pattern reads | Navigations | Runtime IDs |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Legacy, first acquisition | 1,409 | 117,284 | 4,998 | 6,468 | 884 | 1,175 |
+| Legacy, subsequent acquisition | 811 | 117,284 | 4,998 | 6,468 | 884 | 1,175 |
+| Worker, first acquisition | 504 | 178,093 | 4,124 | 5,310 | 885 | 879 |
+| Worker, subsequent acquisition | 140 | 178,092 | 4,113 | 5,292 | 881 | 879 |
+| Late Item 9999 invoke through its registered reference | 18 | — | 8 | 1 | 2 | 3 |
+
+The worker's first acquisition reported queue/startup/total host time of 0/16/502ms; the subsequent acquisition reported 0/0/138ms. Outer elapsed time also includes conversion and test-wrapper work. The hash-compiled worker executable was already cached for this run. Compilation of the baseline executable occurs before these samples, and these numbers are not fresh-compiler or cold-machine measurements. Both first calls include their process's remaining CLR/UIA initialization and real provider cache state.
+
+Property and pattern work decreased in this fixture. Response bytes increased about 52% because of native references, parent links, coverage and worker metadata. The late action did not replay a root-to-target scan or the old 5,000-candidate limit; UIA still performed the two measured internal navigations. These are ordered individual samples on a shared interactive desktop, not latency distributions or universal application speedups. Queue time was zero in this single-producer run; contention and termination behavior are checked separately by the lifecycle contracts. The worker's `native_calls` statistic counts selected instrumented client operations, not hidden provider/OS work; it is distinct from the fixture's counters above.
+
+### Current limits
+
+- Native traversal and queries remain bounded walks. Exact UIA conditions run in `TreeScope.Element` at each visited node; no constant-time whole-tree lookup or unbounded descendant materialization is claimed. Partial coverage, depth limits and uninstantiated virtual items cannot establish global absence.
+- Structure events and bounded sibling anchors do not create an atomic multi-page snapshot or detect every unreported mutation. MSAA and HWND APIs cannot distinguish every same-property replacement generation.
+- Terminating a worker does not undo an application effect or unblock the application's own provider thread. Recovery checks create another owned fixture when the blocked provider remains busy. Unknown actions are not retried.
+- UIA grid and special Scroll/Window/Transform patterns still lack individual native acceptance assertions. WPF text selection changed foreground; semantic operations and child handlers can activate applications. There is no general foreground-preservation guarantee.
+- macOS AX and Linux AT-SPI have budget/identity/provider contracts, but their native desktops, permissions and application action results remain untested. They do not implement these Windows native roots, children-only scope, persistent paging/query or worker isolation. macOS multi-monitor origin mapping remains pending.
+- Narrator status/bridge and fixed-key contracts are tested. Its actual layout is unknown, and speech and virtual cursor movement are not observed. Input delivery does not verify either outcome.
+- PrintWindow/integrity and forced input-helper termination limitations in [SECURITY.md](SECURITY.md) remain. No task corpus, completion rate, general recovery-rate comparison or SOTA-equivalence claim is established by these fixtures.
+
+### Reproduce 0.5.2
+
+Run from the repository with an actual Harness checkout selected by `DSH_HARNESS_ROOT` when it is not adjacent:
+
+```powershell
+pnpm run verify
+pnpm run verify:profile
+pnpm run smoke:semantics
+pnpm run smoke:electron "C:\path\to\DeepSeek Harness.exe"
+pnpm pack --pack-destination .local
+```
+
+`prepack` repeats JavaScript verification and checks the staged Rust executable and source hashes against version 0.5.2. The existing Rust sources and release bytes are unchanged; executable SHA-256 remains `9a86acbb39edde4d36972c913fb5b5dd594e50a8e944386016e63bdd8b10b789`. Windows worker C# sources are shipped and hash-compiled at runtime; no production Harness implementation dependency or deployment installation is added by this validation.
+
+## Historical 0.5.1 validation
+
+### Electron bridge repair — 2026-10-06
 
 The installed 0.5.0 bundle's UIA, MSAA and Narrator tools still failed after a genuine desktop restart. Its `edge-js` loader selected the ordinary Node 24 prebuild in Electron 44.0.0 (embedded Node 24.18.1, ABI 149), producing `ERR_DLOPEN_FAILED`. Ordinary bundled Node 24.21.0 uses ABI 137 and loaded that dependency successfully. A dependency-present flag or ordinary Node test was insufficient to verify the desktop host.
 
@@ -21,7 +81,9 @@ Dependencies were fetched with install scripts skipped. The tested Windows .NET 
 
 These are native runtime fixture tests of the repaired package using the desktop executable. The running profile must be updated through the official plugin manager and reloaded before its live tools can be marked fixed. Other Electron versions are not established by this Electron 44 result.
 
-## Previous 0.5.0 validation
+## Historical 0.5.0 validation
+
+All remaining sections below record 0.5.0, including its original implementation limits and reproduction commands. Current mechanisms and measured outcomes are documented above.
 
 Verified on 2026-10-04. This records mechanisms and measured outcomes, not task-success parity with commercial computer-use systems. Interface references are listed in [CAPABILITY-MATRIX.md](references/CAPABILITY-MATRIX.md).
 
@@ -62,7 +124,7 @@ Native smoke tests own their WPF/WinForms processes and temporary scripts and cl
 
 During reruns, a fixture's foreground activation needed time to settle, and another Harness window changed desktop focus during a slow UIA read. The native smoke now checks foreground immediately after message delivery and waits for the owned cover's actual state before later assertions. Final staged-exe run passed all 10 checks. This is an interactive shared desktop, not an isolated benchmark machine.
 
-## Limits and pending native evidence
+## Historical 0.5.0 limits and pending native evidence
 
 - UIA grid reads and special Scroll/Window/Transform patterns are implemented but have not each received a dedicated native fixture assertion. Bounds prevent unlimited tree work; custom-rendered or virtualized controls may expose no useful semantics.
 - UIA TextRange.Select changed foreground in the WPF smoke. Semantic operations and child message handlers can affect focus according to application behavior; background operation is not a blanket guarantee.

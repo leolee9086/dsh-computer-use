@@ -8,5 +8,6 @@ export const inject = ['subprocess'];
 export function apply(ctx, rawConfig) {
   const config = resolveHostConfig(rawConfig);
   const provider = createPlatformDriver(new ManagedRunner(ctx, config), config);
+  if (typeof provider.dispose === 'function') ctx.effect(() => () => provider.dispose());
   return ctx.provide('computer', provider);
 }

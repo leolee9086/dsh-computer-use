@@ -5,11 +5,12 @@ export const PATTERN_BY_OPERATION = Object.freeze({
   scroll_into_view: 'scroll_item', add_to_selection: 'selection_item', remove_from_selection: 'selection_item',
   set_range: 'range_value', scroll: 'scroll', set_scroll: 'scroll',
   select_text: 'text', scroll_text: 'text', window_state: 'window', close: 'window',
-  move: 'transform', resize: 'transform',
+  move: 'transform', resize: 'transform', realize: 'virtualized_item', find_item: 'item_container',
 });
 export const ELEMENT_OPERATIONS = Object.keys(PATTERN_BY_OPERATION);
 export const SEMANTIC_PARAMETERS = Object.freeze({
   value: { type: 'string' }, number: { type: 'number' },
+  property: { type: 'string', enum: ['name', 'automation_id'], description: 'find_item: exact container lookup property (default name). May instantiate or scroll an item.' },
   horizontal: { type: ['number', 'string'] }, vertical: { type: ['number', 'string'] },
   text: { type: 'string' }, start: { type: 'integer', minimum: 0 }, end: { type: 'integer', minimum: 0 },
   state: { type: 'string', enum: ['Normal', 'Minimized', 'Maximized'] },
@@ -35,6 +36,11 @@ export function semanticActionArgs(operation, args) {
     result[key] = args[key];
   };
   switch (operation) {
+    case 'find_item':
+      if (typeof args.value !== 'string' || args.value.length === 0) throw new Error('find_item requires a non-empty value');
+      result.property = args.property ?? 'name';
+      if (!['name', 'automation_id'].includes(result.property)) throw new Error('find_item property must be name or automation_id');
+      result.value = args.value; break;
     case 'set_value':
       if (typeof args.value !== 'string') throw new Error('value must be a string for set_value');
       result.value = args.value; break;

@@ -33,7 +33,11 @@ const until = async (fn) => {
 };
 try {
   const window = await until(async () => (await driver.listWindows()).find((w) => w.processId === child.pid && w.title === title));
-  const nodes = async () => flattenAccessibilityTree(await driver.accessibilitySnapshot(window.id, undefined, { backend: 'msaa', window }));
+  // 只重取明确被结构事件打断的只读快照；可能执行过的动作始终不重试。
+  const nodes = async () => until(async () => {
+    try { return flattenAccessibilityTree(await driver.accessibilitySnapshot(window.id, undefined, { backend: 'msaa', window })); }
+    catch (error) { if (/cursor_stale/.test(error.message)) return undefined; throw error; }
+  });
   const find = async (name) => { const all = await nodes(); const e = all.find((e) => e.name === name && (name === 'Legacy editor' ? e.role === 'Edit' : e.role === 'Button')); assert.ok(e, `missing ${name}: ${JSON.stringify(all.map((e) => ({name:e.name,role:e.role,patterns:e.patterns})))}`); return e; };
   let editor = await find('Legacy editor');
   assert.equal(editor.backend, 'msaa');
@@ -45,9 +49,11 @@ try {
   const button = await find('Commit legacy');
   await driver.performAccessibility({ kind: 'invoke', elementId: button.element_id, element: button });
   await until(async () => (await nodes()).some((e) => e.name === 'Legacy committed'));
-  await assert.rejects(() => driver.performAccessibility({ kind: 'invoke', elementId: button.element_id, element: { ...button, process_id: child.pid + 1 } }), /process identity changed/);
+  const checkedButton = await find('Commit legacy');
+  await assert.rejects(() => driver.performAccessibility({ kind: 'invoke', elementId: checkedButton.element_id, element: { ...checkedButton, process_id: child.pid + 1 } }), /process identity changed/);
   console.log(JSON.stringify({ fixture: { pid: child.pid, title }, checks: ['direct MSAA tree', 'IAccessible read', 'IAccessible value write', 'default action', 'PID identity rejected'] }, null, 2));
 } finally {
+  await driver.dispose();
   child.kill(); await new Promise((r) => child.exitCode !== null ? r() : child.once('exit', r));
   await rm(directory, { recursive: true, force: true });
 }

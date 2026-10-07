@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { ComputerUseError, requireWindowHandleUnsupported, unavailable, unsupported } from './errors.js';
 import { assertFinitePoint, pngDimensions } from './geometry.js';
 import { assertBasicInput } from './input-actions.js';
+import { basicAcquisitionOptions } from './semantic-query.js';
 
 async function withCaptureFile(run) {
   const directory = await mkdtemp(join(tmpdir(), 'dsh-computer-use-'));
@@ -131,6 +132,7 @@ export class LinuxComputer {
       accessibility: true,
       accessibilityBackends: ['atspi'],
       semanticReading: true,
+      semanticPaging: false, semanticQuery: false, semanticWorkerIsolation: false,
     });
   }
 
@@ -214,13 +216,13 @@ export class LinuxComputer {
     return this.runner.requireAny(['python3', 'python'], 'Linux AT-SPI accessibility', signal);
   }
 
-  async runAtspi(payload, signal) {
+  async runAtspi(payload, signal, timeoutMs) {
     const python = await this.atspi(signal);
     return this.runner.runJson([
       python,
       atspiHelperPath,
       atspiPayload(payload),
-    ], { signal, stdoutMaxBytes: this.config.maxAccessibilityBytes });
+    ], { signal, timeoutMs, stdoutMaxBytes: this.config.maxAccessibilityBytes });
   }
 
   async perform(action, signal) {
@@ -344,12 +346,11 @@ export class LinuxComputer {
   async accessibilitySnapshot(windowHandle, signal, options = {}) {
     if (options.backend !== undefined && options.backend !== 'native') throw unsupported('Linux supports its native AT-SPI backend only');
     requireWindowHandleUnsupported(windowHandle, 'Linux');
+    const budget = basicAcquisitionOptions(options, this.config, 'AT-SPI');
     return this.runAtspi({
-      kind: 'snapshot',
-      maxNodes: this.config.maxAccessibilityNodes,
-      maxDepth: this.config.maxAccessibilityDepth,
+      kind: 'snapshot', maxNodes: budget.maxNodes, maxDepth: budget.maxDepth,
       maxCandidates: this.config.maxAccessibilityActionCandidates,
-    }, signal);
+    }, signal, budget.timeoutMs);
   }
 
   async performAccessibility(action, signal) {

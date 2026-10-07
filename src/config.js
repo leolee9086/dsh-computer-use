@@ -10,6 +10,7 @@ const DEFAULTS = Object.freeze({
   maxAccessibilityDepth: 6,
   maxAccessibilityBytes: 1_000_000,
   maxAccessibilityActionCandidates: 5_000,
+  semanticWorkerCount: 2,
 });
 
 function positiveInteger(raw, key) {
@@ -32,6 +33,7 @@ export function resolveHostConfig(raw = {}) {
   if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
     throw new ComputerUseError('dsh-computer-use: host config must be an object');
   }
+  if (positiveInteger(raw, 'semanticWorkerCount') > 4) throw new ComputerUseError('dsh-computer-use: semanticWorkerCount must be 1..4');
   if (nonnegativeInteger(raw, 'actionDelayMs') > 10000) throw new ComputerUseError('dsh-computer-use: actionDelayMs must not exceed 10000');
   if (raw.nativeHelperPath !== undefined && (typeof raw.nativeHelperPath !== 'string' || raw.nativeHelperPath.trim().length === 0)) throw new ComputerUseError('dsh-computer-use: nativeHelperPath must be a non-empty executable path');
   return Object.freeze({
@@ -45,6 +47,7 @@ export function resolveHostConfig(raw = {}) {
     maxAccessibilityDepth: positiveInteger(raw, 'maxAccessibilityDepth'),
     maxAccessibilityBytes: positiveInteger(raw, 'maxAccessibilityBytes'),
     maxAccessibilityActionCandidates: positiveInteger(raw, 'maxAccessibilityActionCandidates'),
+    semanticWorkerCount: positiveInteger(raw, 'semanticWorkerCount'),
   });
 }
 

@@ -25,18 +25,16 @@ async function waitFor(check, description) {
   throw new Error(`${description} did not become available${lastError === undefined ? '' : `: ${lastError.message}`}`);
 }
 
-async function snapshotFocusedWindow(window, processId, description) {
+async function snapshotOwnedWindow(window, processId, description) {
   return waitFor(async () => {
-    await computer.focusWindow(window);
-    const tree = await computer.accessibilitySnapshot();
+    const tree = await computer.accessibilitySnapshot(window.id, undefined, { window });
     return tree?.process_id === processId ? tree : undefined;
   }, description);
 }
 
 async function waitForStatus(window, processId, name, description) {
   return waitFor(async () => {
-    await computer.focusWindow(window);
-    const tree = await computer.accessibilitySnapshot();
+    const tree = await computer.accessibilitySnapshot(window.id, undefined, { window });
     if (tree?.process_id !== processId) return undefined;
     return findElement(tree, (node) => (
       node.role === 'Text' && node.process_id === processId && node.name === name
@@ -115,8 +113,7 @@ try {
     const windows = await computer.listWindows();
     return windows.find((candidate) => candidate.title === title && candidate.processId === windowProcess.pid);
   }, 'disposable WinForms window');
-  await computer.focusWindow(window);
-  const before = await snapshotFocusedWindow(window, windowProcess.pid, 'focused disposable WPF window');
+  const before = await snapshotOwnedWindow(window, windowProcess.pid, 'focused disposable WPF window');
   const target = findElement(before, (node) => (
     node.role === 'Edit'
     && node.process_id === windowProcess.pid
@@ -137,7 +134,7 @@ try {
     throw new Error(`the disposable accessibility tree contains no visible enabled Edit element: ${JSON.stringify(nodes)}`);
   }
   await computer.performAccessibility({ kind: 'focus', elementId: target.element_id, element: target });
-  const focusedTree = await snapshotFocusedWindow(window, windowProcess.pid, 'focused Edit accessibility tree');
+  const focusedTree = await snapshotOwnedWindow(window, windowProcess.pid, 'focused Edit accessibility tree');
   const restored = requireElement(focusedTree, (node) => (
     node.role === 'Edit' && node.process_id === windowProcess.pid && node.focused === true
   ), 'focused Edit element after focus');
@@ -178,6 +175,7 @@ try {
     },
   }, null, 2));
 } finally {
+  await computer.dispose();
   if (Number.isInteger(windowProcess.pid)) {
     // 用 spawn 而不是 execFile：这里不需要等结果，也不需要捕获输出 —— 共享 runner
     // 已经把 execFile 那条路换成了 spawn（原生 helper 的请求体要走 stdin）。

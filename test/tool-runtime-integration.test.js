@@ -44,7 +44,7 @@ test('computer tools use real DSH ToolRuntime, approval guards, and Full access 
     await writeFile(probePath, `
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { rm } from 'node:fs/promises';
+import { readFile, rm } from 'node:fs/promises';
 import { Context } from '@deepseek-ai/cordis';
 import LocalAttachmentStore from '@deepseek-ai/dsh-attachment-local';
 import { ToolCallId } from '@deepseek-ai/dsh-llm';
@@ -127,6 +127,35 @@ async function main() {
   } finally {
     await imageCtx.fiber.dispose();
   }
+
+  // 文件采集通过真实输出 schema，不加载附件或 llm，也不产生视觉证据。
+  const fileCtx = new Context();
+  try {
+    let captures = 0;
+    await fileCtx.plugin(SystemPrompt); await fileCtx.plugin(ToolRuntime);
+    fileCtx.provide('computer', { capabilities: { screenshot: true }, screenshot: async () => {
+      captures++; return { data: png, sourceBounds: { x: 0, y: 0, width: 1, height: 1 }, capturedAt: Date.now() };
+    } });
+    await fileCtx.plugin(toolPlugin('dsh-computer-use-file-probe', allowConfig));
+    const agent = { options: {}, session: {} };
+    const execute = (name, args) => fileCtx.tools.execute({ signal: new AbortController().signal, callId: ToolCallId('file-' + name), name, arguments: args, agent });
+    const missingPath = await execute('computer_screenshot', { output: 'file' });
+    assert.equal(missingPath.isError, true); assert.equal(captures, 0);
+    const file = await execute('computer_screenshot', { output: 'file', save_to: home + '-capture.png' });
+    assert.equal(file.isError, false, JSON.stringify(file)); assert.equal(file.content.length, 1);
+    assert.equal(file.content[0].type, 'text'); assert.equal(file.value.image, undefined);
+    assert.equal(file.value.file.width, 1); assert.deepEqual(await readFile(file.value.file.path), Buffer.from(png));
+    const coordinates = await execute('computer_click', { screenshot_id: file.value.screenshot_id, x: 0, y: 0 });
+    assert.match(coordinates.error?.message ?? '', /unavailable in this session/);
+    assert.equal((await execute('computer_screenshot', {})).isError, true, 'default image delivery requires attachments');
+    assert.equal(captures, 1);
+    fileCtx.provide('attachments', { saveImage: () => { throw new Error('image route should fail before delivery'); } });
+    fileCtx.provide('llm', { resolveModelInfo: async () => ({ inputModalities: ['text'] }) });
+    agent.options = { provider: 'fixture', model: 'text' };
+    const noVision = await execute('computer_screenshot', {});
+    assert.match(noVision.error?.message ?? '', /does not declare image input/); assert.equal(captures, 1);
+    await rm(file.value.file.path);
+  } finally { await fileCtx.fiber.dispose(); }
 
   const denyCtx = new Context();
   try {
@@ -297,17 +326,76 @@ async function main() {
     assert.equal(inputs[0].key, 'right');
     assert.deepEqual(inputs[0].modifiers, ['insert']);
     assert.deepEqual(inputs[0].focus, {handle: 'reader-window', processId: 78, title: 'Reader fixture'});
-    assert.equal((await execute('computer_narrator', command)).isError, true);
-    assert.equal(inputs.length, 1);
+    assert.equal((await execute('computer_narrator', command)).isError, false, 'window identity remains reusable after a command');
+    assert.equal(inputs.length, 2);
     const freshList = await execute('computer_windows', {operation: 'list'});
     const freshId = JSON.parse(freshList.value).windows[0].id;
     failNext = true;
     const failed = await execute('computer_type', {window_id: freshId, text: 'partial input'});
     assert.match(failed.error?.message ?? '', /side effect/);
     const retry = await execute('computer_key', {window_id: freshId, key: 'enter'});
-    assert.equal(retry.isError, true, 'failed control must consume its observation');
-    assert.equal(inputs.length, 2, 'a consumed window cannot authorize the retry');
+    assert.equal(retry.isError, false, 'unknown action state does not invalidate independently checked window identity');
+    assert.equal(inputs.length, 4);
   } finally { await readerCtx.fiber.dispose(); }
+
+  const semanticCtx = new Context();
+  try {
+    let failureState; let actionCalls = 0; const requests = [];
+    await semanticCtx.plugin(SystemPrompt); await semanticCtx.plugin(ToolRuntime);
+    const row = id => ({ element_id: 'element-' + id, name: 'Container ' + id, enabled: true, offscreen: true,
+      patterns: ['invoke', 'item_container'], backend: 'uia', native_token: 'token-' + id, worker_generation: 'test-generation', children: [] });
+    semanticCtx.provide('computer', {
+      capabilities: { semanticPaging: true, semanticQuery: true },
+      listWindows: async () => ['a', 'b'].map(id => ({ id, processId: 10, title: id })),
+      accessibilitySnapshot: async (hwnd, _signal, options) => {
+        requests.push(options);
+        const tree = row(hwnd ?? 'a');
+        Object.defineProperty(tree, 'acquisition', { value: { backend: 'uia', worker_generation: 'test-generation', next_cursor: 'cursor-' + requests.length,
+          coverage: { status: 'partial', reason: 'node_limit', max_depth: 6 }, window: { handle: hwnd ?? 'a', processId: 10, title: hwnd ?? 'a' } } });
+        return tree;
+      },
+      performAccessibility: async action => {
+        if (action.kind === 'read') return { value: 'readable' };
+        actionCalls++;
+        if (failureState) { const error = new Error('native failure'); error.executionState = failureState; throw error; }
+        if (action.kind === 'find_item') return { found: true, element: { ...row('virtual'), patterns: ['invoke', 'virtualized_item'] } };
+        return { ok: true };
+      },
+      perform: async () => {},
+    });
+    await semanticCtx.plugin(toolPlugin('dsh-computer-use-semantic-probe', allowConfig));
+    const agent = { options: {}, session: {} }; let calls = 0;
+    const execute = (name, args, currentAgent = agent) => semanticCtx.tools.execute({ signal: new AbortController().signal, callId: ToolCallId('semantic-' + ++calls), name, arguments: args, agent: currentAgent });
+    const json = async (name, args) => { const result = await execute(name, args); assert.equal(result.isError, false, JSON.stringify(result)); return JSON.parse(result.value); };
+    const windows = (await json('computer_windows', { operation: 'list' })).windows;
+    const a = await json('computer_accessibility', { window_id: windows[0].id });
+    const b = await json('computer_accessibility', { window_id: windows[1].id });
+    const command = { snapshot_id: a.snapshot_id, element_id: 'element-a', operation: 'invoke' };
+    assert.equal((await execute('computer_element', { ...command, operation: 'set_value' })).isError, true);
+    assert.equal(actionCalls, 0, 'unsupported operation fails before dispatch');
+    failureState = 'not_started'; assert.equal((await execute('computer_element', command)).isError, true);
+    assert.equal((await execute('computer_read', { snapshot_id: a.snapshot_id, element_id: 'element-a' })).isError, false);
+    failureState = 'unknown'; assert.equal((await execute('computer_element', command)).isError, true);
+    assert.equal((await execute('computer_read', { snapshot_id: a.snapshot_id, element_id: 'element-a' })).isError, true);
+    assert.equal((await execute('computer_read', { snapshot_id: b.snapshot_id, element_id: 'element-b' })).isError, false, 'window B retains independent state');
+    assert.equal((await execute('computer_type', { window_id: windows[0].id, text: 'current identity' })).isError, false);
+    failureState = undefined;
+    const found = await json('computer_find', { source: 'native', window_id: windows[0].id, name: 'task target' });
+    const parameters = { source: 'native', snapshot_id: found.snapshot_id, cursor: found.next_cursor };
+    const changed = await execute('computer_find', { ...parameters, name: 'different target' });
+    assert.match(changed.error?.message ?? '', /query changed/);
+    assert.equal((await execute('computer_find', { ...parameters, backend: 'msaa' })).isError, true);
+    assert.equal((await execute('computer_find', { ...parameters, scope: 'children' })).isError, true);
+    assert.equal((await execute('computer_find', { ...parameters, max_depth: 1 })).isError, true);
+    assert.equal((await execute('computer_find', parameters, { options: {}, session: {} })).isError, true);
+    const continued = await json('computer_find', parameters);
+    assert.equal(continued.matches.length, 1); assert.equal(requests.at(-1).query.name, 'task target');
+    const item = await json('computer_element', { snapshot_id: continued.snapshot_id, element_id: 'element-a', operation: 'find_item', value: 'virtual target' });
+    assert.equal(item.found, true); assert.equal(item.element.element_id, 'element-virtual');
+    assert.equal(item.screenshot_id, undefined);
+    assert.equal((await execute('computer_read', { snapshot_id: item.snapshot_id, element_id: item.element.element_id })).isError, false);
+    assert.equal((await execute('computer_element', { snapshot_id: item.snapshot_id, element_id: item.element.element_id, operation: 'realize' })).isError, false);
+  } finally { await semanticCtx.fiber.dispose(); }
 
   process.stdout.write('DshComputerUseToolRuntimeProbe:' + JSON.stringify({ image: 'ok', fullAccess: 'ok' }) + '\\n');
 }

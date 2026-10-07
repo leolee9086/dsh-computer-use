@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { ComputerUseError, requireWindowHandleUnsupported, unavailable, unsupported } from './errors.js';
 import { pngDimensions } from './geometry.js';
 import { assertBasicInput } from './input-actions.js';
+import { basicAcquisitionOptions } from './semantic-query.js';
 
 function appleString(value) {
   return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\r?\n/g, '\\n');
@@ -303,6 +304,7 @@ export class MacComputer {
       accessibility: true,
       accessibilityBackends: ['ax'],
       semanticReading: true,
+      semanticPaging: false, semanticQuery: false, semanticWorkerIsolation: false,
     });
   }
 
@@ -362,7 +364,7 @@ export class MacComputer {
     return this.runner.requireAny(['osascript', '/usr/bin/osascript'], 'macOS Accessibility automation', signal);
   }
 
-  async runAx(payload, signal) {
+  async runAx(payload, signal, timeoutMs) {
     const osascript = await this.ax(signal);
     return this.runner.runJson([
       osascript,
@@ -370,7 +372,7 @@ export class MacComputer {
       'JavaScript',
       axHelperPath,
       axPayload(payload),
-    ], { signal, stdoutMaxBytes: this.config.maxAccessibilityBytes });
+    ], { signal, timeoutMs, stdoutMaxBytes: this.config.maxAccessibilityBytes });
   }
 
   async perform(action, signal) {
@@ -444,11 +446,10 @@ export class MacComputer {
   async accessibilitySnapshot(windowHandle, signal, options = {}) {
     if (options.backend !== undefined && options.backend !== 'native') throw unsupported('macOS supports its native AX backend only');
     requireWindowHandleUnsupported(windowHandle, 'macOS');
+    const budget = basicAcquisitionOptions(options, this.config, 'AX');
     return this.runAx({
-      kind: 'snapshot',
-      maxNodes: this.config.maxAccessibilityNodes,
-      maxDepth: this.config.maxAccessibilityDepth,
-    }, signal);
+      kind: 'snapshot', maxNodes: budget.maxNodes, maxDepth: budget.maxDepth,
+    }, signal, budget.timeoutMs);
   }
 
   async performAccessibility(action, signal) {

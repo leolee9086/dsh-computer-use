@@ -8,10 +8,59 @@
 // 表现就是测试挂住不返回 —— 所以下面无论有没有 payload 都要显式 end()。
 
 import { spawn } from 'node:child_process';
+import { createRequire } from 'node:module';
+import { resolve } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { ManagedRunner } from '../src/runner.js';
+import { resolveHostConfig } from '../src/config.js';
+
+/** 真正的 Cordis 本地子进程服务，用于验收生产 raw-pipe/Job/退出合同。 */
+export async function createManagedRunner() {
+  const projectRoot = fileURLToPath(new URL('../', import.meta.url));
+  const harnessRoot = process.env.DSH_HARNESS_ROOT ?? resolve(projectRoot, '..', 'deepseek-harness');
+  const requireHarness = createRequire(resolve(harnessRoot, 'packages/subprocess/subprocess-local/package.json'));
+  const [{ Context }, { default: LocalSubprocess }] = await Promise.all([
+    import(pathToFileURL(requireHarness.resolve('@deepseek-ai/cordis')).href),
+    import(pathToFileURL(requireHarness.resolve('@deepseek-ai/dsh-subprocess-local')).href),
+  ]);
+  const ctx = new Context();
+  await ctx.plugin(LocalSubprocess);
+  const runner = new ManagedRunner(ctx, resolveHostConfig());
+  runner.dispose = () => ctx.fiber.dispose();
+  return runner;
+}
 
 /** 跑一个子进程，把 `stdin` 写进去，收集 stdout 并解析成 JSON。 */
 export function createRunner() {
+  const start = (argv, options = {}) => {
+    const child = spawn(argv[0], argv.slice(1), { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, signal: options.signal });
+    child.stderr.on('data', (chunk) => process.stderr.write(chunk));
+    const done = new Promise((resolve, reject) => {
+      child.once('error', reject);
+      child.once('close', (exitCode, signal) => resolve({ exitCode, signal }));
+    });
+    done.catch(() => undefined);
+    return { pid: child.pid, stdin: child.stdin, stdout: child.stdout, done,
+      terminate() { child.kill(); },
+      async waitForExit(signal) {
+        signal?.throwIfAborted();
+        let abort;
+        try { return await Promise.race([done.then(() => true), new Promise((resolve) => {
+          abort = () => resolve(false); signal?.addEventListener('abort', abort, { once: true });
+        })]); } finally { signal?.removeEventListener('abort', abort); }
+      },
+    };
+  };
   return {
+    start,
+    async run(argv, options = {}) {
+      const child = start(argv, options);
+      let stdout = ''; child.stdout.setEncoding('utf8'); child.stdout.on('data', (chunk) => { stdout += chunk; });
+      child.stdin.end(options.stdin);
+      const result = await child.done;
+      if (result.exitCode !== 0) throw new Error(`native command exited ${result.exitCode}: ${stdout}`);
+      return stdout;
+    },
     // 这一层已经不再需要探测 PowerShell 了；保留方法是因为 runner 契约里还有它。
     async requireAny() { return 'powershell.exe'; },
 

@@ -7,6 +7,7 @@ test('host plugin publishes a single computer provider', () => {
   let published;
   const result = applyHost({
     subprocess: {},
+    effect(callback) { return callback(); },
     provide(name, value) {
       published = { name, value };
       return 'disposed';

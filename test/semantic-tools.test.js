@@ -95,6 +95,7 @@ function toolContext() {
     inject(_names, callback) { callback(this); },
     get(name) {
       if (name === 'computer') return computer;
+      if (name === 'attachments') return ctx.attachments;
       if (name === 'llm') return { resolveModelInfo: async () => ({ inputModalities: ['image'] }) };
       return undefined;
     },
@@ -160,7 +161,7 @@ test('semantic tools bind element actions to fresh image and accessibility obser
     snapshot_id: accessibility.snapshot_id,
     element_id: 'uia:42,9',
     operation: 'invoke',
-  }, exec), /was consumed by a successful desktop action/);
+  }, exec), /was consumed by an action affecting/);
   assert.equal(calls.length, 1);
 });
 
@@ -232,7 +233,7 @@ test('语义树从**截图那个窗口**扎根，而不是"当前焦点窗口"',
   assert.equal(accessibilityHandles.at(-1), undefined);
 });
 
-test('control actions consume their screenshot evidence and window focus consumes all evidence', async () => {
+test('control consumes affected image evidence while focus keeps reusable window identities', async () => {
   const { ctx, tools, calls } = toolContext();
   applyTools(ctx, {
     observeApproval: 'allow',
@@ -253,12 +254,12 @@ test('control actions consume their screenshot evidence and window focus consume
   await assert.rejects(() => toolByName(tools, 'computer_type').execute({
     screenshot_id: concurrent.screenshot_id,
     text: 'stale',
-  }, exec), /was consumed by a successful desktop action/);
+  }, exec), /was consumed by an action affecting/);
   await assert.rejects(() => toolByName(tools, 'computer_click').execute({
     screenshot_id: first.screenshot_id,
     x: 20,
     y: 10,
-  }, exec), /was consumed by a successful desktop action/);
+  }, exec), /was consumed by an action affecting/);
   const second = await toolByName(tools, 'computer_screenshot').execute({}, exec);
   const listed = JSON.parse(await toolByName(tools, 'computer_windows').execute({ operation: 'list' }, exec));
   assert.equal(listed.windows.length, 1);
@@ -268,13 +269,14 @@ test('control actions consume their screenshot evidence and window focus consume
   await toolByName(tools, 'computer_windows').execute({ operation: 'focus', window_id: listed.windows[0].id }, exec);
   assert.equal(calls.find((call) => call.kind === 'focus_window').target.id, 'native-41');
   assert.equal(calls.find((call) => call.kind === 'focus_window').target.processId, 99);
-  await assert.rejects(() => toolByName(tools, 'computer_windows').execute({ operation: 'focus', window_id: listed.windows[0].id }, exec), /was consumed by a successful desktop action/);
+  await toolByName(tools, 'computer_windows').execute({ operation: 'focus', window_id: listed.windows[0].id }, exec);
+  await toolByName(tools, 'computer_type').execute({ window_id: listed.windows[0].id, text: 'identity still current' }, exec);
   await assert.rejects(() => toolByName(tools, 'computer_windows').execute({ operation: 'focus', window_id: 'native-41' }, exec), /is unavailable in this session/);
   await assert.rejects(() => toolByName(tools, 'computer_type').execute({
     screenshot_id: second.screenshot_id,
     text: 'stale',
-  }, exec), /was consumed by a successful desktop action/);
-  assert.deepEqual(calls.map((call) => call.kind), ['click', 'focus_window']);
+  }, exec), /was consumed by an action affecting/);
+  assert.deepEqual(calls.map((call) => call.kind), ['click', 'focus_window', 'focus_window', 'type']);
 });
 
 test('semantic element action rejects a pattern unsupported by the observed element', async () => {

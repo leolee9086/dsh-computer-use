@@ -70,11 +70,12 @@ try {
   await perform('fixture-commit', 'invoke');
   await until(async () => (await find('fixture-status')).name === 'Committed fixture'); checks.push('background invoke');
   const button = await find('fixture-commit');
-  await assert.rejects(() => driver.performAccessibility({ kind: 'invoke', elementId: button.element_id, element: { ...button, name: 'changed identity' }, hwnd: window.id }), /名称.*变了/); checks.push('stale identity rejected');
+  await assert.rejects(() => driver.performAccessibility({ kind: 'invoke', elementId: button.element_id, element: { ...button, name: 'changed identity' }, hwnd: window.id }), /stale_target/); checks.push('stale identity rejected');
   const after = (await driver.listWindows()).find((w) => w.focused)?.id;
   // TextRange.Select 可能按应用设计改变键盘焦点，记录实际结果而不把它当后台承诺。
   console.log(JSON.stringify({ fixture: { pid: child.pid, title }, checks, foreground: { before, after, preserved: before === after } }, null, 2));
 } finally {
+  await driver.dispose();
   child.kill();
   await new Promise((resolve) => child.exitCode !== null ? resolve() : child.once('exit', resolve));
   await rm(directory, { recursive: true, force: true });

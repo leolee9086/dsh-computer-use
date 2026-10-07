@@ -50,10 +50,21 @@ export class ManagedRunner {
     return undefined;
   }
 
+  // 原生语义工作进程使用持续 JSON 行协议；流解析和每个请求的截止由调用方拥有。
+  // 仍通过 Host subprocess 服务启动，保留它的进程包含、权限与卸载生命周期。
+  start(argv, options = {}) {
+    return this.ctx.subprocess.spawn({
+      argv, cwd: options.cwd ?? process.cwd(),
+      stdio: { stdin: 'pipe', stdout: 'pipe', stderr: { maxBytes: 64 * 1024 } },
+      graceMs: this.config.graceMs,
+      signal: options.signal,
+    });
+  }
+
   async run(argv, options = {}) {
     const stdoutMaxBytes = options.stdoutMaxBytes ?? this.config.maxAccessibilityBytes;
     const stderrMaxBytes = Math.min(stdoutMaxBytes, 256 * 1024);
-    const linked = mergeAbortSignal(options.signal, this.config.commandTimeoutMs);
+    const linked = mergeAbortSignal(options.signal, options.timeoutMs ?? this.config.commandTimeoutMs);
     // 允许调用方给子进程喂 stdin（原生 helper 用它传请求参数）。
     // 默认仍是 'ignore'：多数平台命令用不到 stdin，忽略掉最省事也更安全。
     // 批式 stdin 的字段名必须是 `data`：DSH 的 SubprocessStdinMode 是

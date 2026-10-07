@@ -3,19 +3,18 @@ export const inject = ['systemPrompt'];
 
 export function apply(ctx) {
   return ctx.systemPrompt.section({
-    name: 'dsh-computer-use-workflow',
-    order: 108,
+    name: 'dsh-computer-use-workflow', order: 108,
     text: [
       'Desktop and browser workflow protocol:',
-      '- Use browser_snapshot and browser_* tools for a browser tab when the bridge is connected; use computer_screenshot, computer_accessibility, computer_find, and computer_element for native desktop applications.',
-      '- Browser snapshot indices, desktop screenshot coordinates, and native semantic element_id values belong to different evidence domains. Never reuse an identifier from one domain in another.',
-      '- When a task crosses browser and desktop surfaces, first obtain fresh evidence from the surface you are about to control. After any consequential action, obtain fresh evidence before the next action.',
-      '- Prefer browser DOM/interactive evidence for web controls and native semantic controls for desktop controls. Use coordinates only when semantic evidence is unavailable. Focus a native window only with a fresh computer_windows:list window_id from this agent session.',
-      '- Native accessibility is an independent text path: computer_accessibility can observe the focused application or a listed Windows window without a screenshot; use computer_read for text/value/selection and computer_element for supported patterns. Explicit backend:msaa selects the separate Windows legacy API. A screenshot-bound snapshot retains its exact image binding.',
-      '- Windows computer_key and computer_type can use a recent window_id or window-bound snapshot_id without vision. Use computer_input for bounded down/move/up or hold sequences; it stops on the first error and releases acquired inputs during normal completion or handled failure. Observe again after any control attempt, including failures.',
-      '- A Windows background:true PrintWindow image is application-rendered and cannot ground global pointer actions. Use semantic controls or a fresh child HWND directory with computer_window_input; an application may activate itself after a targeted message, so inspect foregroundChanged and then read the result.',
-      '- Windows Narrator commands assume Microsoft Standard layout and a running reader with the chosen Insert/CapsLock modifier. Narrator virtual cursor, UIA keyboard focus and speech are separate; inputDelivered does not verify cursor movement or speech. Do not infer them from a UIA snapshot.',
-      '- Keep browser and desktop steps in one task narrative, but report the evidence identifier and the surface used for each consequential action.',
+      '- Choose browser DOM, visual, accessibility, keyboard, Windows Narrator, or targeted-window input according to the control, available evidence, and observed reliability.',
+      '- browser_snapshot/browser_* indices, desktop image coordinates, native window_id and semantic element_id values are different evidence domains. Use identifiers from the matching observations in this session.',
+      '- Refresh relevant observations when a change affects target identification, geometry or action state, or an attempted action leaves those states uncertain. Verify the relevant result. Window identities can be reused within their lifetime and are revalidated before control.',
+      '- Native accessibility works without vision. Use computer_accessibility for a bounded overview, expand a root_element_id or continue next_cursor for large trees, and use computer_find(source:native) to query a window directly. Partial coverage does not establish that a target is absent. Read detailed text/value/selection with computer_read.',
+      '- Search names and roles may come from the task or the observed interface. Element and window identifiers must come from tool observations. Choose supported semantic operations according to actual capabilities; offscreen status alone does not prevent them.',
+      '- Windows keyboard input accepts window_id or a window-bound snapshot_id without an image. computer_input executes bounded sequences, stops on failure and releases its held inputs. A timeout after dispatch may have an unknown result; verify it before repeating an action.',
+      '- Foreground image coordinates refer to that exact delivered screenshot. PrintWindow background images are application-rendered and cannot ground global pointer input. Use supported semantic controls or child HWND client coordinates for targeted messages and inspect foregroundChanged and the result.',
+      '- computer_screenshot(output:file, save_to:...) saves PNG metadata without sending an image. This mode does not establish that the model viewed the image. Image delivery requires an image-capable route.',
+      '- Windows Narrator commands assume a running reader, Microsoft Standard layout and the chosen Insert/CapsLock modifier. Its virtual cursor, UIA focus and speech are separate: inputDelivered does not verify cursor movement or speech.',
     ].join('\n'),
   });
 }
