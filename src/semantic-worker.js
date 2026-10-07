@@ -117,7 +117,13 @@ export class SemanticWorkerPool {
           const request = slot.pending.get(response.id);
           if (request === undefined) continue;
           slot.pending.delete(response.id);
-          if (response.error !== undefined) request.reject(failure(response.error, response.execution_state));
+          if (response.error !== undefined) {
+            const error = failure(response.error, response.execution_state, response.error_code);
+            // 变化错误携带原生窗口身份，重新采集仍绑定原窗口，不能转向后来获得焦点的应用。
+            error.observedWindow = response.observed_window;
+            error.nativeCalls = response.native_calls ?? 0;
+            request.reject(error);
+          }
           else {
             const generation = response.result?.worker_generation;
             if (generation !== undefined) this.references.set(generation, slot);

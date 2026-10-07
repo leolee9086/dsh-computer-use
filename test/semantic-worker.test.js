@@ -92,6 +92,27 @@ test('unconfirmed termination refuses replacement rather than exceeding the work
   } finally { for (const child of p.children) child.finish(); await p.pool.dispose(); }
 });
 
+test('capture changes preserve native window evidence without replacing the healthy worker', async () => {
+  const p = protocol();
+  try {
+    const firstSent = p.next(); const pending = p.pool.call(observation);
+    const rejected = assert.rejects(pending, (error) => {
+      assert.equal(error.code, 'COMPUTER_SNAPSHOT_CHANGED'); assert.equal(error.executionState, 'not_started');
+      assert.deepEqual(error.observedWindow, { handle: '42', processId: 123, title: 'Owned fixture' });
+      assert.equal(error.nativeCalls, 17); return true;
+    });
+    const dispatched = await firstSent;
+    dispatched.child.stdout.write(`${JSON.stringify({ id: dispatched.payload.id, error: 'snapshot_changed: unpublished result discarded',
+      error_code: 'COMPUTER_SNAPSHOT_CHANGED', execution_state: 'not_started', native_calls: 17,
+      observed_window: { handle: '42', processId: 123, title: 'Owned fixture' } })}\n`);
+    await rejected;
+    const secondSent = p.next(); const recovered = p.pool.call(observation);
+    const second = await secondSent; assert.equal(second.child, dispatched.child);
+    second.child.respond(second.payload); await recovered;
+    assert.equal(p.children.length, 1); assert.equal(second.child.terminated, false);
+  } finally { await p.pool.dispose(); }
+});
+
 test('cancellation before startup sends no native message and retains not_started', async () => {
   const p = protocol(); const controller = new AbortController(); controller.abort();
   try {

@@ -2,6 +2,7 @@ import { Buffer } from 'node:buffer';
 import { existsSync } from 'node:fs';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
+import { setTimeout as wait } from 'node:timers/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { SemanticWorkerPool } from './semantic-worker.js';
@@ -492,21 +493,36 @@ export class WindowsComputer {
     const deadline = started + (options.timeoutMs ?? this.config.commandTimeoutMs);
     const work = { visited_nodes: 0, validated_nodes: 0, native_calls: 0, elapsed_ms: 0 };
     const timing = { queue_ms: 0, startup_ms: 0, elapsed_ms: 0 };
-    let page;
-    do {
-      // 同一采集代次的分段推进共用一个截止，不给每个分段重新发放30秒。
-      // 失败直接返回调用方；这里继续的是未完成的采集，不重试任何动作或失败。
+    let page; let captureRestarts = 0;
+    const mayRestart = consistency === 'snapshot' && options.cursor === undefined;
+    while (true) {
+      // 所有分段和重采共用一个截止；临近截止仅交付仍有效的无元素进度页。
+      if (page && deadline - performance.now() < 150) break;
       const remaining = Math.max(1, Math.floor(deadline - performance.now()));
-      page = await this.semantics.call(request, signal, remaining);
+      try { page = await this.semantics.call(request, signal, remaining); }
+      catch (error) {
+        const observed = error.observedWindow;
+        const sameWindow = observed && /^-?\d+$/.test(observed.handle) && Number.isInteger(observed.processId) && observed.processId > 0
+          && typeof observed.title === 'string' && (request.hwnd == null || String(request.hwnd) === observed.handle)
+          && (request.processId === undefined || request.processId === observed.processId)
+          && (request.title === undefined || request.title === observed.title);
+        if (!mayRestart || error.code !== 'COMPUTER_SNAPSHOT_CHANGED' || error.executionState !== 'not_started'
+          || !sameWindow || captureRestarts >= 2 || signal?.aborted || deadline - performance.now() < 200) throw error;
+        // 原生进程已经丢弃失败代次，重新定位绑定同一窗口。已有续页从不换结果。
+        request.hwnd = observed.handle; request.processId = observed.processId; request.title = observed.title;
+        request.cursor = undefined; request.workerGeneration = options.root?.worker_generation ?? options.workerGeneration;
+        page = undefined; captureRestarts++; work.native_calls += error.nativeCalls ?? 0;
+        await wait(50, undefined, { signal });
+        continue;
+      }
       for (const key of Object.keys(work)) work[key] += page[key] ?? 0;
       timing.queue_ms += page.host_timing?.queue_ms ?? 0;
       timing.startup_ms += page.host_timing?.startup_ms ?? 0;
       if (page.consistency?.mode !== 'snapshot' || page.consistency.status === 'frozen' || !page.next_cursor) break;
       request.cursor = page.next_cursor; request.workerGeneration = page.worker_generation;
-      // 接近截止时交付无元素的进度页，允许显式续采；原生单次阻塞仍由进程截止终止。
-    } while (deadline - performance.now() >= 150);
+    }
     timing.elapsed_ms = Math.round(performance.now() - started);
-    Object.assign(page, work, { host_timing: timing });
+    Object.assign(page, work, { host_timing: timing, capture_restarts: captureRestarts });
     // Host 只收到本页。固定结果集与验证日志留在有界工作进程中，不拼接总树。
     const byId = new Map(page.elements.map((row) => [row.element_id, { ...row, children: [] }]));
     const roots = [];

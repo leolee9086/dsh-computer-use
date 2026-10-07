@@ -1,6 +1,40 @@
-# Capability Evidence — 0.5.4
+# Capability Evidence — 0.5.5
 
 ## Current validation — 2026-10-07
+
+0.5.5 applies scoped caching and bounded read-only reacquisition from the [mature desktop automation implementations](references/DESKTOP-AUTOMATION-IMPLEMENTATIONS.md). Query misses retain and reread the fields used to decide matching and the covered tree order; matched rows retain full summaries. UIA runtime IDs are fetched with the navigation cache and remain live-checked before actions. MSAA misses skip location and default-action getters.
+
+A structured capture-change error carries the original HWND/PID/title. A fresh unpublished snapshot may restart at most twice on that window within the same absolute tool deadline. It cannot restart a caller-owned cursor, a live observation, an action, an unknown execution state, a resource/lifetime failure or a cancelled request. Returned observations include `capture_restarts`. No new source-program integration is required for ordinary UIA/MSAA automation.
+
+| Check | Measured result | What it establishes |
+| --- | --- | --- |
+| `pnpm run verify` | 58 JavaScript syntax checks; all 67 tests passed, including real DSH ToolRuntime | Structured error propagation, bounded observation restarts, window pinning, shared deadline, cancellation/cursor exclusions and existing evidence/control contracts |
+| Owned-provider silent query-miss change, UIA and MSAA | Both passed in ordinary Node and actual Electron | Reading node13 changes already-read node12 from nonmatch to match; the unpublished generation is discarded, one restart returns the new name with supported invoke pattern |
+| Persistent silent changes | Both passed; exactly three attempts before `COMPUTER_SNAPSHOT_CHANGED` / `not_started` | Two restart limit is enforced; the worker remains usable after changes stop |
+| Caller-owned capture cursor | Both passed | A changed generation fails and is removed; the old cursor cannot become a different result |
+| Current action identity | Both passed | A valid registered reference invokes exactly once; after source rename the old reference is rejected and does not execute another action |
+| `pnpm run verify:profile` and native manifest check | Both passed at 0.5.5 | Temporary real Loader mounted all 18 tools and workflow prompt, allowed observation and denied configured control; unchanged native executable/source hashes match the versioned manifest |
+| Actual Electron 44.0.0 / Node 24.18.1 / ABI 149 | All nine sequential native checks passed | Runtime-matched bridge, WPF/MSAA controls, live/frozen large trees, recovery, lifetime and source-consistency boundary remain usable |
+| Immutable native pagination | 10,020 UIA rows and 10,001 MSAA rows, each in 31 pages | Fixed result ID/digest across post-seal insertion/deletion/reorder/rename; frozen continuations acquire no native data |
+
+The recovery fixture compares a one-match query with full-summary acquisition on the same resized owned window. Both paths cover and reread exactly the same nodes. The successful Electron run measured:
+
+| Backend/path | Covered nodes | Client native-call counter | Provider property reads | Provider pattern reads |
+| --- | ---: | ---: | ---: | ---: |
+| UIA full summary | 135 | 540 | 3,608 | 4,644 |
+| UIA one-match query | 135 | 542 | 2,340 | 36 |
+| MSAA full summary | 129 | 1,804 | — | — |
+| MSAA one-match query | 129 | 1,298 | — | — |
+
+The UIA client counter counts a cache request as one operation regardless of how many properties/patterns it requests; the provider counters expose the reduced work. The UIA query needs two additional summary cache requests for its matched row. MSAA provider-level counters are not instrumented by this fixture, so its comparison uses selected client calls only. Query results keep their patterns and bounds. These are controlled read-count comparisons, not universal latency or task-success claims.
+
+The same Electron run acquired the first frozen full UIA page in 10,839ms with 40,082 instrumented client calls; full MSAA in 37,420ms with 140,013 calls over two tool calls; and a separate 167-node, one-match UIA query in 118ms with 670 calls. The full UIA baseline from 0.5.4 recorded 60,120 calls; caching runtime IDs removes the explicit per-node identity acquisition calls. These are ordered samples on a shared desktop with the compiled worker cached; hidden OS/provider operations are not counted as client calls. Frozen MSAA still needs an empty progress page and a second tool call under the default 30-second deadline.
+
+The ordinary Node recovery run also passed both backends. Additional full-scope, lifetime and blocking evidence comes from the actual Electron suite. GUI fixtures own their processes/windows and run sequentially. `source_atomic:false` continues to describe source transaction semantics accurately; the adversarial mutual-exclusion counterexample still reproduces while immutable result pagination remains correct. Coverage and retry do not promote that field to true.
+
+Reproduce with `pnpm run verify`, `pnpm run smoke:recovery`, and `pnpm run smoke:electron "C:\path\to\DeepSeek Harness.exe"`. The source comparison explains what was adopted and what was deliberately excluded. The historical sections below record earlier checks and measurements.
+
+## Historical 0.5.4 validation — 2026-10-07
 
 The 0.5.4 repair closes an in-segment lifetime gap in fixed semantic captures. Previously expiration was checked only at the segment entry: a native read starting before the 120-second capture limit could finish after it and still seal/publish the result. Acquisition now checks its monotonic lifetime after native reads and before sealing. Page construction checks before and after retaining output rows. Expiration discards the generation, cursors and registered references. UTC timestamps remain presentation metadata; lifetime and fixed-result eviction ordering use `Stopwatch` and are not extended by wall-clock adjustments.
 
@@ -42,7 +76,7 @@ A real provider counterexample now tests the outstanding source guarantee direct
 
 The initial experimental depth 2 stopped at a partial-coverage assertion because the UIA window decorations extend beyond that depth. With depth 20, the complete small window reproduces the same impossible pair. The test source resets a version only after changing its source-instance ID, and this adversarial mode is disabled by default. The unchanged production implementation and version remain 0.5.4; this follow-up adds test evidence and an adapter contract rather than declaring an atomic adapter implemented.
 
-Run `node test/win32-semantic-source-consistency-smoke.mjs` directly, or use the Electron smoke command above, which now includes it. The [source-consistency contract](references/SOURCE-CONSISTENCY.md) specifies the source identity, coverage, shared-write protection, reliable version/freshness, native action binding and bounded lifecycle needed for implementation. It also records the checked Microsoft cache and remote-operation contracts. The remaining input is the target application/provider and its actual transaction, MVCC or source-version interface. Source-wide atomicity and the overall repair goal remain open.
+Run `node test/win32-semantic-source-consistency-smoke.mjs` directly, or use the Electron smoke command above, which now includes it. The [source-consistency contract](references/SOURCE-CONSISTENCY.md) specifies the source identity, coverage, shared-write protection, reliable version/freshness, native action binding and bounded lifecycle needed for implementation. It also records the checked Microsoft cache and remote-operation contracts. This historical investigation did not implement source-wide atomicity. Subsequent ordinary-automation work proceeds through scoped caches and bounded read-only reacquisition without requiring an application-side adapter; the additional transaction contract remains specific to sources that expose it.
 
 ## Historical 0.5.3 validation — 2026-10-07
 

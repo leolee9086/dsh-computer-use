@@ -351,6 +351,7 @@ async function main() {
         requests.push(options);
         const tree = row(hwnd ?? 'a');
         Object.defineProperty(tree, 'acquisition', { value: { backend: 'uia', worker_generation: 'test-generation', next_cursor: 'cursor-' + requests.length,
+          capture_restarts: options.cursor === undefined ? 1 : 0,
           coverage: { status: 'partial', reason: 'node_limit', max_depth: 6 }, window: { handle: hwnd ?? 'a', processId: 10, title: hwnd ?? 'a' } } });
         return tree;
       },
@@ -370,6 +371,7 @@ async function main() {
     const windows = (await json('computer_windows', { operation: 'list' })).windows;
     const a = await json('computer_accessibility', { window_id: windows[0].id });
     const b = await json('computer_accessibility', { window_id: windows[1].id });
+    assert.equal(a.capture_restarts, 1, 'real ToolRuntime retains native capture recovery metadata');
     const command = { snapshot_id: a.snapshot_id, element_id: 'element-a', operation: 'invoke' };
     assert.equal((await execute('computer_element', { ...command, operation: 'set_value' })).isError, true);
     assert.equal(actionCalls, 0, 'unsupported operation fails before dispatch');
@@ -390,6 +392,7 @@ async function main() {
     assert.equal((await execute('computer_find', parameters, { options: {}, session: {} })).isError, true);
     const continued = await json('computer_find', parameters);
     assert.equal(continued.matches.length, 1); assert.equal(requests.at(-1).query.name, 'task target');
+    assert.equal(continued.capture_restarts, 0, 'continuation metadata does not invent a fresh recovery');
     const item = await json('computer_element', { snapshot_id: continued.snapshot_id, element_id: 'element-a', operation: 'find_item', value: 'virtual target' });
     assert.equal(item.found, true); assert.equal(item.element.element_id, 'element-virtual');
     assert.equal(item.screenshot_id, undefined);

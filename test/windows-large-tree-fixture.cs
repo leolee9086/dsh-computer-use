@@ -40,6 +40,26 @@ public class LargeTreeForm : Form
             "\",\"left\":\""+PairLeft+"\",\"right\":\""+PairRight+"\",\"left_reads\":"+PairLeftReads+
             ",\"right_reads\":"+PairRightReads+",\"state\":"+PairState+"}";
     }
+    // 恢复测试在读第13项时静默改写已经读过的第12项；默认关闭，不影响旧测试。
+    static readonly object MutationLock = new object();
+    static string MutationBackend; static int MutationRemaining, Mutations;
+    static void ConfigureMutation(string backend, bool repeat) {
+        lock (MutationLock) {
+            MutationBackend = backend; MutationRemaining = repeat ? -1 : 1; Mutations = 0;
+            if (backend == "uia") Instance.Root.Children.Find(item => item.ItemIndex == 12).DisplayName = "Before mutation";
+            else LegacyNames[12] = "Before mutation";
+        }
+    }
+    public static void MutateOnRead(int index, string backend) {
+        if (index != 13) return;
+        lock (MutationLock) {
+            if (MutationRemaining == 0 || MutationBackend != backend) return;
+            string name = "Mutation target " + (++Mutations);
+            if (backend == "uia") Instance.Root.Children.Find(item => item.ItemIndex == 12).DisplayName = name;
+            else LegacyNames[12] = name;
+            if (MutationRemaining > 0) MutationRemaining--;
+        }
+    }
     public static int PropertyReads, PatternReads, Navigations, RuntimeIds;
     public static void ResetStats() { Interlocked.Exchange(ref PropertyReads, 0); Interlocked.Exchange(ref PatternReads, 0); Interlocked.Exchange(ref Navigations, 0); Interlocked.Exchange(ref RuntimeIds, 0); }
     public static string Stats() { return "{\"property_reads\":"+PropertyReads+",\"pattern_reads\":"+PatternReads+",\"navigations\":"+Navigations+",\"runtime_ids\":"+RuntimeIds+"}"; }
@@ -75,7 +95,7 @@ public class LargeTreeForm : Form
         public override AccessibleObject Parent { get { return RootObject; } }
         public override string Name { get {
             if (Blocking && Index==9998) Thread.Sleep(60000);
-            DelayRead(Index);
+            DelayRead(Index); MutateOnRead(Index, "msaa");
             string paired = ReadPairName(Index); if (paired != null) return paired;
             string renamed; return LegacyNames.TryGetValue(Index, out renamed) ? renamed : "Legacy item "+Index;
         } }
@@ -105,6 +125,12 @@ public class LargeTreeForm : Form
                 else if (line=="pair_export") Console.WriteLine(ExportPair());
                 else if (line=="reset_stats") { ResetStats(); Console.WriteLine("stats-reset"); }
                 else if (line=="stats") Console.WriteLine(Stats());
+                else if (line=="mutation:disable") { lock (MutationLock) { MutationRemaining=0; } Console.WriteLine("mutation-disabled"); }
+                else if (line=="mutation_stats") { lock (MutationLock) { Console.WriteLine("mutations:"+Mutations); } }
+                else if (line.StartsWith("mutation:")) {
+                    var parts=line.Split(':');
+                    form.BeginInvoke((Action)delegate() { ConfigureMutation(parts[1],parts[2]=="always"); Console.WriteLine("mutation-enabled"); Console.Out.Flush(); });
+                }
                 else if (line=="change_legacy") { LegacyCount++; NotifyWinEvent(0x8004, form.Handle, -4, 0); Console.WriteLine("legacy-changed"); }
                 // 静默变更故意不发事件：测试完整复读能捕捉八个前缀锚点以外的变化。
                 else if (line.StartsWith("resize:")) {
@@ -170,7 +196,7 @@ public class RawNode : IRawElementProviderSimple, IRawElementProviderFragmentRoo
         Interlocked.Increment(ref LargeTreeForm.PropertyReads);
         if (id==AutomationElementIdentifiers.NameProperty.Id) {
             if (LargeTreeForm.Blocking && Index==9998) Thread.Sleep(60000);
-            LargeTreeForm.DelayRead(Index);
+            LargeTreeForm.DelayRead(Index); LargeTreeForm.MutateOnRead(Index, "uia");
             string paired = LargeTreeForm.ReadPairName(Index); if (paired != null) return paired;
             return DisplayName ?? (Index==-1 ? "UIA large-tree root" : Depth==13 ? "Deep target" : "Item "+Index);
         }

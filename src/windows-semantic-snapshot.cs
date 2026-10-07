@@ -17,6 +17,23 @@ internal static partial class SemanticWorker
     static readonly Dictionary<string, SnapshotCapture> Snapshots = new Dictionary<string, SnapshotCapture>();
     static readonly Dictionary<string, SnapshotContinuation> SnapshotCursors = new Dictionary<string, SnapshotContinuation>();
 
+    sealed class SnapshotChangedException : InvalidOperationException {
+        public readonly Window ObservedWindow;
+        public SnapshotChangedException(Window window, string reason) : base(reason) { ObservedWindow = window; }
+    }
+    static Dictionary<string, object> SnapshotDescribe(SnapshotCapture capture, Target target) {
+        if (capture.Query == null) return Describe(target);
+        // 沿用UIA查询缓存：未命中项保留决定匹配的字段和树顺序，仍完整复读。
+        // 名称/角色/状态变化影响查询结果；只有命中项才取并校验完整摘要/模式。
+        var fields = QueryFields(target, target == capture.Root);
+        if (Match(fields, capture.Query)) {
+            var summary = Describe(target);
+            if (!Match(summary, capture.Query)) throw new SnapshotChangedException(capture.Window, "snapshot_changed: query changed while fetching matched summary");
+            return summary;
+        }
+        fields["element_id"] = target.Id; fields["backend"] = target.Window.Backend;
+        return fields;
+    }
     sealed class SnapshotEvidence {
         public string Id; public byte[] Fingerprint;
     }
@@ -81,7 +98,7 @@ internal static partial class SemanticWorker
         SnapshotAlive(capture);
         ValidateWindow(capture.Window);
         if (capture.Version != Thread.VolatileRead(ref capture.Window.SnapshotVersion))
-            throw new InvalidOperationException("snapshot_changed: source changed while collecting or validating; unpublished result discarded");
+            throw new SnapshotChangedException(capture.Window, "snapshot_changed: source changed while collecting or validating; unpublished result discarded");
         // 原生读取或窗口复核可能跨过期限，不能只依赖分段入口的清理。
         SnapshotAlive(capture);
     }
@@ -151,7 +168,7 @@ internal static partial class SemanticWorker
                 { "virtualized_items", "unrealized items are not traversed; use item_container/realize explicitly" } } },
             { "consistency", new Dictionary<string, object> { { "mode", "snapshot" }, { "status", capture.Stage },
                 { "result_id", capture.Id }, { "sha256", capture.Digest }, { "source_atomic", false },
-                { "validation", "two agreeing bounded reads plus change events" },
+                { "validation", capture.Query == null ? "two agreeing bounded summary reads plus change events" : "two agreeing bounded reads of query fields and matched summaries plus change events" },
                 { "capture_started_at", new DateTimeOffset(capture.Started).ToUnixTimeMilliseconds() },
                 { "capture_finished_at", frozen ? (object)new DateTimeOffset(capture.Finished).ToUnixTimeMilliseconds() : null },
                 { "captured_nodes", frozen ? capture.CheckIndex : capture.Evidence.Count }, { "retained_rows", capture.Rows.Count } } },
@@ -202,7 +219,7 @@ internal static partial class SemanticWorker
                 SnapshotUnchanged(capture);
                 if (capture.Stack.Count == 0) {
                     if (capture.Stage == "collecting") { FinishSnapshotCollection(capture); continue; }
-                    if (capture.CheckIndex != capture.Evidence.Count) throw new InvalidOperationException("snapshot_changed: nodes disappeared before validation; unpublished result discarded");
+                    if (capture.CheckIndex != capture.Evidence.Count) throw new SnapshotChangedException(capture.Window, "snapshot_changed: nodes disappeared before validation; unpublished result discarded");
                     SealSnapshot(capture); break;
                 }
                 if (capture.Stage == "validating" && capture.PrefixOnly && capture.CheckIndex == capture.Evidence.Count) { SealSnapshot(capture); break; }
@@ -211,16 +228,16 @@ internal static partial class SemanticWorker
                     if (capture.Stage == "collecting" && capture.Evidence.Count >= SnapshotNodeLimit) {
                         capture.Reason = "capture_node_limit"; capture.PrefixOnly = true; FinishSnapshotCollection(capture); continue;
                     }
-                    var node = Describe(frame.Node);
+                    var node = SnapshotDescribe(capture, frame.Node);
                     node["depth"] = frame.Depth;
                     if (capture.Stack.Count > 1) node["parent_id"] = capture.Stack.ToArray()[1].Node.Id;
                     if (frame.Depth >= capture.Depth) {
-                        if (!frame.DepthChildPresent.HasValue) frame.DepthChildPresent = NextChild(frame, true) != null;
+                        if (!frame.DepthChildPresent.HasValue) frame.DepthChildPresent = NextChild(frame, capture.Query == null) != null;
                         node["child_state"] = frame.DepthChildPresent.Value ? "present" : "none";
                         if (frame.DepthChildPresent.Value && capture.Scope != "children") { node["children_truncated"] = true; capture.DepthLimited = true; }
                     }
                     byte[] fingerprint = SnapshotFingerprint(node);
-                    if (!capture.Seen.Add(frame.Node.Id)) throw new InvalidOperationException("snapshot_changed: duplicate element identity during traversal; unpublished result discarded");
+                    if (!capture.Seen.Add(frame.Node.Id)) throw new SnapshotChangedException(capture.Window, "snapshot_changed: duplicate element identity during traversal; unpublished result discarded");
                     SnapshotUnchanged(capture);
                     if (capture.Stage == "collecting") {
                         int rowBytes = Encoding.UTF8.GetByteCount(Json.Serialize(node));
@@ -235,28 +252,31 @@ internal static partial class SemanticWorker
                         visited++;
                     } else {
                         if (capture.CheckIndex >= capture.Evidence.Count || capture.Evidence[capture.CheckIndex].Id != frame.Node.Id || !SameFingerprint(capture.Evidence[capture.CheckIndex].Fingerprint, fingerprint))
-                            throw new InvalidOperationException("snapshot_changed: node fields or traversal order changed before validation; unpublished result discarded");
+                            throw new SnapshotChangedException(capture.Window, "snapshot_changed: node fields or traversal order changed before validation; unpublished result discarded");
                         capture.CheckIndex++; validated++;
                     }
                     frame.Entered = true; spent++;
                 }
                 if (frame.Depth >= capture.Depth) { capture.Stack.Pop(); continue; }
-                var next = NextChild(frame, true);
+                var next = NextChild(frame, capture.Query == null);
                 if (next == null) { capture.Stack.Pop(); continue; }
                 capture.Stack.Push(new Frame { Node = next, Depth = frame.Depth + 1 });
             }
             if (capture.Stage != "frozen") SnapshotUnchanged(capture);
             // 完成最后一个节点后可能刚好命中每次节点预算，终结阶段仍只做内存操作。
             if (capture.Stage == "validating" && (capture.Stack.Count == 0 || capture.PrefixOnly && capture.CheckIndex == capture.Evidence.Count)) {
-                if (capture.CheckIndex != capture.Evidence.Count) throw new InvalidOperationException("snapshot_changed: validation coverage changed");
+                if (capture.CheckIndex != capture.Evidence.Count) throw new SnapshotChangedException(capture.Window, "snapshot_changed: validation coverage changed");
                 if (capture.DepthLimited && capture.Reason == null) capture.Reason = "depth_limit";
                 SealSnapshot(capture);
             }
             if (capture.Stage == "frozen" && capture.DepthLimited && capture.Reason == null) capture.Reason = "depth_limit";
             return SnapshotResult(capture, offset, maxRows, maxBytes, clock, visited, validated);
-        } catch {
-            // 校验失败的代次与所有续页入口一起删除，不能重试同一游标混入另一版本。
-            DropSnapshot(capture); throw;
+        } catch (Exception error) {
+            // 失败代次与续页一起删除；仅明确的采集变化可以从新代次安全重采。
+            DropSnapshot(capture);
+            if (error is ElementNotAvailableException || error is InvalidOperationException && error.Message.StartsWith("cursor_stale: MSAA child count changed"))
+                throw new SnapshotChangedException(capture.Window, "snapshot_changed: element disappeared or child count changed; unpublished result discarded");
+            throw;
         }
     }
 }

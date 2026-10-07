@@ -80,7 +80,7 @@ internal static partial class SemanticWorker
         var cache = new CacheRequest { TreeScope = TreeScope.Element, AutomationElementMode = AutomationElementMode.Full };
         foreach (var property in new [] { AutomationElement.NameProperty, AutomationElement.ControlTypeProperty,
             AutomationElement.AutomationIdProperty, AutomationElement.ClassNameProperty,
-            AutomationElement.IsEnabledProperty, AutomationElement.IsOffscreenProperty }) cache.Add(property);
+            AutomationElement.IsEnabledProperty, AutomationElement.IsOffscreenProperty, AutomationElement.RuntimeIdProperty }) cache.Add(property);
         return cache;
     }
     static Condition ExactQuery(Dictionary<string, object> query) {
@@ -98,7 +98,14 @@ internal static partial class SemanticWorker
         return conditions.Count == 1 ? conditions[0] : new AndCondition(conditions.ToArray());
     }
     static Dictionary<string, object> QueryFields(Target target, bool refresh = false) {
-        if (target.Uia == null) return Describe(target);
+        if (target.Uia == null) {
+            // MSAA查询/身份复核只需名称、角色和状态，未命中节点不取位置/默认动作。
+            NativeCalls += 3;
+            int state = Convert.ToInt32(target.Msaa.get_accState(target.Child));
+            return new Dictionary<string, object> { { "name", target.Msaa.get_accName(target.Child) ?? "" },
+                { "role", LegacyRole(target.Msaa.get_accRole(target.Child)) }, { "automation_id", "" },
+                { "class_name", target.Window.Class }, { "enabled", (state & 1) == 0 }, { "offscreen", (state & 0x18000) != 0 } };
+        }
         if (refresh) { NativeCalls++; target.Uia = target.Uia.GetUpdatedCache(QueryCache); target.SummaryCached = false; }
         var info = target.Uia.Cached;
         return new Dictionary<string, object> { { "name", info.Name }, { "role", info.ControlType.ProgrammaticName.Replace("ControlType.", "") },
@@ -124,11 +131,18 @@ internal static partial class SemanticWorker
         if (ids == null || ids.Length == 0) throw new InvalidOperationException("provider returned no runtime identity");
         return "uia:" + string.Join(",", ids);
     }
+    static string CachedRuntimeId(AutomationElement element) {
+        // TreeWalker的缓存请求已经取得身份，不再次跨进程读取。
+        // 动作前RuntimeId()仍读取当前身份，不能用缓存替代实时校验。
+        var ids = element.GetCachedPropertyValue(AutomationElement.RuntimeIdProperty) as int[];
+        if (ids == null || ids.Length == 0) throw new InvalidOperationException("provider returned no cached runtime identity");
+        return "uia:" + string.Join(",", ids);
+    }
     static CacheRequest CreateCache() {
         var cache = new CacheRequest { TreeScope = TreeScope.Element, AutomationElementMode = AutomationElementMode.Full };
         foreach (var property in new [] {
             AutomationElement.NameProperty, AutomationElement.ControlTypeProperty, AutomationElement.AutomationIdProperty,
-            AutomationElement.ClassNameProperty, AutomationElement.ProcessIdProperty, AutomationElement.NativeWindowHandleProperty,
+            AutomationElement.RuntimeIdProperty, AutomationElement.ClassNameProperty, AutomationElement.ProcessIdProperty, AutomationElement.NativeWindowHandleProperty,
             AutomationElement.IsEnabledProperty, AutomationElement.IsOffscreenProperty, AutomationElement.IsPasswordProperty,
             AutomationElement.HasKeyboardFocusProperty, AutomationElement.IsKeyboardFocusableProperty, AutomationElement.BoundingRectangleProperty,
             AutomationElement.IsInvokePatternAvailableProperty, AutomationElement.IsValuePatternAvailableProperty,
@@ -240,7 +254,7 @@ internal static partial class SemanticWorker
             var child = first ? Walker.GetFirstChild(parent.Uia, cache) : Walker.GetNextSibling(frame.LastChild.Uia, cache);
             frame.ChildrenStarted = true;
             if (child == null) { if (first) frame.FirstChildIdentity = "none"; return null; }
-            var target = new Target { Uia = child, Window = parent.Window, Id = RuntimeId(child), SummaryCached = summary };
+            var target = new Target { Uia = child, Window = parent.Window, Id = CachedRuntimeId(child), SummaryCached = summary };
             if (first) frame.FirstChildIdentity = target.Id;
             // HWND 根还可能混合系统标题栏与应用片段。保留小范围前缀，
             // 只检查第一个系统节点无法发现紧随其后的应用节点插入。
@@ -563,7 +577,15 @@ internal static partial class SemanticWorker
                 object result = Text(args, "kind") == "acquire" ? (consistency == "snapshot" ? AcquireSnapshot(args, owner) : Acquire(args, owner)) : Act(args, owner);
                 Console.WriteLine(Json.Serialize(new Dictionary<string, object> { { "id", id }, { "result", result }, { "execution_state", ActionStarted ? "completed" : "not_started" } }));
             } catch (Exception error) {
-                Console.WriteLine(Json.Serialize(new Dictionary<string, object> { { "id", id }, { "error", error.Message }, { "execution_state", ActionStarted ? "unknown" : "not_started" } }));
+                var response = new Dictionary<string, object> { { "id", id }, { "error", error.Message }, { "execution_state", ActionStarted ? "unknown" : "not_started" } };
+                var changed = error as SnapshotChangedException;
+                if (changed != null && !ActionStarted) {
+                    response["error_code"] = "COMPUTER_SNAPSHOT_CHANGED";
+                    response["observed_window"] = new Dictionary<string, object> { { "handle", changed.ObservedWindow.Hwnd.ToInt64().ToString() },
+                        { "processId", (int)changed.ObservedWindow.Pid }, { "title", changed.ObservedWindow.Title } };
+                    response["native_calls"] = NativeCalls;
+                }
+                Console.WriteLine(Json.Serialize(response));
             }
         }
     }

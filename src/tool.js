@@ -578,7 +578,7 @@ export function apply(ctx, rawConfig) {
     return { snapshot_id: snapshotId, captured_at: capturedAt, backend: snapshot.backend,
       ...(screenshot === undefined ? {} : { screenshot_id: screenshotId, screenshot_hash: screenshot.contentHash }),
       coverage: snapshot.coverage, consistency: snapshot.consistency, result_id: snapshot.resultId, next_cursor: snapshot.nextCursor,
-      ...(metadata === undefined ? {} : { visited_nodes: metadata.visited_nodes, validated_nodes: metadata.validated_nodes, returned_nodes: metadata.returned_nodes, elapsed_ms: metadata.elapsed_ms, native_calls: metadata.native_calls, host_timing: metadata.host_timing }),
+      ...(metadata === undefined ? {} : { visited_nodes: metadata.visited_nodes, validated_nodes: metadata.validated_nodes, returned_nodes: metadata.returned_nodes, elapsed_ms: metadata.elapsed_ms, native_calls: metadata.native_calls, capture_restarts: metadata.capture_restarts, host_timing: metadata.host_timing }),
       ...(query === undefined ? { tree } : { matches: flattenAccessibilityTree(tree) }),
     };
   };

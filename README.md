@@ -1,6 +1,6 @@
 # dsh-computer-use
 
-独立的 Cordis bundle，为 DeepSeek Harness 提供视觉、原生无障碍和 Windows 讲述人操作路径。0.5.4 注册 **18 个 `computer_*` 工具**；无障碍观测、阅读和语义动作可以独立使用，文本模型也能操作原生应用。
+独立的 Cordis bundle，为 DeepSeek Harness 提供视觉、原生无障碍和 Windows 讲述人操作路径。0.5.5 注册 **18 个 `computer_*` 工具**；无障碍观测、阅读和语义动作可以独立使用，文本模型也能操作原生应用。
 
 Windows 是经过本机运行时验证的主要后端。macOS AX、Linux AT-SPI 已实现并做契约测试，尚无这两个系统的原生运行时验收。接口覆盖与实测范围见 [EVIDENCE.md](EVIDENCE.md)；对标的官方接口见 [能力矩阵](references/CAPABILITY-MATRIX.md)。目前没有任务成功率基准，也没有 SOTA 等效结论。
 
@@ -48,7 +48,7 @@ Windows 是经过本机运行时验证的主要后端。macOS AX、Linux AT-SPI 
 {"snapshot_id":"<上一页快照ID>","cursor":"<上一页next_cursor>","max_nodes":100}
 ```
 
-采集和验证各保留原生 DFS 栈；收集后复读覆盖范围的全部字段及顺序，包括查询未命中节点，变化事件或复读差异使未交付代次报 `snapshot_changed` 并丢弃。第一页交付前完成校验，之后所有页只读封存行，UI 的插入、删除、重排、改名不会混入这一结果。每页注册独立的工具观测，保留同一结果身份；动作失效后的历史分页可继续阅读，但不会恢复已失效的动作证据。游标绑定会话、后端、工作进程代次、查询、consistency 及深度/scope/detail/截图绑定，改变条件需开始新获取。
+采集和验证各保留原生 DFS 栈；概览复读全部摘要，查询复读每个覆盖节点的匹配字段及顺序，并复读命中项的完整摘要，包括未命中项变成命中的情况。变化事件或复读差异使未交付代次报 `COMPUTER_SNAPSHOT_CHANGED` 并丢弃。新观测在同一 HWND/PID/标题、未发布元素、明确未开始动作且仍有剩余时间时，可在原工具截止内重采最多两次，返回 `capture_restarts`；已经交付的采集游标不自动换代次，动作、未知结果、资源/时效错误和取消不自动重试。第一页交付前完成校验，之后所有页只读封存行，UI 的插入、删除、重排、改名不会混入这一结果。每页注册独立的工具观测，保留同一结果身份；动作失效后的历史分页可继续阅读，但不会恢复已失效的动作证据。游标绑定会话、后端、工作进程代次、查询、consistency 及深度/scope/detail/截图绑定，改变条件需开始新获取。
 
 每个工作进程最多保留 4 个采集/封存结果，每个结果覆盖最多 20,000 节点，保留数据估算预算 32 MB，合计预算 64 MB。采集和封存各自有 120 秒绝对时效，访问不延长它；时效及淘汰顺序使用单调时钟，采集/验证的原生读取后、封存前和构造输出页前后都检查到期，已到期代次报 `cursor_stale` 并丢弃；池淘汰会使相应游标与引用失效。节点/保留数据上限命中时只封存已验证范围，返回 `capture_node_limit` / `capture_byte_limit` 和 partial；输出页大小不会扩大全树覆盖。深度之外的分支需显式展开或增加深度。
 
@@ -64,7 +64,7 @@ Windows 是经过本机运行时验证的主要后端。macOS AX、Linux AT-SPI 
 {"source":"native","window_id":"<已观测窗口ID>","automation_id":"Commit","match":"exact","max_nodes":1000,"max_depth":12}
 ```
 
-查询同样返回覆盖范围、一致性和游标；续查询可省略原条件并继承它们。固定结果集在原生工作进程内按缓存字段筛选，完整验证同时包含未命中节点，最终只交付命中行；live 模式的 UIA 精确条件使用 `PropertyCondition` / `FindFirst(TreeScope.Element)`。缓存仅覆盖当前元素的基本字段及模式可用性，不使用无界 `FindAll(Descendants)`。原生查询仍有遍历成本，不承诺任意提供者下的常数时间查找。
+查询同样返回覆盖范围、一致性和游标；续查询可省略原条件并继承它们。固定结果集在原生工作进程内按缓存字段筛选：未命中项读取并复核名称、角色、automation ID、启用及屏幕外状态等匹配字段，命中项再读取并复核完整摘要、边界和模式可用性，最终只交付命中行。UIA 导航缓存同时取得 runtime ID，动作前仍重新读取实时身份；MSAA 未命中项省去位置与默认动作 getter。live 模式的 UIA 精确条件使用 `PropertyCondition` / `FindFirst(TreeScope.Element)`。缓存范围有界，不使用无界 `FindAll(Descendants)`。原生查询仍有遍历成本，不承诺任意提供者下的常数时间查找。机制对照见 [成熟桌面自动化源码](references/DESKTOP-AUTOMATION-IMPLEMENTATIONS.md)。
 
 正常 Windows 动作使用工作进程注册的原生元素引用，复核窗口生命周期、结构版本、UIA runtime ID 和身份字段后直接调用目标，不从窗口根重扫。引用按会话和进程代次隔离；每个工作进程最多保留 8 个窗口、20000 个元素引用和 32 个 live 游标，另有最多 4 个固定结果集的续页入口；引用时效 120 秒。
 
@@ -148,6 +148,7 @@ pnpm run verify
 python test/linux-reader-contracts.py
 pnpm run smoke:semantics
 pnpm run smoke:snapshots
+pnpm run smoke:recovery
 pnpm run smoke:lifetimes
 pnpm run smoke:windows
 # 用当前桌面端实际可执行文件检查 Electron 原生 ABI；按本机路径替换：
@@ -159,6 +160,6 @@ pnpm run native:stage
 pnpm pack --pack-destination .local
 ```
 
-`verify` 检查所有 JS 文件并运行单元/提供者合同及真实 ToolRuntime 回归。`verify:profile` 使用独立临时 DSH home 检查真实 Loader、18 工具及提示词，清理后不影响既有 profile。`smoke:semantics` 用真实 Cordis 本地子进程服务测试万节点 UIA/MSAA、分页/分支/查询/引用/虚拟化、阻塞终止和恢复，并与旧采集算法测量同一提供者的调用量与响应大小。`smoke:snapshots` 验证两种后端万节点固定分页、未交付代次变化丢弃、查询未命中节点复核、静默插删/重排/属性更新、封存后原生采集零调用，以及历史结果不能绕过实时目标校验。`smoke:lifetimes` 将自建窗口的真实属性读取延迟 1200ms，并把测试进程私有的代次起点移到距期限 1000ms，验证分段内到期丢弃、旧游标拒绝、引用清除及同进程恢复；还验证未来的展示时间戳不会延长封存时效，不修改机器时钟或生产时效常量。Electron smoke 包含这些验收及已有 WPF/WinForms 动作。Windows 动作 smoke 只操作标题唯一、由自己创建的进程，结束后清理自己的进程和临时目录。
+`verify` 检查所有 JS 文件并运行单元/提供者合同及真实 ToolRuntime 回归。`verify:profile` 使用独立临时 DSH home 检查真实 Loader、18 工具及提示词，清理后不影响既有 profile。`smoke:semantics` 用真实 Cordis 本地子进程服务测试万节点 UIA/MSAA、分页/分支/查询/引用/虚拟化、阻塞终止和恢复，并与旧采集算法测量同一提供者的调用量与响应大小。`smoke:snapshots` 验证两种后端万节点固定分页、未交付代次变化丢弃、查询未命中节点复核、静默插删/重排/属性更新、封存后原生采集零调用，以及历史结果不能绕过实时目标校验。`smoke:recovery` 验证查询未命中项静默变更后重采一次、持续变化三次尝试后失败、已交付游标不换结果、旧动作引用实时拒绝，以及相同覆盖范围下的按需缓存读取量。`smoke:lifetimes` 将自建窗口的真实属性读取延迟 1200ms，并把测试进程私有的代次起点移到距期限 1000ms，验证分段内到期丢弃、旧游标拒绝、引用清除及同进程恢复；还验证未来的展示时间戳不会延长封存时效，不修改机器时钟或生产时效常量。Electron smoke 包含这些验收及已有 WPF/WinForms 动作。Windows 动作 smoke 只操作标题唯一、由自己创建的进程，结束后清理自己的进程和临时目录。
 
 `native:stage` 复制 release exe 并记录二进制与 Rust 源文件哈希；`prepack` 要求回归成功且产物清单匹配当前版本/源码。打包不含构建缓存或本地检查点。来源、许可与风险边界见 [UPSTREAM.md](references/UPSTREAM.md)、[LICENSE](LICENSE)、[SECURITY.md](SECURITY.md)，变更见 [CHANGELOG.md](CHANGELOG.md)。
