@@ -1,6 +1,25 @@
-# Capability Evidence — 0.5.5
+# Capability Evidence — 0.5.6
 
 ## Current validation — 2026-10-07
+
+0.5.6 connects the real DSH ToolRuntime, production WindowsComputer, official Cordis local-subprocess service and owned native UIA/MSAA providers in one acceptance test. The host's current workspace source is loaded with its own TypeScript aliases, as in the existing ToolRuntime integration test; no runtime services or native provider responses are mocked.
+
+| Backend | Frozen rows | Output pages | Initial frozen acquisition calls | Frozen continuation acquisition calls |
+| --- | ---: | ---: | ---: | ---: |
+| UIA | 1,607 | 13 | 1 | 0 |
+| MSAA | 1,601 | 13 | 1 | 0 |
+
+The targeted actual Electron 44.0.0 / Node 24.18.1 run passed both backends. It keeps the default eight semantic observations per agent while advancing all 13 pages, so the continuation chain crosses real tool-level eviction. Result IDs and SHA-256 digests stay fixed after post-seal source renames and reordering; UIA additionally inserts and removes a node. The native acquisition counters and instrumented UIA provider counters remain zero across frozen continuations.
+
+The same chain invokes a registered target once, then rejects consumed first-page evidence and every subsequent history-page action without another side effect. Another agent cannot borrow a cursor. A newly observed target renamed before invocation is rejected by native identity checks. An unfinished generation changed after reading node12 fails and discards its cursor; a fresh query silently changed after reading node12 restarts once and returns the changed match. Source-scope completeness and output-page completeness are checked separately.
+
+The first attempt to run this combined test exposed an Electron invocation returning exit zero despite a module-loading error. Native smoke checks now require a per-module completion marker emitted only after its awaited test and cleanup finish, reject any failure marker, and continue to reject nonzero exits and timeouts. Real subprocess regressions cover normal completion, an early exit zero, missing-module loading and a late exception whose outer exit is reset to zero. Source-wide transactional atomicity remains outside these verified guarantees; no capability field is promoted by the completion marker.
+
+The complete sequential Electron suite passed all ten native modules, each with its completion marker and no failure marker: bridge/ABI, WPF semantic actions, pattern expansion, MSAA actions, live large trees, fixed large-tree pagination, change recovery, the combined native ToolRuntime chain, lifetimes and the source-consistency counterexample. The 0.5.6 native manifest also matches the unchanged executable and source hashes. The source-consistency test still reproduces the nontransactional source boundary; its passing assertion establishes detection of that limitation, not its repair.
+
+Reproduce the combined acceptance and existing native checks with `pnpm run smoke:electron "C:\path\to\DeepSeek Harness.exe"`; run the completion regressions with `node --test test/electron-smoke.test.js`. `pnpm pack --pack-destination .local` runs the syntax, Node/ToolRuntime regressions and native-manifest gates before producing the package.
+
+## Historical 0.5.5 validation — 2026-10-07
 
 0.5.5 applies scoped caching and bounded read-only reacquisition from the [mature desktop automation implementations](references/DESKTOP-AUTOMATION-IMPLEMENTATIONS.md). Query misses retain and reread the fields used to decide matching and the covered tree order; matched rows retain full summaries. UIA runtime IDs are fetched with the navigation cache and remain live-checked before actions. MSAA misses skip location and default-action getters.
 
