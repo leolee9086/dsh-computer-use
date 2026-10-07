@@ -14,6 +14,32 @@ public class LargeTreeForm : Form
     public static int Invocations;
     public static volatile int DelayedIndex = -2, DelayMilliseconds;
     public static void DelayRead(int index) { if (index == DelayedIndex && DelayMilliseconds > 0) Thread.Sleep(DelayMilliseconds); }
+    // 反例只有两个合法源状态，切换不发事件：分开的读取可以拼出从未存在的组合。
+    static readonly object PairLock = new object();
+    static string PairInstance = Guid.NewGuid().ToString("N");
+    static bool PairEnabled; static int PairState, PairLeftReads, PairRightReads; static long PairEpoch;
+    static string PairLeft { get { return PairState == 0 ? "Pair left active" : "Pair left idle"; } }
+    static string PairRight { get { return PairState == 1 ? "Pair right active" : "Pair right idle"; } }
+    public static string ReadPairName(int index) {
+        lock (PairLock) {
+            if (!PairEnabled || (index != 12 && index != 13)) return null;
+            int state = index == 12 ? 0 : 1;
+            if (PairState != state) { PairEpoch += 2; PairState = state; }
+            if (index == 12) PairLeftReads++; else PairRightReads++;
+            return index == 12 ? PairLeft : PairRight;
+        }
+    }
+    static void EnablePair() {
+        // 版本号重置必须换来源代次；旧stamp不能和新一轮的同号版本混淆。
+        lock (PairLock) { PairInstance = Guid.NewGuid().ToString("N"); PairEnabled = true; PairState = 0; PairEpoch = 0; PairLeftReads = PairRightReads = 0; }
+    }
+    static void StepPair() { lock (PairLock) { PairEpoch += 2; PairState = 1 - PairState; } }
+    static string ExportPair() {
+        // 这个测试导出同时持有源锁。单次导出有原子切点；UIA/MSAA的逐字段读取没有。
+        lock (PairLock) return "{\"source_instance\":\""+PairInstance+"\",\"source_epoch\":\""+PairEpoch+
+            "\",\"left\":\""+PairLeft+"\",\"right\":\""+PairRight+"\",\"left_reads\":"+PairLeftReads+
+            ",\"right_reads\":"+PairRightReads+",\"state\":"+PairState+"}";
+    }
     public static int PropertyReads, PatternReads, Navigations, RuntimeIds;
     public static void ResetStats() { Interlocked.Exchange(ref PropertyReads, 0); Interlocked.Exchange(ref PatternReads, 0); Interlocked.Exchange(ref Navigations, 0); Interlocked.Exchange(ref RuntimeIds, 0); }
     public static string Stats() { return "{\"property_reads\":"+PropertyReads+",\"pattern_reads\":"+PatternReads+",\"navigations\":"+Navigations+",\"runtime_ids\":"+RuntimeIds+"}"; }
@@ -50,6 +76,7 @@ public class LargeTreeForm : Form
         public override string Name { get {
             if (Blocking && Index==9998) Thread.Sleep(60000);
             DelayRead(Index);
+            string paired = ReadPairName(Index); if (paired != null) return paired;
             string renamed; return LegacyNames.TryGetValue(Index, out renamed) ? renamed : "Legacy item "+Index;
         } }
         public override AccessibleRole Role { get { return AccessibleRole.PushButton; } }
@@ -73,6 +100,9 @@ public class LargeTreeForm : Form
                     Console.WriteLine("delay-set");
                 }
                 else if (line=="count") Console.WriteLine("count:"+Invocations);
+                else if (line=="pair_enable") { EnablePair(); Console.WriteLine("pair-enabled"); }
+                else if (line=="pair_step") { StepPair(); Console.WriteLine("pair-stepped"); }
+                else if (line=="pair_export") Console.WriteLine(ExportPair());
                 else if (line=="reset_stats") { ResetStats(); Console.WriteLine("stats-reset"); }
                 else if (line=="stats") Console.WriteLine(Stats());
                 else if (line=="change_legacy") { LegacyCount++; NotifyWinEvent(0x8004, form.Handle, -4, 0); Console.WriteLine("legacy-changed"); }
@@ -141,6 +171,7 @@ public class RawNode : IRawElementProviderSimple, IRawElementProviderFragmentRoo
         if (id==AutomationElementIdentifiers.NameProperty.Id) {
             if (LargeTreeForm.Blocking && Index==9998) Thread.Sleep(60000);
             LargeTreeForm.DelayRead(Index);
+            string paired = LargeTreeForm.ReadPairName(Index); if (paired != null) return paired;
             return DisplayName ?? (Index==-1 ? "UIA large-tree root" : Depth==13 ? "Deep target" : "Item "+Index);
         }
         if (id==AutomationElementIdentifiers.AutomationIdProperty.Id) return "item-"+Index;

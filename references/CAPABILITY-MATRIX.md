@@ -9,7 +9,7 @@
 | Windows UIA | Microsoft Control Patterns、TextPattern、CacheRequest、ItemContainer/VirtualizedItem | 默认采集并完整复读有界范围后封存固定结果集，支持分支/续页/原生查询、按需读取、原生引用动作及可终止工作进程；live 显式选择 | 10,020 节点封存成 31 页，同一结果 ID/摘要，源 UI 改名/插删/重排后续页原生采集零调用；未交付代次遇到静默变化或属性事件即丢弃。已有分支/查询/屏幕外 invoke/虚拟化/阻塞恢复及 WPF 动作回归通过。grid、特殊 scroll/window/transform pattern 仍待逐项原生验收。 |
 | Windows MSAA | IAccessible、AccessibleObjectFromWindow、AccessibleChildren | 独立 msaa 固定结果分页/查询/读取/默认动作/值/选择，注册引用、HWND/PID/结构版本/身份复核和隔离进程 | 10,001 节点封存成 31 页，同一结果 ID/摘要；等节点数静默重排及改名的未交付代次被丢弃，封存后保留旧行。原生查询、阻塞恢复和 WinForms 动作回归通过；没有同属性替换代际保证或所有动作的前台保持结论。 |
 | 固定结果时效 | 单调时钟与到期代次清理 | 120秒采集/封存时效，分段内到期检查及池淘汰 | 真实UIA/MSAA属性延迟1200ms，测试代次入口尚余1000ms，过期采集被丢弃、旧游标拒绝、引用清除且进程能继续采集；未来展示时间戳不能延长封存时效。 |
-| 源 UI 全树原子性 | 提供者事务或可靠的全树版本快照 | 尚未实现；能力字段 semanticSourceAtomic:false，结果 source_atomic:false | 两遍相符读取和事件校验只能支持上述验证与封存机制，不能证明全部字段在源程序的同一瞬间同时存在。 |
+| 源 UI 全树原子性 | 提供者事务或可靠的全树版本快照 | 尚未实现；能力字段 semanticSourceAtomic:false，结果 source_atomic:false | 真实UIA/MSAA静默往返反例已在Node及Electron复现：完整覆盖并复读39/33节点后仍接受从未同时存在的互斥字段组合；固定续页保持不可变并报告source_atomic:false。带锁两字段导出及版本证据原型、接入要求见[源一致性合同](SOURCE-CONSISTENCY.md)。 |
 | Windows 讲述人 | Microsoft Standard：Insert/CapsLock modifier、item/view、scan、阅读 | 同登录会话状态、固定命令，独立窗口证据键盘与 UIA/MSAA 阅读协作 | 只读状态 C# 桥实测，命令/审批/会话证据合同通过；没有启动读屏器验收语音或虚拟光标，结果明确未验证。 |
 | 跨平台 | macOS AX、Linux AT-SPI 与系统输入 | 焦点树、快照内查找与内容读取，落实每次节点/深度/时间预算；原生分支/续页/查询及 Windows 扩展明确拒绝 | 提供者预算与拒绝合同、Linux Python 纯读取/身份边界通过；两种系统的原生桌面尚未实测。 |
 

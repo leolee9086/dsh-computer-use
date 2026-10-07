@@ -28,6 +28,22 @@ These are ordered samples on a shared desktop with the compiled worker cached, n
 
 Reproduce from the repository with `pnpm run verify`, `pnpm run verify:profile`, `pnpm run smoke:lifetimes`, and `pnpm run smoke:electron "C:\path\to\DeepSeek Harness.exe"`. Stage and pack with `pnpm run native:stage` and `pnpm pack --pack-destination .local`; prepack checks the current version against the native executable/source manifest. Rust/executable bytes are unchanged.
 
+## Source-consistency investigation after 0.5.4 — 2026-10-07
+
+A real provider counterexample now tests the outstanding source guarantee directly. Two nodes have mutually exclusive active states under one source lock. Reading the left name silently selects one state; reading the right selects the other. Collection and the full second pass both read `Pair left active` and `Pair right active`, although the source invariant never allows both active together. The production worker accepts and seals these matching summaries, keeps pagination immutable, and correctly reports `source_atomic:false` even when coverage is complete. This experiment demonstrates the remaining implementation gap; it is not a source-atomicity repair.
+
+| Check | Measured result | What it establishes |
+| --- | --- | --- |
+| Real UIA and MSAA counterexample | Both reproduced in ordinary Node and actual Electron | UIA covered and reread 39 nodes, MSAA 33; agreeing reads can contain a combination that never existed at the source |
+| Frozen continuation after another source change | Same result ID/digest; zero provider acquisition calls | Fixed result pagination remains immutable independently of source atomicity |
+| Test-provider version and locked export | Pair version advanced from 0 to 6; every locked pair export preserved its mutual-exclusion invariant | A cooperating source can expose evidence that detects these silent round trips or export the pair under a shared lock; this pair-only prototype is not a production whole-tree adapter |
+| `pnpm run verify` after adding the experiment | 56 JavaScript syntax checks; all 62 tests passed | Existing tools, resources and runtime contracts remain valid |
+| Actual Electron 44.0.0 / Node 24.18.1 / ABI 149 | Complete sequential native suite, including the new counterexample, passed | Shared-provider additions preserve the existing WPF/MSAA actions, live/frozen large-tree traversal and lifetime checks |
+
+The initial experimental depth 2 stopped at a partial-coverage assertion because the UIA window decorations extend beyond that depth. With depth 20, the complete small window reproduces the same impossible pair. The test source resets a version only after changing its source-instance ID, and this adversarial mode is disabled by default. The unchanged production implementation and version remain 0.5.4; this follow-up adds test evidence and an adapter contract rather than declaring an atomic adapter implemented.
+
+Run `node test/win32-semantic-source-consistency-smoke.mjs` directly, or use the Electron smoke command above, which now includes it. The [source-consistency contract](references/SOURCE-CONSISTENCY.md) specifies the source identity, coverage, shared-write protection, reliable version/freshness, native action binding and bounded lifecycle needed for implementation. It also records the checked Microsoft cache and remote-operation contracts. The remaining input is the target application/provider and its actual transaction, MVCC or source-version interface. Source-wide atomicity and the overall repair goal remain open.
+
 ## Historical 0.5.3 validation — 2026-10-07
 
 The dynamic-tree repair establishes immutable result pagination on Windows UIA/MSAA. It does **not** establish a transactionally atomic snapshot of the source application. Results report `source_atomic:false`; the provider advertises `semanticSnapshots:true` and `semanticSourceAtomic:false`. These are separate guarantees, and the second remains unimplemented.
