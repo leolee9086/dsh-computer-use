@@ -65,6 +65,17 @@ test('a cursor, live observation, exhausted budget or resource error never start
   }
 });
 
+test('invalid or live match limits fail before a native request is dispatched', async () => {
+  const { computer, calls } = driver(() => { throw new Error('invalid request reached the worker'); });
+  try {
+    for (const maxMatches of [0, -1, 20001, 1.5, '3', null]) {
+      await assert.rejects(computer.accessibilitySnapshot('42', undefined, { query: { name: 'Save', maxMatches } }), /maxMatches must be 1\.\.20000/);
+    }
+    await assert.rejects(computer.accessibilitySnapshot('42', undefined, { consistency: 'live', query: { name: 'Save', maxMatches: 1 } }), /maxMatches requires snapshot consistency/);
+    assert.equal(calls.length, 0);
+  } finally { await computer.dispose(); }
+});
+
 test('a different window or cancellation does not redirect the observation', async () => {
   const controller = new AbortController();
   for (const cancel of [false, true]) {

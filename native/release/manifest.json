@@ -1,5 +1,5 @@
 {
-  "version": "0.5.6",
+  "version": "0.5.7",
   "executableSha256": "9a86acbb39edde4d36972c913fb5b5dd594e50a8e944386016e63bdd8b10b789",
   "sources": {
     "native/Cargo.lock": "eebd959a5d7dbdcd2d3761414ac199f38b0be90800da627206acbe57e8b63aaa",

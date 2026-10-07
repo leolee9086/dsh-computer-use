@@ -1,6 +1,25 @@
-# Capability Evidence — 0.5.6
+# Capability Evidence — 0.5.7
 
 ## Current validation — 2026-10-07
+
+0.5.7 adds an optional `computer_find(source:"native", max_matches:K)` for Windows snapshot queries. The production collector stops after K matches, rereads every covered hit and miss in the same traversal order, then freezes that prefix. It reports `coverage.source_status:"partial"` / `source_reason:"match_limit"`; page budgets are independent. An absent limit retains the previous bounded-scope search. No source-wide transactional guarantee is added.
+
+| Backend | Default query covered nodes | Three-match prefix covered / reread nodes | Frozen output pages (one row each) | Continuation acquisition calls |
+| --- | ---: | ---: | ---: | ---: |
+| UIA | 135 | 29 / 29 | 3 | 0 |
+| MSAA | 129 | 23 / 23 | 3 | 0 |
+
+The dedicated actual Electron 44.0.0 / Node 24.18.1 acceptance passed both backends using the real WindowsComputer, official Cordis subprocess service and owned native providers. Source renames and reordering after sealing preserve the three original names and fixed result ID/digest. A covered miss becoming a match and covered-node reordering both discard an unpublished prefix and its cursor. Matched summaries still expose bounds and invoke; each backend executes one action, then rejects a renamed identity without another effect. Native and JS entry points reject invalid limits and live-mode limits. A limited query with no match still searches the full scope and returns complete empty coverage.
+
+For a 10,000-node source, the next item (index1) and a distant item (index9998) were configured to block their name getters for 60 seconds. A one-match query for item0 froze within its 5-second tool deadline: UIA covered eight nodes in 909ms including cold worker startup, and MSAA covered two nodes in 21ms with the worker already running. The complete prefix reread ends before navigating the unsearched next sibling. These timings verify bounded completion in this fixture; the different startup states are not a backend speed comparison.
+
+The extended real native ToolRuntime chain also passed: 41 matches cover 48 UIA / 42 MSAA nodes and output three pages at the default 20 matches per page. Continuations inherit an omitted limit, accept the unchanged limit with repeated selectors, and reject a changed limit before consuming the cursor. Source renaming, reordering and UIA insert/remove between pages leave the original 41 rows unchanged; continuation native acquisition calls and UIA provider counters remain zero, and final source coverage remains partial. The existing default 13-page chain still passes observation eviction, consumed history evidence, cross-agent isolation, native identity rejection and one capture restart.
+
+The complete sequential actual Electron suite passed all eleven native modules, each with its completion marker and no failure marker. It includes the new match-limit acceptance and the existing bridge/ABI, WPF/pattern/MSAA actions, live and fixed 10,000-node trees, recovery, native ToolRuntime, lifetimes and source-consistency checks. The full-suite blocked-tail sample also completed within budget (UIA400ms / MSAA25ms). The source-consistency counterexample still reproduces the nontransactional boundary; its passing check is not evidence of a source-atomic repair. The 0.5.7 native manifest matches the unchanged executable and Rust source hashes.
+
+Reproduce the dedicated check with `pnpm run smoke:matches`, or run it and the existing native regressions through `pnpm run smoke:electron "C:\path\to\DeepSeek Harness.exe"`. `pnpm pack --pack-destination .local` requires the syntax, Node/ToolRuntime and native-manifest gates before packaging.
+
+## Historical 0.5.6 validation — 2026-10-07
 
 0.5.6 connects the real DSH ToolRuntime, production WindowsComputer, official Cordis local-subprocess service and owned native UIA/MSAA providers in one acceptance test. The host's current workspace source is loaded with its own TypeScript aliases, as in the existing ToolRuntime integration test; no runtime services or native provider responses are mocked.
 

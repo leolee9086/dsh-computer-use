@@ -476,6 +476,11 @@ export class WindowsComputer {
     const backend = options.backend === 'msaa' ? 'msaa' : 'uia';
     const consistency = options.consistency ?? 'snapshot';
     if (!['snapshot', 'live'].includes(consistency)) throw new ComputerUseError('consistency must be snapshot or live');
+    const matchLimit = options.query?.maxMatches;
+    if (matchLimit !== undefined) {
+      if (!Number.isInteger(matchLimit) || matchLimit < 1 || matchLimit > 20000) throw new ComputerUseError('query maxMatches must be 1..20000');
+      if (consistency !== 'snapshot') throw new ComputerUseError('query maxMatches requires snapshot consistency');
+    }
     const request = {
       kind: 'acquire', backend, consistency, hwnd: windowHandle ?? null,
       owner: options.owner ?? 'driver',

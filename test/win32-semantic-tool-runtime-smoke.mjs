@@ -95,6 +95,37 @@ try {
       const query = name => ({ ...base, source: 'native', name, match: 'exact', include_offscreen: true, timeout_ms: 10000 });
       // 先启动工作进程。小分段的短调用交付真正的未完成采集游标。
       await json('computer_find', query(`${label} 0`));
+      // 匹配上限穿过真实schema/ToolRuntime，41项分成默认20项的三页。
+      const boundedArgs = { ...query(label), match: 'contains', max_matches: 41 };
+      const bounded = await json('computer_find', boundedArgs);
+      assert.equal(bounded.consistency.status, 'frozen'); assert.equal(bounded.consistency.retained_rows, 41);
+      assert.equal(bounded.coverage.source_status, 'partial'); assert.equal(bounded.coverage.source_reason, 'match_limit');
+      assert.equal(bounded.matches.length, 20); assert.equal(bounded.coverage.reason, 'page_limit');
+      assert.equal(bounded.visited_nodes, bounded.validated_nodes); assert.ok(bounded.visited_nodes < 100);
+      const boundedResume = { source: 'native', snapshot_id: bounded.snapshot_id, cursor: bounded.next_cursor };
+      const changedLimit = await execute('computer_find', { ...boundedResume, max_matches: 42 });
+      assert.equal(changedLimit.isError, true); assert.match(changedLimit.error?.message ?? '', /cursor query changed/);
+      const wrongMode = await execute('computer_find', { ...boundedArgs, consistency: 'live' });
+      assert.equal(wrongMode.isError, true); assert.match(wrongMode.error?.message ?? '', /requires a native query with snapshot consistency/);
+      const cachedLimit = await execute('computer_find', { source: 'snapshot', snapshot_id: bounded.snapshot_id, name: label, max_matches: 1 });
+      assert.equal(cachedLimit.isError, true); assert.match(cachedLimit.error?.message ?? '', /requires source:native/);
+      assert.equal(await command(`${rename}:20:Changed bounded match ${backend}`), 'renamed');
+      assert.equal(await command(backend === 'uia' ? 'reorder_silent' : 'reorder_legacy_silent'), 'mutated');
+      if (backend === 'uia') for (const change of ['insert_silent', 'remove_silent']) assert.equal(await command(change), 'mutated');
+      assert.equal(await command('reset_stats'), 'stats-reset');
+      const boundedSecond = await json('computer_find', boundedResume);
+      const boundedLast = await json('computer_find', { ...boundedArgs, snapshot_id: boundedSecond.snapshot_id, cursor: boundedSecond.next_cursor });
+      for (const part of [boundedSecond, boundedLast]) {
+        assert.equal(part.result_id, bounded.result_id); assert.equal(part.consistency.sha256, bounded.consistency.sha256);
+        assert.equal(part.native_calls, 0); assert.equal(part.visited_nodes, 0); assert.equal(part.validated_nodes, 0);
+        assert.equal(part.coverage.source_status, 'partial'); assert.equal(part.coverage.source_reason, 'match_limit');
+      }
+      assert.equal(boundedLast.next_cursor, null); assert.equal(boundedLast.coverage.reason, 'match_limit');
+      const boundedNames = [...bounded.matches, ...boundedSecond.matches, ...boundedLast.matches].map(row => row.name);
+      assert.deepEqual(boundedNames, Array.from({ length: 41 }, (_, index) => `${label} ${index}`));
+      assert.deepEqual(JSON.parse(await command('stats')), { property_reads: 0, pattern_reads: 0, navigations: 0, runtime_ids: 0 });
+      assert.equal(await command(`${rename}:20:${label} 20`), 'renamed');
+      assert.equal(await command(backend === 'uia' ? 'reorder_silent' : 'reorder_legacy_silent'), 'mutated');
       const pending = await json('computer_accessibility', { ...base, max_nodes: 1, timeout_ms: 1000 });
       assert.notEqual(pending.consistency.status, 'frozen');
       assert.equal(rows(pending).length, 0); assert.equal(pending.coverage.status, 'unknown');
@@ -174,7 +205,9 @@ try {
       assert.equal(await command('mutation:disable'), 'mutation-disabled');
       samples.push({ backend, captured_nodes: captured.length, pages, capture_calls: captureCalls,
         pending_nodes: pending.visited_nodes, discarded_capture: true, continuation_native_calls: 0,
-        consumed_history_actions: 'rejected', live_identity: 'rejected renamed target', capture_restarts: recovered.capture_restarts });
+        consumed_history_actions: 'rejected', live_identity: 'rejected renamed target', capture_restarts: recovered.capture_restarts,
+        match_limit: { retained_rows: 41, pages: 3, covered_nodes: bounded.consistency.captured_nodes, continuation_native_calls: 0,
+          inherited_limit: true, changed_limit: 'rejected', source_coverage: boundedLast.coverage.source_status } });
     } finally { await ctx.fiber.dispose(); }
   }
   console.log(JSON.stringify({ runtime: { node: process.versions.node, electron: process.versions.electron },

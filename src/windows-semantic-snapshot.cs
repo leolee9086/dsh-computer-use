@@ -42,7 +42,7 @@ internal static partial class SemanticWorker
     }
     sealed class SnapshotCapture {
         public string Id = Guid.NewGuid().ToString("N"), Owner, Signature, Scope, Stage = "collecting", Reason, Digest;
-        public Window Window; public Target Root; public int Version, StructureVersion, Depth, CheckIndex;
+        public Window Window; public Target Root; public int Version, StructureVersion, Depth, CheckIndex, MatchLimit;
         public Dictionary<string, object> Query;
         public Stack<Frame> Stack = new Stack<Frame>();
         public List<SnapshotEvidence> Evidence = new List<SnapshotEvidence>();
@@ -177,7 +177,19 @@ internal static partial class SemanticWorker
             { "window", new Dictionary<string, object> { { "handle", capture.Window.Hwnd.ToInt64().ToString() }, { "processId", (int)capture.Window.Pid }, { "title", capture.Window.Title } } }
         };
     }
+    // JSON整数必须原样校验；Convert.ToInt32会把小数舍入，不能用于匹配上限。
+    static int SnapshotMatchLimit(IDictionary<string, object> args) {
+        object value;
+        if (!args.TryGetValue("query", out value) || value == null) return 0;
+        var query = value as Dictionary<string, object>;
+        if (query == null) throw new InvalidOperationException("query must be an object");
+        if (!query.TryGetValue("maxMatches", out value)) return 0;
+        if (!(value is int || value is long) || Convert.ToInt64(value) < 1 || Convert.ToInt64(value) > 20000)
+            throw new InvalidOperationException("query maxMatches must be 1..20000");
+        return Convert.ToInt32(value);
+    }
     static object AcquireSnapshot(IDictionary<string, object> args, string owner) {
+        int matchLimit = SnapshotMatchLimit(args);
         SweepSnapshots();
         int maxNodes = Integer(args, "maxNodes", 300), depth = Integer(args, "maxDepth", 6);
         int maxBytes = Integer(args, "maxBytes", 1000000), maxRows = Integer(args, "maxResults", maxNodes), time = Integer(args, "budgetMs", 5000);
@@ -192,6 +204,7 @@ internal static partial class SemanticWorker
             capture = continuation.Capture; offset = continuation.Offset;
             if (args.ContainsKey("signature") && Text(args, "signature") != capture.Signature) throw new InvalidOperationException("cursor query changed");
             if (Text(args, "backend", capture.Window.Backend) != capture.Window.Backend) throw new InvalidOperationException("cursor backend changed");
+            if (matchLimit > 0 && matchLimit != capture.MatchLimit) throw new InvalidOperationException("cursor query maxMatches changed");
             SnapshotCursors.Remove(previous);
         } else {
             string backend = Text(args, "backend", "uia");
@@ -207,7 +220,7 @@ internal static partial class SemanticWorker
                 DropSnapshot(oldest);
             }
             capture = new SnapshotCapture { Window = window, Root = root, Owner = owner, Signature = Text(args, "signature"),
-                Scope = Text(args, "scope", "subtree"), Depth = depth, Version = Thread.VolatileRead(ref window.SnapshotVersion), StructureVersion = window.Version };
+                Scope = Text(args, "scope", "subtree"), Depth = depth, MatchLimit = matchLimit, Version = Thread.VolatileRead(ref window.SnapshotVersion), StructureVersion = window.Version };
             if (capture.Scope != "children" && capture.Scope != "subtree") throw new InvalidOperationException("scope invalid");
             if (capture.Scope == "children") capture.Depth = 1;
             if (args.ContainsKey("query")) capture.Query = (Dictionary<string, object>)args["query"];
@@ -256,6 +269,13 @@ internal static partial class SemanticWorker
                         capture.CheckIndex++; validated++;
                     }
                     frame.Entered = true; spent++;
+                    if (capture.Stage == "collecting" && capture.MatchLimit > 0 && capture.Rows.Count >= capture.MatchLimit) {
+                        // 只封存已覆盖前缀：先复读全部命中与未命中项，不再导航未搜索的尾部。
+                        capture.Reason = "match_limit"; capture.PrefixOnly = true; FinishSnapshotCollection(capture); continue;
+                    }
+                    if (capture.Stage == "validating" && capture.PrefixOnly && capture.CheckIndex == capture.Evidence.Count) {
+                        SealSnapshot(capture); break;
+                    }
                 }
                 if (frame.Depth >= capture.Depth) { capture.Stack.Pop(); continue; }
                 var next = NextChild(frame, capture.Query == null);

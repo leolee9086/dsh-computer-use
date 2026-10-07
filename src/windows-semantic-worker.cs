@@ -574,7 +574,9 @@ internal static partial class SemanticWorker
                 string owner = Text(args, "owner"); if (owner.Length == 0) throw new InvalidOperationException("session owner required");
                 string consistency = Text(args, "consistency", "snapshot");
                 if (consistency != "snapshot" && consistency != "live") throw new InvalidOperationException("consistency must be snapshot or live");
-                object result = Text(args, "kind") == "acquire" ? (consistency == "snapshot" ? AcquireSnapshot(args, owner) : Acquire(args, owner)) : Act(args, owner);
+                bool acquiring = Text(args, "kind") == "acquire";
+                if (acquiring && SnapshotMatchLimit(args) > 0 && consistency != "snapshot") throw new InvalidOperationException("query maxMatches requires snapshot consistency");
+                object result = acquiring ? (consistency == "snapshot" ? AcquireSnapshot(args, owner) : Acquire(args, owner)) : Act(args, owner);
                 Console.WriteLine(Json.Serialize(new Dictionary<string, object> { { "id", id }, { "result", result }, { "execution_state", ActionStarted ? "completed" : "not_started" } }));
             } catch (Exception error) {
                 var response = new Dictionary<string, object> { { "id", id }, { "error", error.Message }, { "execution_state", ActionStarted ? "unknown" : "not_started" } };

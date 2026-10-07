@@ -548,6 +548,13 @@ export function apply(ctx, rawConfig) {
       if (screenshotId !== previous.screenshotId) throw new Error('cursor screenshot binding changed');
       query ??= previous.query;
     }
+    // 匹配上限属于整个已验证结果，不是单页输出预算；续页继承且不能改绑。
+    const matchLimit = args.max_matches === undefined ? (cursor === undefined ? undefined : previous.query?.maxMatches) : args.max_matches;
+    if (matchLimit !== undefined) {
+      if (!Number.isInteger(matchLimit) || matchLimit < 1 || matchLimit > 20000) throw new Error('max_matches must be 1..20000');
+      if (query === undefined || provider.capabilities.semanticSnapshots !== true || options.consistency !== 'snapshot') throw new Error('max_matches requires a native query with snapshot consistency');
+      query = { ...query, maxMatches: matchLimit };
+    }
     const signature = cursor === undefined ? JSON.stringify({ backend, root: root?.element_id, query, scope: options.scope ?? 'subtree', depth: options.maxDepth, consistency: options.consistency }) : previous.signature;
     if (cursor !== undefined && query !== undefined && JSON.stringify(query) !== JSON.stringify(previous.query)) throw new Error('cursor query changed; start a new query');
     const tree = await provider.accessibilitySnapshot(focus?.handle, exec.signal, { ...options, backend, owner: state.owner, root, cursor,
@@ -1142,7 +1149,7 @@ export function apply(ctx, rawConfig) {
 
   registerTool(ctx.tools, textTool(
     'computer_find',
-    'Find native elements by task-supplied or observed name, role or automation_id. source:snapshot filters a cached page; source:native queries a window or observed subtree without first capturing its whole tree. Native results register a snapshot_id for read/action. Partial coverage and next_cursor describe unsearched portions.',
+    'Find native elements by task-supplied or observed name, role or automation_id. source:snapshot filters a cached page; source:native queries a window or observed subtree and registers a snapshot_id for read/action. max_matches can freeze a validated prefix for a native snapshot query. Partial coverage reports unsearched source scope; next_cursor continues acquisition or frozen output pages.',
     {
       type: 'object', additionalProperties: false,
       properties: {
@@ -1155,11 +1162,13 @@ export function apply(ctx, rawConfig) {
         automation_id: { type: 'string' },
         match: { type: 'string', enum: ['exact', 'contains'] },
         include_offscreen: { type: 'boolean' },
+        max_matches: { type: 'integer', minimum: 1, maximum: 20000, description: 'Native snapshot queries only: stop after this many matches, validate the covered prefix and freeze it. The remaining source scope stays partial; this is separate from output page size.' },
       },
     },
     async (rawArgs, exec) => {
       const args = object(rawArgs);
       const source = enumValue(args, 'source', ['snapshot', 'native'], 'snapshot');
+      if (args.max_matches !== undefined && source !== 'native') throw new Error('max_matches requires source:native with snapshot consistency');
       // 续查询可省略既有条件；如果提供任何条件则完整校验，禁止静默改绑。
       const selectors = ['name', 'role', 'automation_id', 'match', 'include_offscreen'];
       const query = source === 'native' && args.cursor && selectors.every((key) => args[key] === undefined) ? undefined : queryArgs(args);

@@ -398,6 +398,22 @@ test('frozen continuations preserve result identity and cannot restore consumed 
   assert.equal(calls.length, 1, 'reading archived pages cannot grant new action permission');
 });
 
+test('match limits require a native snapshot query before any provider acquisition', async () => {
+  const { ctx, tools, computer, accessibilityHandles } = toolContext();
+  computer.capabilities.semanticPaging = true;
+  applyTools(ctx, { observeApproval: 'allow', controlApproval: 'allow' });
+  const exec = { agent: { session: {}, options: {} } };
+  const find = args => toolByName(tools, 'computer_find').execute(args, exec);
+  await assert.rejects(find({ name: 'Save', max_matches: 1 }), /requires source:native/);
+  await assert.rejects(find({ source: 'native', name: 'Save', max_matches: 1 }), /requires a native query with snapshot consistency/);
+  computer.capabilities.semanticSnapshots = true;
+  await assert.rejects(find({ source: 'native', name: 'Save', consistency: 'live', max_matches: 1 }), /requires a native query with snapshot consistency/);
+  for (const max_matches of [0, 20001, 1.5, '3', null]) {
+    await assert.rejects(find({ source: 'native', name: 'Save', max_matches }), /max_matches must be 1\.\.20000/);
+  }
+  assert.equal(accessibilityHandles.length, 0);
+});
+
 test('semantic observations are isolated across agents and mismatched window/image is rejected', async () => {
   const { ctx, tools } = toolContext();
   applyTools(ctx, { observeApproval: 'allow', controlApproval: 'allow' });
