@@ -1,6 +1,37 @@
-# Capability Evidence — 0.5.9
+# Capability Evidence — 0.5.10
 
 ## Current validation — 2026-10-08
+
+0.5.10 extends the complete screen-resolution scan with explicit RGB comparison, alpha exclusion and one nearest-neighbor template ratio. Gray remains the default. An RGB pixel matches only when all three channels satisfy tolerance; the threshold denominator is the number of participating pixels. Alpha mode includes pixels whose alpha is >= the requested cutoff, without background compositing or alpha weighting. The same scanning kernel handles all modes, with the existing coverage, fixed-anchor clustering and partial-click refusal rules.
+
+The actual Electron 44.0.0 / Node 24.18.1 / ABI149 acceptance uses the real Cordis ToolRuntime, production WindowsComputer, official local subprocess service and an ordinary 600×360 WinForms pixel canvas. The fixture draws native pixels, generates PNG inputs and reports actual MouseUp counts/client coordinates. The staged 0.5.10 executable SHA-256 is `3eb899748d201668c6f1f2e071c1325220b704ef5a48678a5c4389e54bb7274a`, identical to the tested build and its temporary medium-integrity copy. All image cases use threshold 1 / tolerance 0:
+
+| Task | Observed result |
+| --- | --- |
+| Existing gray coverage tasks | Two targets and crowded distractors both report two clusters across all 194,449 positions; final-position match and complete no-match remain correct; partial zero/one matches refuse clicks |
+| Same-luma color distractor | Gray reports two clusters and refuses the click; RGB reports one exact target, then dispatches one MouseUp at client (212,172) |
+| RGB prefix with one known target | Partial 92,521/194,449 positions, one cluster; click refused |
+| Explicit downscale | A 48×48 source PNG at template_scale 0.5 becomes 24×24 and finds one target; result reports source/actual dimensions and capture scale 1 separately |
+| Alpha template without mask | Complete scan finds no match and refuses the click |
+| Alpha cutoff 1 / cutoff 128 | Cutoff 1 includes 196 pixels with the half-transparent ring and finds no exact match; cutoff 128 includes 144 opaque pixels and finds one target |
+| Independent alpha screen read | GetPixel compares all 144 included pixels with the PNG and reports zero differences; accepted click produces MouseUp at client (312,112) |
+| Fully transparent / flat visible template | Explicit native errors; hidden transparent RGB cannot manufacture participating contrast; no additional MouseUp |
+| Native-size template against doubled pixels | Complete zero-match scan at template_scale 1; click refused |
+| Explicit upscale | A 24×24 source at template_scale 2 becomes 48×48, scans all 173,089 positions and finds one target with 2304 participating pixels; MouseUp at client (264,204) uses the transformed center |
+| RGB + alpha 128 + scale 2 prefix | Partial 122,041/173,089 positions, one known cluster and 576 participating pixels; click refused |
+| Complete combined mode | One cluster across all 173,089 positions; exactly one additional MouseUp at client (404,244) |
+
+The complete image run ends with exactly five MouseUp events: the retained gray unique case, RGB, alpha, scale 2 and their combined mode. Each control uses a freshly listed tool window ID; subsequent application state and another list verify the result. Its completion marker was emitted after cleanup. Earlier full attempts stopped on an unexpected alpha no-match and an extra MouseUp respectively; the available evidence does not establish their causes. An isolated alpha probe verified the 144 screen pixels before the final complete run passed. These runs did not change the production algorithm, relax the expected click counts or replay failed actions automatically.
+
+Twenty-two Rust tests pass: fourteen common matching-core tests, five template preparation tests and the three existing input tests. New coverage includes per-channel RGB tolerance, masked threshold boundaries, an independent masked RGB brute-force oracle, partial/timeout results, same-luma structure, inclusive alpha cutoffs, hidden-only contrast refusal, nearest resizing and zero/resource/invalid-option errors. Twelve focused JS tests pass for requested-mode confirmation, source/transformed geometry, participating counts, legacy helper refusal, position budgets and complete-only click centers.
+
+The staged executable also passed the actual Electron native expansion and bridge regressions, with both completion markers after cleanup. Native checks cover target PrintWindow pixels under full occlusion with foreground preserved, Panel/Button messages and measured activation, stale child PID refusal, resize, modifier selection/Unicode, normal key/mouse release, stop-and-release on focus change, and minimized-target discovery/restoration. The existing bounded reacquisition handled one explicitly not_started read-only snapshot change. Bridge checks confirm electron-edge-js, its compiler companion assembly, Narrator status and twelve concurrent calls. Narrator was not running; status does not claim observed speech or virtual-cursor movement.
+
+The protocol confirms `colorMode/maskMode/alphaMin/templateScale`, source and transformed dimensions, `resizeFilter:nearest` and `activePixelCount`; a legacy helper cannot silently ignore a requested mode. Source and transformed templates are each limited to 1,048,576 pixels. Nearest resize uses one finite ratio 0.1–4 and positive rounding with .5 up; zero dimensions, empty masks and participating contrast below 3 are refused. Retained half-transparent pixels compare PNG color directly, which can differ from their screen-composited color. No automatic multi-scale search or application-object identity is provided. Capture scale 1 means no screen downsampling. Partial coverage still cannot prove absence or uniqueness, and screen/window changes between search and input still require application-result verification.
+
+Reproduce with `pnpm run smoke:images "C:\path\to\DeepSeek Harness.exe"`; optional final arguments `image`, `native`, `bridge` select relevant modules. `pnpm pack --pack-destination .local` enforces syntax, Node/ToolRuntime tests and executable/source-manifest consistency. The semantic twelve-module suite was delivered at 0.5.8; this stage did not change its C# worker. OCR/pixel, standard Win32 content adapters and further menu/application tasks remain under the broader matrix. The research documents retain their frozen baseline; this controlled pixel acceptance does not establish general application task success, installation or installed-package parity.
+
+## Historical 0.5.9 validation — 2026-10-08
 
 0.5.9 repairs image candidate counts that could not establish complete search coverage. Production now evaluates every legal original-resolution top-left position, retaining only sound per-position early rejection. Grayscale tolerance and the fraction-of-matched-pixels threshold remain the scoring rule. Threshold decisions use the same division as final scoring, including exact 0.9/0.95 boundaries.
 

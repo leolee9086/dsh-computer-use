@@ -456,14 +456,15 @@ export class WindowsComputer {
     // 模板按路径读：模型给不了 base64，只能给路径 —— 由 computer_screenshot 的 save_to 落下来。
     const template = await readFile(request.templatePath);
     const options = imageSearchOptions({ threshold: request.threshold, tolerance: request.tolerance,
-      timeout_ms: request.budgetMs, max_positions: request.maxPositions });
+      color_mode: request.colorMode, mask_mode: request.maskMode, alpha_min: request.alphaMin,
+      template_scale: request.templateScale, timeout_ms: request.budgetMs, max_positions: request.maxPositions });
     const payload = { templatePng: template.toString('base64'), ...options };
     if (request.displayId !== undefined && request.displayId !== null) payload.displayId = request.displayId;
     if (request.region !== undefined && request.region !== null) payload.region = request.region;
     if (request.focus !== undefined && request.focus !== null) payload.focus = request.focus;
     // 给启动/序列化留五秒，系统抓屏卡住时仍由官方 ManagedRunner 的总截止终止进程。
     const result = await runNativeHelper(this.runner, helperPath, ['find-image'], payload, signal, undefined, options.budgetMs + 5000);
-    return validateImageResult(result, options.threshold);
+    return validateImageResult(result, options);
   }
 
   /**

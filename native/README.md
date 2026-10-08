@@ -13,7 +13,7 @@ Windows 捕获、输入与窗口控制后端，版本 0.5.0。单文件 Rust exe
 | `focus-window` | `{id,processId,title}` | 身份/前台确认后 `{ok:true}`，最小化目标先恢复 |
 | `action` | `{action,focus?}` | `{ok:true}`；错误前可能已有输入副作用 |
 | `screenshot --out <path>` | 下述捕获字段 | `path/width/height/sourceBounds/captureMode/bytes/displayId?` |
-| `find-image` | `templatePng/threshold/tolerance/budgetMs/maxPositions/region?/focus?` | `found/status/coverage/visitedPositions/totalPositions/stopReason?/matchCount/matches/…` |
+| `find-image` | `templatePng/threshold/tolerance/colorMode/maskMode/alphaMin/templateScale/budgetMs/maxPositions/region?/focus?` | `found/status/coverage/visitedPositions/totalPositions/stopReason?/matchCount/matches/…` |
 | `child-windows` | `{window,maxNodes}` | 子 HWND `windows` 与 `truncated` |
 | `window-message` | `{window,child,action}` | `delivered/applicationResultVerified/foregroundChanged` |
 | `manage-window` | `{window,action}` | 操作结果；关闭为 `posted:true,applicationResultVerified:false` |
@@ -36,17 +36,21 @@ Windows 捕获、输入与窗口控制后端，版本 0.5.0。单文件 Rust exe
 
 GDI 桌面捕获使用 SRCCOPY；此前特定 GPU/DWM 环境下 CAPTUREBLT 产出全黑，因此未开启。读取位图前将其从 DC 移出；GetDIBits 使用有效的兼容 DC。调试设置 `DSH_SCREEN_DEBUG=1`，耗时与像素诊断写 stderr，不污染 stdout JSON。
 
-## 完整覆盖的灰度模板搜索
+## 完整覆盖的模板搜索
 
-`find-image` 请求的 `templatePng` 是 base64 PNG。`threshold` 默认 0.9，是灰度亮度容差内像素比例；`tolerance` 为整数 0–255，默认 12。模板先转 Rec.601 灰度，标准差低于 3 拒绝，最大 1,048,576 像素。当前没有 RGB 色相比较、透明度掩码或模板缩放搜索；旧降采样算法造成的 16×16 最小模板限制已经移除。
+`find-image` 请求的 `templatePng` 是 base64 PNG。`threshold` 默认 0.9，是容差内参与像素的比例；`tolerance` 为整数 0–255，默认 12。`colorMode` 接受 `gray`（默认，Rec.601 整数灰度）或 `rgb`；RGB 的三个通道都在容差内才算该像素匹配。旧降采样算法造成的 16×16 最小模板限制已经移除。
 
-所有合法左上角按行、步长一像素扫描，区分度排列只改变单位置的比较顺序。超过阈值允许的不匹配数时才提前淘汰该位置；阈值预算使用最终评分的相同除法判据，避免 0.9/0.95 浮点边界误拒。没有 top-8 候选排除未搜索区域。
+`maskMode` 接受 `none`（默认，忽略 alpha、比较全部像素）或 `alpha`。`alphaMin` 为整数 1–255、默认 1，alpha 模式只纳入透明度 >= 此值的像素，评分分母使用实际参与数量。不作背景合成或 alpha 加权；半透明像素保留 PNG 原色，已在屏幕合成的颜色可能不同。
+
+`templateScale` 是单个有限比例 0.1–4、默认 1。先用最近邻缩放，再计算遮罩和参与对比度；正尺寸 round（.5 向上）。不自动尝试多个尺度，透明像素隐藏颜色不混入有效像素。零尺寸、源或变换后超过 1,048,576 像素、全排除遮罩均拒绝。只统计参与像素，灰度标准差低于 3，或 RGB 各通道标准差都低于 3 时拒绝。
+
+所有合法左上角按行、步长一像素扫描，灰度/RGB/alpha 共用覆盖、聚类和预算核心。区分度排列只改变单位置的比较顺序；超过阈值允许的不匹配数时才提前淘汰该位置。阈值预算使用最终评分的相同除法判据，避免 0.9/0.95 浮点边界误拒。没有 top-8 候选排除未搜索区域。
 
 `budgetMs` 为 1–120000，默认 5000；`maxPositions` 为 1–100000000，默认 20000000。预算从模板解码开始，包括准备和抓屏；扫描本身定期检查截止，单个大模板比较也可以中断。Win32 系统调用阻塞由宿主 managed subprocess 的额外五秒启动/输出余量截止终止并报错，不伪造成功的部分扫描。
 
-返回 `visitedPositions/totalPositions`、`coverage:"complete"` 或 `"partial"`。只有完整覆盖的零匹配报告 `status:"not_found"`；时间、位置或 100000 聚类上限耗尽报告 `status:"incomplete"` 及 `stopReason:"time_budget"/"position_limit"/"cluster_limit"`。`found` 只表示已知匹配，部分覆盖的数量是完整计数的下界。
+返回请求模式确认 `colorMode/maskMode/alphaMin/templateScale`、`sourceTemplateWidth/Height`、实际 `templateWidth/Height`、`resizeFilter:"nearest"`、`activePixelCount`；原有 `scale:1` 表示抓屏未降采样，与模板比例分别报告。覆盖位置、聚类半径和点击中心使用实际模板尺寸。返回 `visitedPositions/totalPositions`、`coverage:"complete"` 或 `"partial"`。只有完整覆盖的零匹配报告 `status:"not_found"`；时间、位置或 100000 聚类上限耗尽报告 `status:"incomplete"` 及 `stopReason:"time_budget"/"position_limit"/"cluster_limit"`。`found` 只表示已知匹配，部分覆盖的数量是完整计数的下界。
 
-聚类规则 `row_major_fixed_anchor_half_template`：按行首匹配固定锚点，横纵距离分别不超过半模板宽高时归入最早相邻锚点。空间索引限制邻域查找，锚点不随最高分展示点移动，前缀计数不会在继续扫描时下降。`matchCount` 不受八处展示上限影响，`matches` 只输出最高分八处；`scale` 始终为 1。视觉聚类不等于业务身份，相邻不同对象仍可能合并。宿主点击必须校验完整协议、完整覆盖且仅一聚类；找图与输入间的界面变化不具有事务保证。
+聚类规则 `row_major_fixed_anchor_half_template`：按行首匹配固定锚点，横纵距离分别不超过半模板宽高时归入最早相邻锚点。空间索引限制邻域查找，锚点不随最高分展示点移动，前缀计数不会在继续扫描时下降。`matchCount` 不受八处展示上限影响，`matches` 只输出最高分八处。视觉聚类不等于业务身份，相邻不同对象仍可能合并。宿主点击必须校验完整协议、请求模式与变换、完整覆盖且仅一聚类；旧 helper 缺少确认字段直接拒绝。找图与输入间的界面变化不具有事务保证。
 
 ## 有界输入
 

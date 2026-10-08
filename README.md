@@ -1,6 +1,6 @@
 # dsh-computer-use
 
-独立的 Cordis bundle，为 DeepSeek Harness 提供视觉、原生无障碍和 Windows 讲述人操作路径。0.5.9 注册 **21 个 `computer_*` 工具**；无障碍观测、层级定位、条件等待、阅读和语义动作可以独立使用，文本模型也能操作原生应用。
+独立的 Cordis bundle，为 DeepSeek Harness 提供视觉、原生无障碍和 Windows 讲述人操作路径。0.5.10 注册 **21 个 `computer_*` 工具**；无障碍观测、层级定位、条件等待、阅读和语义动作可以独立使用，文本模型也能操作原生应用。
 
 Windows 是经过本机运行时验证的主要后端。macOS AX、Linux AT-SPI 已实现并做契约测试，尚无这两个系统的原生运行时验收。接口覆盖与实测范围见 [EVIDENCE.md](EVIDENCE.md)；对标的官方接口见 [能力矩阵](references/CAPABILITY-MATRIX.md)。目前没有任务成功率基准，也没有 SOTA 等效结论。
 
@@ -115,17 +115,28 @@ MSAA 使用 `AccessibleObjectFromWindow` / `AccessibleChildren`，提供传统�
 
 文件模式要求 `save_to`，保存 PNG 并返回路径、尺寸、字节数、时间、哈希与捕获边界；不要求图像路由或附件服务。它不注册可供坐标输入使用的图像证据。截图卡显示图像附件或文件模式的文字信息。模板匹配接受有效的 PNG 路径。
 
-`computer_find_image` 在原分辨率逐位置比较灰度亮度。`threshold` 是容差内像素比例，默认 0.9；`tolerance` 是整数 0–255，默认 12。灰度标准差低于 3 的模板拒绝；模板最多 1,048,576 像素。没有降采样候选筛选，不再有旧算法的 16×16 隐式最小尺寸。当前不比较 RGB 色相、透明度掩码，也不搜索模板缩放比例。
+`computer_find_image` 在屏幕原分辨率逐位置比较像素。`threshold` 是容差内**参与像素**比例，默认 0.9；`tolerance` 是整数 0–255，默认 12。默认沿用 Rec.601 整数灰度；RGB 模式要求一个像素的三个通道都在容差内，才算该像素匹配。没有降采样候选筛选，也没有 16×16 隐式最小尺寸。
+
+| 参数 | 范围与默认 | 行为 |
+| --- | --- | --- |
+| `color_mode` | `gray` / `rgb`，默认 `gray` | 灰度亮度或保留 RGB 颜色差异 |
+| `mask_mode` | `none` / `alpha`，默认 `none` | none 比较全部像素并忽略 PNG alpha；alpha 只纳入达到 cutoff 的像素 |
+| `alpha_min` | 整数 1–255，默认 1 | alpha 模式包含透明度 **>=** 此值的像素；不合成背景、不作透明度加权 |
+| `template_scale` | 单个比例 0.1–4，默认 1 | 最近邻缩放；正尺寸四舍五入（.5 向上），不自动尝试多个尺度 |
+
+先缩放模板，再计算遮罩和参与像素；透明像素的隐藏 RGB 不混入相邻有效像素。全排除、缩放成零尺寸、源或变换后超过 1,048,576 像素都明确拒绝。对比度仅统计参与像素：灰度标准差低于 3，或 RGB 各通道标准差都低于 3 时拒绝。保留的半透明像素仍比较 PNG 中的颜色；若屏幕已经把它与背景合成，应选择 cutoff 和容差或使用实际渲染截图作为模板。
+
+结果确认请求的 `colorMode/maskMode/alphaMin/templateScale`，返回 `sourceTemplateWidth/Height`、实际 `templateWidth/Height`、`resizeFilter:"nearest"` 和 `activePixelCount`。`scale:1` 表示抓屏未降采样，与模板比例分别报告。覆盖位置、聚类范围和点击中心都使用实际模板尺寸。
 
 ```json
-{"template":"C:\\captures\\button.png","window_id":"<已观测窗口ID>","threshold":0.95,"tolerance":12,"timeout_ms":5000,"max_positions":20000000}
+{"template":"C:\\captures\\button.png","window_id":"<已观测窗口ID>","color_mode":"rgb","mask_mode":"alpha","alpha_min":128,"template_scale":1,"threshold":0.95,"tolerance":12,"timeout_ms":5000,"max_positions":20000000}
 ```
 
 匹配按行扫描全部合法左上角。每个视觉聚类以遇到的首个匹配为固定锚点：横向距离不超过半模板宽、纵向不超过半模板高时归入最早的相邻锚点；锚点不移动，展示位置可更新为更高分匹配。`clusterRule:"row_major_fixed_anchor_half_template"` 明确该规则。它表达视觉位置，邻近的不同业务对象仍可能合并，不能凭此识别业务身份。`matchCount` 统计全部已知聚类；`matches` 只展示最高分的至多八处，展示上限不截断计数。
 
 `coverage:"complete"` 表示请求区域中的所有合法位置均已判定，零匹配才报告 `status:"not_found"`。`timeout_ms` 默认 5000、范围 1–120000；`max_positions` 默认 20000000、范围 1–100000000。时间、位置或 100000 聚类资源上限耗尽时返回 `coverage:"partial"` / `status:"incomplete"`、`stopReason` 和 `visitedPositions/totalPositions`。此时 `found` 仅表示已有匹配，`matchCount` 是完整计数的下界，不能断言缺席或唯一。原生预算从模板解码开始，宿主另给启动/序列化五秒余量；阻塞的系统调用由宿主截止终止并报错。
 
-`computer_click_image` 使用同样参数、默认阈值 0.95，要求完整覆盖且只有一个视觉聚类；部分覆盖找到零处或一处都不点击。旧 helper 缺少覆盖字段时直接报错。指名窗口的找图会提窗，原生失败也会使受影响的旧观测失效。找图和随后输入使用独立调用，屏幕内容或窗口在间隙变化仍可能影响点击；实际输入后应验证应用结果。
+`computer_click_image` 使用同样参数、默认阈值 0.95，要求完整覆盖且只有一个视觉聚类；部分覆盖找到零处或一处都不点击。旧 helper 缺少覆盖或模式/变换确认字段时直接报错。指名窗口的找图会提窗，原生失败也会使受影响的旧观测失效。找图和随后输入使用独立调用，屏幕内容或窗口在间隙变化仍可能影响点击；实际输入后应验证应用结果。
 
 Windows 输入序列最多 256 步，显式等待/按住总和最多 10 秒；全文本最多 100000 UTF-16 单元。整条序列先校验再执行，首错停止。正常结束及处理到的错误释放该序列取得的按键/鼠标按钮；不会取得或释放调用前已由外部按住的输入。绑定窗口的序列每步检查身份及前台状态。强制结束进程无法保证析构清理执行，见 [SECURITY.md](SECURITY.md)。
 

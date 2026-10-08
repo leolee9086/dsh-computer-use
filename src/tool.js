@@ -755,8 +755,8 @@ export function apply(ctx, rawConfig) {
     'computer_find_image',
     'Find a small image (a template PNG) on screen and report where it is. '
     + 'The template is a valid PNG file path. '
-    + 'Matching compares original-resolution grayscale pixels, including surfaces with no accessibility tree '
-    + '(canvas, games, remote desktops). RGB hue, transparency masks and template scaling are not supported. '
+    + 'Matching compares screen-resolution pixels, including surfaces with no accessibility tree '
+    + '(canvas, games, remote desktops). Default gray; choose rgb for color, alpha for a transparent exclusion mask, or one explicit nearest-neighbor template_scale. '
     + 'Only complete coverage can establish absence or uniqueness. Partial coverage has status:incomplete; found only reports known hits. '
     + 'Passing window_id raises that window and searches the bounds it actually has — that moves the foreground, so that form counts as desktop control.',
     {
@@ -799,14 +799,14 @@ export function apply(ctx, rawConfig) {
         // 原生失败也可能已经提窗；不能让旧观测继续驱动动作。
         if (focus !== null) consumeAllObservations(observations, exec, focus, false, true);
       }
-      return describeJson(validateImageResult(result, options.threshold));
+      return describeJson(validateImageResult(result, options));
     },
   ));
 
   registerTool(ctx.tools, textTool(
     'computer_click_image',
     'Find a template image inside one window and click it — but only when it is found in exactly one place. '
-    + 'This requires complete original-resolution grayscale search coverage and exactly one visual cluster. '
+    + 'This requires complete screen-resolution search coverage in the requested color/mask/template-scale mode and exactly one visual cluster. '
     + 'Incomplete search, multiple clusters or no match sends no click and reports the coverage and known candidates. '
     + 'Raising the window changes the foreground, so this counts as desktop control.',
     {
@@ -816,7 +816,7 @@ export function apply(ctx, rawConfig) {
         template: { type: 'string', description: 'Path to a PNG template, e.g. written earlier with computer_screenshot save_to.' },
         window_id: { type: 'string', description: 'Required: a session window_id from computer_windows within its lifetime. The window is raised and the search is confined to its bounds, so uniqueness is judged inside that window rather than across the whole desktop.' },
         ...IMAGE_SEARCH_OPTIONS,
-        threshold: { ...IMAGE_SEARCH_OPTIONS.threshold, description: 'Minimum grayscale similarity within (0,1], default 0.95. Complete coverage and exactly one visual cluster are also required.' },
+        threshold: { ...IMAGE_SEARCH_OPTIONS.threshold, description: 'Minimum fraction of participating pixels within tolerance, within (0,1], default 0.95. Complete coverage and exactly one visual cluster are also required.' },
         button: { type: 'string', enum: ['left', 'middle', 'right'] },
         clicks: { type: 'number', enum: [1, 2] },
       },
@@ -843,7 +843,7 @@ export function apply(ctx, rawConfig) {
         // 提窗改变了前台，即使 helper 失败也不能复用此前截图与语义快照。
         consumeAllObservations(observations, exec, focus, false, true);
       }
-      const point = imageClickPoint(result, threshold);
+      const point = imageClickPoint(result, options);
       // 只有完整覆盖的一处视觉聚类可以进入输入派发。
       if (point === null) {
         const spots = Array.isArray(result.matches) && result.matches.length > 0

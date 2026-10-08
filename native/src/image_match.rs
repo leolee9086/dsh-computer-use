@@ -1,4 +1,4 @@
-//! 原分辨率、有覆盖证明的灰度模板匹配。这里不调用 Win32，测试直接给像素数组。
+//! 有覆盖证明的像素模板匹配。RGB、灰度和显式遮罩共用同一个扫描核。
 //! 所有合法左上角按行扫描；提前淘汰只发生在某个位置已不可能达到阈值时。
 use std::collections::HashMap;
 
@@ -7,10 +7,19 @@ pub const MAX_CLUSTERS: usize = 100_000;
 pub const MAX_TEMPLATE_PIXELS: usize = 1_048_576;
 
 #[derive(Debug, Clone, Copy)]
-pub struct GrayImage<'a> {
-    pub pixels: &'a [u8],
+pub struct PixelImage<'a, const CHANNELS: usize> {
+    pub pixels: &'a [[u8; CHANNELS]],
     pub width: u32,
     pub height: u32,
+}
+
+// 旧灰度回归保留原来的输入形式，通过无拷贝视图进入同一个生产扫描核。
+#[cfg(test)]
+#[derive(Debug, Clone, Copy)]
+struct GrayImage<'a> {
+    pixels: &'a [u8],
+    width: u32,
+    height: u32,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -41,7 +50,10 @@ struct Cluster {
     best: Spot,
 }
 
-fn pixel_count(image: GrayImage<'_>) -> Result<usize, String> {
+fn pixel_count<const CHANNELS: usize>(image: PixelImage<'_, CHANNELS>) -> Result<usize, String> {
+    if CHANNELS != 1 && CHANNELS != 3 {
+        return Err("只支持单通道灰度或三通道 RGB".into());
+    }
     let count = (image.width as usize)
         .checked_mul(image.height as usize)
         .ok_or("图像像素数溢出")?;
@@ -66,39 +78,62 @@ fn allowed_mismatches(total: usize, threshold: f64) -> usize {
     total - low
 }
 
-/// 按离模板均值的距离排像素，先比较更有区分度的部分。
-/// 只排序 256 个灰度值，再计数排列像素，避免百万像素的比较排序阻塞预算检查。
-fn comparison_order(
-    template: GrayImage<'_>,
+/// 按有效像素离各通道均值的平均距离计数排列；只排序 256 个桶。
+/// 顺序只影响提前淘汰的速度，最终仍比较全部参与像素，不作为候选过滤条件。
+fn comparison_order<const CHANNELS: usize>(
+    template: PixelImage<'_, CHANNELS>,
+    mask: Option<&[bool]>,
+    participating: usize,
     screen_width: usize,
     expired: &mut impl FnMut() -> bool,
-) -> Option<Vec<(usize, u8)>> {
-    let mut counts = [0usize; 256];
-    let mut sum = 0u64;
-    for (index, &value) in template.pixels.iter().enumerate() {
+) -> Option<Vec<(usize, [u8; CHANNELS])>> {
+    let included = |index: usize| mask.is_none_or(|values| values[index]);
+    let mut sums = [0u64; CHANNELS];
+    for (index, value) in template.pixels.iter().enumerate() {
         if index % 4096 == 0 && expired() {
             return None;
         }
-        counts[value as usize] += 1;
-        sum += u64::from(value);
+        if included(index) {
+            for channel in 0..CHANNELS {
+                sums[channel] += u64::from(value[channel]);
+            }
+        }
     }
-    let count = template.pixels.len() as u64;
-    let mut values: Vec<usize> = (0..256).collect();
-    values.sort_by_key(|&value| std::cmp::Reverse((value as u64 * count).abs_diff(sum)));
+    let count = participating as u64;
+    let bucket = |value: &[u8; CHANNELS]| -> usize {
+        (value
+            .iter()
+            .zip(sums)
+            .map(|(&v, sum)| (u64::from(v) * count).abs_diff(sum))
+            .sum::<u64>()
+            / (count * CHANNELS as u64)) as usize
+    };
+    let mut counts = [0usize; 256];
+    for (index, value) in template.pixels.iter().enumerate() {
+        if index % 4096 == 0 && expired() {
+            return None;
+        }
+        if included(index) {
+            counts[bucket(value)] += 1;
+        }
+    }
     let mut offsets = [0usize; 256];
     let mut next = 0;
-    for value in values {
+    for value in (0..256).rev() {
         offsets[value] = next;
         next += counts[value];
     }
-    let mut order = vec![(0usize, 0u8); template.pixels.len()];
+    let mut order = vec![(0usize, [0u8; CHANNELS]); participating];
     let width = template.width as usize;
     for (index, &value) in template.pixels.iter().enumerate() {
         if index % 4096 == 0 && expired() {
             return None;
         }
-        order[offsets[value as usize]] = (index / width * screen_width + index % width, value);
-        offsets[value as usize] += 1;
+        if included(index) {
+            let key = bucket(&value);
+            order[offsets[key]] = (index / width * screen_width + index % width, value);
+            offsets[key] += 1;
+        }
     }
     Some(order)
 }
@@ -130,9 +165,10 @@ fn result(
     }
 }
 
-pub fn scan(
-    screen: GrayImage<'_>,
-    template: GrayImage<'_>,
+pub fn scan_pixels<const CHANNELS: usize>(
+    screen: PixelImage<'_, CHANNELS>,
+    template: PixelImage<'_, CHANNELS>,
+    mask: Option<&[bool]>,
     tolerance: u8,
     threshold: f64,
     limits: Limits,
@@ -142,6 +178,15 @@ pub fn scan(
     let template_pixels = pixel_count(template)?;
     if template_pixels > MAX_TEMPLATE_PIXELS {
         return Err(format!("模板不得超过 {MAX_TEMPLATE_PIXELS} 像素"));
+    }
+    if mask.is_some_and(|values| values.len() != template_pixels) {
+        return Err("遮罩尺寸与模板不一致".into());
+    }
+    let participating = mask.map_or(template_pixels, |values| {
+        values.iter().filter(|&&v| v).count()
+    });
+    if participating == 0 {
+        return Err("模板遮罩没有参与像素".into());
     }
     if !threshold.is_finite() || threshold <= 0.0 || threshold > 1.0 {
         return Err("threshold 必须在 (0, 1] 内".into());
@@ -155,10 +200,16 @@ pub fn scan(
     let columns = screen.width - template.width + 1;
     let rows = screen.height - template.height + 1;
     let total_positions = u64::from(columns) * u64::from(rows);
-    let Some(order) = comparison_order(template, screen.width as usize, &mut expired) else {
+    let Some(order) = comparison_order(
+        template,
+        mask,
+        participating,
+        screen.width as usize,
+        &mut expired,
+    ) else {
         return Ok(result(&[], 0, total_positions, Some("time_budget")));
     };
-    let allowed = allowed_mismatches(template_pixels, threshold);
+    let allowed = allowed_mismatches(participating, threshold);
     let radius_x = template.width / 2;
     let radius_y = template.height / 2;
     let cell_width = radius_x + 1;
@@ -188,7 +239,12 @@ pub fn scan(
                     stop_reason = Some("time_budget");
                     break 'positions;
                 }
-                if screen.pixels[base + offset].abs_diff(value) > tolerance {
+                // RGB 必须每个通道都在容差内才算这一像素匹配；分母仍是像素数。
+                if screen.pixels[base + offset]
+                    .iter()
+                    .zip(value)
+                    .any(|(&actual, expected)| actual.abs_diff(expected) > tolerance)
+                {
                     mismatch += 1;
                     if mismatch > allowed {
                         break;
@@ -199,7 +255,7 @@ pub fn scan(
                 let spot = Spot {
                     x,
                     y,
-                    score: (template_pixels - mismatch) as f64 / template_pixels as f64,
+                    score: (participating - mismatch) as f64 / participating as f64,
                 };
                 let cell_x = x / cell_width;
                 let cell_y = y / cell_height;
@@ -240,6 +296,34 @@ pub fn scan(
         }
     }
     Ok(result(&clusters, visited, total_positions, stop_reason))
+}
+
+#[cfg(test)]
+fn scan(
+    screen: GrayImage<'_>,
+    template: GrayImage<'_>,
+    tolerance: u8,
+    threshold: f64,
+    limits: Limits,
+    expired: impl FnMut() -> bool,
+) -> Result<ScanResult, String> {
+    scan_pixels(
+        PixelImage {
+            pixels: screen.pixels.as_chunks::<1>().0,
+            width: screen.width,
+            height: screen.height,
+        },
+        PixelImage {
+            pixels: template.pixels.as_chunks::<1>().0,
+            width: template.width,
+            height: template.height,
+        },
+        None,
+        tolerance,
+        threshold,
+        limits,
+        expired,
+    )
 }
 
 #[cfg(test)]
@@ -438,6 +522,213 @@ mod tests {
         let oversized = complete(image(&[10, 20], 2), image(&[10, 20, 30], 3), 1.0);
         assert_eq!(oversized.total_positions, 0);
         assert_eq!(oversized.stop_reason, None);
+    }
+
+    fn rgb(pixels: &[[u8; 3]], width: u32) -> PixelImage<'_, 3> {
+        PixelImage {
+            pixels,
+            width,
+            height: pixels.len() as u32 / width,
+        }
+    }
+    fn limits() -> Limits {
+        Limits {
+            max_positions: u64::MAX,
+            max_clusters: MAX_CLUSTERS,
+        }
+    }
+
+    #[test]
+    fn rgb_requires_each_channel_within_tolerance_and_counts_pixels() {
+        let template = [[30, 60, 90], [150, 140, 130]];
+        let screen = [[30, 60, 101], [150, 140, 130]];
+        let exact = scan_pixels(
+            rgb(&screen, 2),
+            rgb(&template, 2),
+            None,
+            10,
+            1.0,
+            limits(),
+            || false,
+        )
+        .unwrap();
+        assert_eq!(exact.match_count, 0);
+        let half = scan_pixels(
+            rgb(&screen, 2),
+            rgb(&template, 2),
+            None,
+            10,
+            0.5,
+            limits(),
+            || false,
+        )
+        .unwrap();
+        assert_eq!(half.matches[0].score, 0.5);
+        assert_eq!(
+            scan_pixels(
+                rgb(&screen, 2),
+                rgb(&template, 2),
+                None,
+                11,
+                1.0,
+                limits(),
+                || false
+            )
+            .unwrap()
+            .match_count,
+            1
+        );
+    }
+
+    #[test]
+    fn mask_ignores_hidden_colors_and_uses_active_threshold_denominator() {
+        let template: Vec<[u8; 3]> = (1..=24).map(|v| [v, v + 30, v + 60]).collect();
+        let mut screen = template.clone();
+        let mask: Vec<bool> = (0..24).map(|i| i < 20).collect();
+        screen[0][1] = 255;
+        screen[20..].fill([255; 3]);
+        let result = scan_pixels(
+            rgb(&screen, 24),
+            rgb(&template, 24),
+            Some(&mask),
+            0,
+            0.95,
+            limits(),
+            || false,
+        )
+        .unwrap();
+        assert_eq!(result.matches[0].score, 0.95);
+        assert_eq!(
+            scan_pixels(
+                rgb(&screen, 24),
+                rgb(&template, 24),
+                Some(&mask),
+                0,
+                0.9500000000001,
+                limits(),
+                || false
+            )
+            .unwrap()
+            .match_count,
+            0
+        );
+        assert!(scan_pixels(
+            rgb(&screen, 24),
+            rgb(&template, 24),
+            Some(&[false; 24]),
+            0,
+            1.0,
+            limits(),
+            || false
+        )
+        .unwrap_err()
+        .contains("没有参与像素"));
+        assert!(scan_pixels(
+            rgb(&screen, 24),
+            rgb(&template, 24),
+            Some(&[true]),
+            0,
+            1.0,
+            limits(),
+            || false
+        )
+        .unwrap_err()
+        .contains("遮罩尺寸"));
+    }
+
+    #[test]
+    fn rgb_masked_scan_agrees_with_independent_brute_force() {
+        let screen: Vec<[u8; 3]> = (0..91)
+            .map(|i| {
+                [
+                    ((i * 37 + i * i * 11) % 256) as u8,
+                    ((i * 19) % 256) as u8,
+                    ((i * 53) % 256) as u8,
+                ]
+            })
+            .collect();
+        let template = [
+            screen[15], screen[16], screen[17], screen[28], screen[29], screen[30],
+        ];
+        let mask = [true, false, true, true, false, true];
+        for threshold in [0.25, 0.5, 0.75, 1.0] {
+            let optimized = scan_pixels(
+                rgb(&screen, 13),
+                rgb(&template, 3),
+                Some(&mask),
+                100,
+                threshold,
+                limits(),
+                || false,
+            )
+            .unwrap();
+            let mut anchors = Vec::new();
+            for y in 0usize..6 {
+                for x in 0usize..11 {
+                    let mut matched = 0;
+                    for i in 0..6 {
+                        if mask[i]
+                            && (0..3).all(|c| {
+                                screen[(y + i / 3) * 13 + x + i % 3][c].abs_diff(template[i][c])
+                                    <= 100
+                            })
+                        {
+                            matched += 1;
+                        }
+                    }
+                    if matched as f64 / 4.0 >= threshold
+                        && !anchors
+                            .iter()
+                            .any(|&(ax, ay)| x.abs_diff(ax) <= 1 && y.abs_diff(ay) <= 1)
+                    {
+                        anchors.push((x, y));
+                    }
+                }
+            }
+            assert_eq!(optimized.match_count, anchors.len());
+            assert_eq!(optimized.visited_positions, 66);
+            assert_eq!(optimized.stop_reason, None);
+        }
+    }
+
+    #[test]
+    fn rgb_masked_prefix_and_timeout_keep_explicit_partial_coverage() {
+        let template = [[10, 20, 30], [80, 90, 100]];
+        let screen = [[10, 20, 30], [255; 3], [0; 3], [10, 20, 30], [255; 3]];
+        let prefix = scan_pixels(
+            rgb(&screen, 5),
+            rgb(&template, 2),
+            Some(&[true, false]),
+            0,
+            1.0,
+            Limits {
+                max_positions: 1,
+                max_clusters: MAX_CLUSTERS,
+            },
+            || false,
+        )
+        .unwrap();
+        assert_eq!(
+            (
+                prefix.match_count,
+                prefix.visited_positions,
+                prefix.total_positions
+            ),
+            (1, 1, 4)
+        );
+        assert_eq!(prefix.stop_reason, Some("position_limit"));
+        let timeout = scan_pixels(
+            rgb(&screen, 5),
+            rgb(&template, 2),
+            Some(&[true, false]),
+            0,
+            1.0,
+            limits(),
+            || true,
+        )
+        .unwrap();
+        assert_eq!(timeout.stop_reason, Some("time_budget"));
+        assert_eq!(timeout.visited_positions, 0);
     }
 
     #[test]

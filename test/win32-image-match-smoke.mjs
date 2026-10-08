@@ -66,16 +66,19 @@ try {
     const current = (await json('computer_windows', { operation: 'list' })).windows.find(window => window.processId === native.processId && window.title === native.title);
     assert.ok(current); return { current, native };
   };
-  const state = async (expected = 0) => {
+  let expectedClicks = 0;
+  const state = async (expected = expectedClicks) => {
     const response = await command('state'); assert.match(response, new RegExp(`;clicks:${expected};`)); return response;
   };
   const base = { template, threshold: 1, tolerance: 0, timeout_ms: 10000 };
-  const find = async (mode, options = {}) => {
+  const find = async (mode, options = {}, sampleName) => {
     assert.equal(await command(mode), `painted:${mode}`);
     const { current, native } = await listed();
     const result = await json('computer_find_image', { ...base, window_id: current.id, ...options });
     const after = await state();
-    samples[`${mode}${options.max_positions ? `-${options.max_positions}` : ''}`] = { surface: 'native pixel window', window_id: current.id, result, after };
+    samples[sampleName ?? `${mode}${options.max_positions ? `-${options.max_positions}` : ''}`] = {
+      surface: 'native pixel window', window_id: current.id, nativeWindow: native, options, result, after,
+    };
     return { result, native };
   };
   const refused = async (options = {}) => {
@@ -83,7 +86,20 @@ try {
     const { current } = await listed();
     const response = await text('computer_click_image', { ...base, window_id: current.id, ...options });
     assert.match(response, /^未点击：/); const after = await state();
-    return { window_id: current.id, response, after };
+    return { window_id: current.id, response, after, freshWindow: (await listed()).current };
+  };
+  const accepted = async (options, clientPoint) => {
+    const { current } = await listed();
+    const response = await text('computer_click_image', { ...base, window_id: current.id, ...options });
+    assert.match(response, /^已点击/); expectedClicks++;
+    const after = await state(); assert.ok(after.endsWith(`;last:${clientPoint.join(',')}`));
+    return { surface: 'native pixel window', window_id: current.id, response, after, freshWindow: (await listed()).current };
+  };
+  const invalid = async (options, message) => {
+    const { current } = await listed();
+    const output = await execute('computer_click_image', { ...base, window_id: current.id, ...options });
+    assert.equal(output.isError, true); assert.match(JSON.stringify(output), message);
+    return { window_id: current.id, output, after: await state(), freshWindow: (await listed()).current };
   };
 
   const two = (await find('two')).result;
@@ -128,17 +144,75 @@ try {
 
   const unique = (await find('unique')).result;
   assert.equal(unique.coverage, 'complete'); assert.equal(unique.matchCount, 1);
-  const { current } = await listed();
-  const clicked = await text('computer_click_image', { ...base, window_id: current.id }); assert.match(clicked, /^已点击/);
-  const after = await state(1); assert.match(after, /;last:212,172$/);
-  samples.unique.click = { window_id: current.id, response: clicked, after };
+  samples.unique.click = await accepted({}, [212, 172]);
+
+  const rgbTemplate = join(directory, 'rgb.png'), alphaTemplate = join(directory, 'alpha.png');
+  const rgbOptions = { template: rgbTemplate, color_mode: 'rgb' };
+  const grayColors = (await find('rgb', { template: rgbTemplate }, 'rgb-as-gray')).result;
+  assert.equal(grayColors.coverage, 'complete'); assert.equal(grayColors.matchCount, 2);
+  samples['rgb-as-gray'].refusal = await refused({ template: rgbTemplate });
+  const color = await find('rgb', rgbOptions, 'rgb-exact');
+  assert.equal(color.result.coverage, 'complete'); assert.equal(color.result.matchCount, 1);
+  assert.equal(color.result.colorMode, 'rgb'); assert.equal(color.result.activePixelCount, 576);
+  assert.deepEqual([color.result.x, color.result.y], [color.native.bounds.x + 200, color.native.bounds.y + 160]);
+  const colorPrefix = 160 * 577 + 200 + 1;
+  const rgbPartial = (await find('rgb', { ...rgbOptions, max_positions: colorPrefix }, 'rgb-partial')).result;
+  assert.equal(rgbPartial.coverage, 'partial'); assert.equal(rgbPartial.matchCount, 1);
+  samples['rgb-partial'].refusal = await refused({ ...rgbOptions, max_positions: colorPrefix });
+  // 48px 源模板显式缩成 24px，同一真实画面证明降尺度也确实生效。
+  const down = (await find('rgb', { template: join(directory, 'scaled-rgb.png'), color_mode: 'rgb', template_scale: 0.5 }, 'rgb-downscaled')).result;
+  assert.equal(down.matchCount, 1); assert.equal(down.coverage, 'complete');
+  assert.deepEqual([down.sourceTemplateWidth, down.templateWidth, down.templateScale, down.scale], [48, 24, 0.5, 1]);
+  samples['rgb-exact'].click = await accepted(rgbOptions, [212, 172]);
+
+  const alphaOptions = { template: alphaTemplate, color_mode: 'rgb', mask_mode: 'alpha', alpha_min: 128 };
+  const unmasked = (await find('alpha', { template: alphaTemplate, color_mode: 'rgb' }, 'alpha-without-mask')).result;
+  assert.equal(unmasked.coverage, 'complete'); assert.equal(unmasked.matchCount, 0);
+  samples['alpha-without-mask'].refusal = await refused({ template: alphaTemplate, color_mode: 'rgb' });
+  const blended = (await find('alpha', { ...alphaOptions, alpha_min: 1 }, 'alpha-cutoff-one')).result;
+  assert.equal(blended.coverage, 'complete'); assert.equal(blended.matchCount, 0); assert.equal(blended.activePixelCount, 196);
+  const alpha = await find('alpha', alphaOptions, 'alpha-exact');
+  samples.alphaPixels = await command('inspect-alpha');
+  assert.equal(alpha.result.coverage, 'complete'); assert.equal(alpha.result.matchCount, 1); assert.equal(alpha.result.activePixelCount, 144);
+  assert.deepEqual([alpha.result.x, alpha.result.y], [alpha.native.bounds.x + 300, alpha.native.bounds.y + 100]);
+  samples['alpha-exact'].click = await accepted(alphaOptions, [312, 112]);
+  samples['transparent-refusal'] = await invalid({ ...alphaOptions, template: join(directory, 'transparent.png') }, /没有参与像素/);
+  samples['flat-visible-refusal'] = await invalid({ ...alphaOptions, template: join(directory, 'flat-alpha.png') }, /几乎是纯色/);
+
+  const wrongSize = (await find('scaled', rgbOptions, 'scaled-at-one')).result;
+  assert.equal(wrongSize.coverage, 'complete'); assert.equal(wrongSize.matchCount, 0);
+  samples['scaled-at-one'].refusal = await refused(rgbOptions);
+  const scaledOptions = { ...rgbOptions, template_scale: 2 };
+  const scaled = await find('scaled', scaledOptions, 'scaled-rgb');
+  assert.equal(scaled.result.coverage, 'complete'); assert.equal(scaled.result.matchCount, 1);
+  assert.deepEqual([scaled.result.sourceTemplateWidth, scaled.result.templateWidth, scaled.result.templateScale, scaled.result.scale], [24, 48, 2, 1]);
+  assert.equal(scaled.result.visitedPositions, 553 * 313); assert.equal(scaled.result.activePixelCount, 2304);
+  assert.deepEqual([scaled.result.x, scaled.result.y], [scaled.native.bounds.x + 240, scaled.native.bounds.y + 180]);
+  samples['scaled-rgb'].click = await accepted(scaledOptions, [264, 204]);
+
+  const combinedOptions = { ...alphaOptions, template_scale: 2 };
+  const combinedPrefix = 220 * 553 + 380 + 1;
+  const combinedPartial = (await find('alpha-scaled', { ...combinedOptions, max_positions: combinedPrefix }, 'alpha-scaled-partial')).result;
+  assert.equal(combinedPartial.coverage, 'partial'); assert.equal(combinedPartial.matchCount, 1); assert.equal(combinedPartial.activePixelCount, 576);
+  samples['alpha-scaled-partial'].refusal = await refused({ ...combinedOptions, max_positions: combinedPrefix });
+  const combined = await find('alpha-scaled', combinedOptions, 'alpha-scaled-exact');
+  assert.equal(combined.result.coverage, 'complete'); assert.equal(combined.result.matchCount, 1); assert.equal(combined.result.activePixelCount, 576);
+  assert.deepEqual([combined.result.x, combined.result.y], [combined.native.bounds.x + 380, combined.native.bounds.y + 220]);
+  samples['alpha-scaled-exact'].click = await accepted(combinedOptions, [404, 244]);
   // 新鲜窗口证据与应用状态在动作之后一起留存。
   samples.finalWindow = (await listed()).current;
+  assert.equal(expectedClicks, 5);
   const metrics = { runtime: { electron: process.versions.electron ?? null, node: process.versions.node, modules: process.versions.modules },
-    helperHash, samples, scope: 'controlled pixel fixture; grayscale at native scale, not general application identity' };
+    helperHash, samples, scope: 'controlled native pixel fixture: gray/RGB, alpha exclusion, explicit nearest resize; not general application identity or a task success benchmark' };
   await mkdir(new URL('../.local/', import.meta.url), { recursive: true });
-  await writeFile(new URL('../.local/image-match-smoke-metrics.json', import.meta.url), JSON.stringify(metrics, null, 2) + '\n');
+  await writeFile(new URL('../.local/image-modes-smoke-metrics.json', import.meta.url), JSON.stringify(metrics, null, 2) + '\n');
   console.log(JSON.stringify(metrics, null, 2));
+} catch (error) {
+  // 失败也保存已经发生的真实输入/像素证据，后续修复不靠重跑猜历史。
+  await mkdir(new URL('../.local/', import.meta.url), { recursive: true });
+  await writeFile(new URL('../.local/image-modes-failure.json', import.meta.url), JSON.stringify({ helperHash, samples, error: String(error) }, null, 2) + '\n');
+  console.error(JSON.stringify({ lastSample: samples['alpha-exact'], alphaPixels: samples.alphaPixels }));
+  throw error;
 } finally {
   await computer.dispose(); await ctx.fiber.dispose();
   if (child) { child.terminate(); await child.done; }

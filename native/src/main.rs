@@ -19,6 +19,7 @@
 //! 点击/拖拽/滚动的坐标就自动继续正确。
 
 mod image_match;
+mod image_template;
 mod input_sequence;
 mod window_control;
 
@@ -329,12 +330,23 @@ struct FindImageRequest {
     region: Option<Region>,
     #[serde(default)]
     display_id: Option<String>,
-    /// 容差内灰度像素比例的下限（默认 0.9）。点击还必须有完整覆盖与唯一聚类。
+    /// 容差内参与像素比例的下限（默认 0.9）。点击还必须有完整覆盖与唯一聚类。
     #[serde(default)]
     threshold: Option<f64>,
-    /// 灰度亮度允许的偏差（整数 0-255，默认 12），不比较 RGB 色相。
+    /// 每个所选颜色通道允许的偏差（整数 0-255，默认 12）。
     #[serde(default)]
     tolerance: Option<u8>,
+    /// 默认沿用整数灰度亮度；RGB 模式要求三个通道都满足容差。
+    #[serde(default)]
+    color_mode: image_template::ColorMode,
+    /// alpha 模式按 alphaMin 包含像素；none 模式完全忽略透明度。
+    #[serde(default)]
+    mask_mode: image_template::MaskMode,
+    #[serde(default)]
+    alpha_min: Option<u8>,
+    /// 单个显式模板比例，最近邻插值，不做多尺度候选搜索。
+    #[serde(default)]
+    template_scale: Option<f64>,
     /// 从解码开始的匹配预算；阻塞的系统抓屏另受宿主进程截止保护。
     #[serde(default)]
     budget_ms: Option<u64>,
@@ -386,9 +398,18 @@ struct FindImageResponse {
     /// 不止一处时调用方需要知道**是哪些地方**像，才能自己决定下一步。
     matches: Vec<MatchSpot>,
     searched: Region,
+    /// 点击与覆盖计数使用变换后的尺寸。
     template_width: u32,
     template_height: u32,
-    /// 当前匹配只支持原分辨率，始终为 1，不代表模板缩放搜索。
+    source_template_width: u32,
+    source_template_height: u32,
+    color_mode: image_template::ColorMode,
+    mask_mode: image_template::MaskMode,
+    alpha_min: u8,
+    template_scale: f64,
+    resize_filter: &'static str,
+    active_pixel_count: usize,
+    /// 抓屏没有降采样，始终为 1；与显式 templateScale 是两个不同的量。
     scale: u32,
     elapsed_ms: u64,
 }
@@ -518,33 +539,43 @@ fn read_body<T: for<'de> Deserialize<'de>>() -> Result<T, String> {
     serde_json::from_str(&text).map_err(|e| format!("请求 JSON 解析失败：{e}"))
 }
 
-/// 原分辨率灰度容差与有界扫描的默认预算。
+/// 所选颜色通道的容差与有界扫描的默认预算。
 const DEFAULT_TOLERANCE: u8 = 12;
 const DEFAULT_FIND_BUDGET_MS: u64 = 5_000;
 const DEFAULT_MAX_POSITIONS: u64 = 20_000_000;
 
-/// 模板灰度标准差的下限。低于它基本就是纯色：这种模板会在任何同色区域拿到满分，
-/// 于是「第一个遇到的同色位置」成了答案 —— 那不是匹配，是碰运气，
-/// 而且它返回的分数看起来还很自信。必须明确拒绝，宁可报错。
-const MIN_TEMPLATE_STDDEV: f64 = 3.0;
-
-/// RGBA → 灰度（Rec.601 亮度权重，整数运算）。
-///
-/// 灰度化是这里最划算的一步：三通道变单通道，直接省掉 2/3 的比较。
-/// 代价是丢掉颜色 —— 对「找按钮」这类任务无所谓，形状与明暗已经够区分；
-/// 真正只靠颜色区分的场景（两个只有颜色不同的圆点）得另走找色那条路。
-fn to_gray(rgba: &[u8]) -> Vec<u8> {
-    let count = rgba.len() / 4;
-    let mut gray = Vec::with_capacity(count);
-    for index in 0..count {
-        let base = index * 4;
-        let value = (299 * u32::from(rgba[base])
-            + 587 * u32::from(rgba[base + 1])
-            + 114 * u32::from(rgba[base + 2]))
-            / 1000;
-        gray.push(value as u8);
-    }
-    gray
+/// 单/三通道静态分派，覆盖、预算、聚类与评分逻辑都在 scan_pixels 中共用。
+fn scan_colors<const CHANNELS: usize>(
+    pixels: &[u8],
+    crop: Region,
+    template: &image_template::Prepared,
+    tolerance: u8,
+    threshold: f64,
+    max_positions: u64,
+    expired: impl FnMut() -> bool,
+) -> Result<image_match::ScanResult, String> {
+    let screen_colors = image_template::colors::<CHANNELS>(pixels);
+    let template_colors = image_template::colors::<CHANNELS>(template.image.as_raw());
+    image_match::scan_pixels(
+        image_match::PixelImage {
+            pixels: &screen_colors,
+            width: crop.width as u32,
+            height: crop.height as u32,
+        },
+        image_match::PixelImage {
+            pixels: &template_colors,
+            width: template.image.width(),
+            height: template.image.height(),
+        },
+        template.mask.as_deref(),
+        tolerance,
+        threshold,
+        image_match::Limits {
+            max_positions,
+            max_clusters: image_match::MAX_CLUSTERS,
+        },
+        expired,
+    )
 }
 
 fn find_image(request: &FindImageRequest) -> Result<FindImageResponse, String> {
@@ -558,6 +589,13 @@ fn find_image(request: &FindImageRequest) -> Result<FindImageResponse, String> {
     if !threshold.is_finite() || threshold <= 0.0 || threshold > 1.0 {
         return Err("threshold 必须在 (0, 1] 内".into());
     }
+    let template_options = image_template::Options {
+        color_mode: request.color_mode,
+        mask_mode: request.mask_mode,
+        alpha_min: request.alpha_min.unwrap_or(1),
+        template_scale: request.template_scale.unwrap_or(1.0),
+    };
+    template_options.validate()?;
     let budget = std::time::Duration::from_millis(budget_ms);
     // DPI 感知必须在任何坐标查询之前设置，理由同 capture：否则缩放屏上的坐标会整体偏一圈。
     unsafe {
@@ -570,41 +608,8 @@ fn find_image(request: &FindImageRequest) -> Result<FindImageResponse, String> {
     let template_image = image::load_from_memory_with_format(&png, image::ImageFormat::Png)
         .map_err(|e| format!("模板 PNG 解码失败：{e}"))?
         .to_rgba8();
-    let (template_w, template_h) = template_image.dimensions();
-    if template_w == 0 || template_h == 0 {
-        return Err("模板图尺寸为 0".into());
-    }
-    if u64::from(template_w) * u64::from(template_h) > image_match::MAX_TEMPLATE_PIXELS as u64 {
-        return Err(format!(
-            "模板不得超过 {} 像素",
-            image_match::MAX_TEMPLATE_PIXELS
-        ));
-    }
-    let template_gray = to_gray(template_image.as_raw());
-    // 纯色模板当场拒绝：它没有可匹配的结构，会在任何同色区域拿满分，
-    // 于是「第一个遇到的同色位置」就成了答案 —— 那不是匹配，是碰运气。
-    {
-        let count = template_gray.len() as f64;
-        let mean = template_gray
-            .iter()
-            .map(|value| f64::from(*value))
-            .sum::<f64>()
-            / count;
-        let variance = template_gray
-            .iter()
-            .map(|value| {
-                let delta = f64::from(*value) - mean;
-                delta * delta
-            })
-            .sum::<f64>()
-            / count;
-        let stddev = variance.sqrt();
-        if stddev < MIN_TEMPLATE_STDDEV {
-            return Err(format!(
-                "模板几乎是纯色（灰度标准差 {stddev:.1}）：没有可匹配的结构，换一块有内容的区域当模板"
-            ));
-        }
-    }
+    let template = image_template::prepare(template_image, template_options)?;
+    let (template_w, template_h) = template.image.dimensions();
 
     let displays = list_displays()?;
     let virtual_rect = union_of(&displays)?;
@@ -622,27 +627,28 @@ fn find_image(request: &FindImageRequest) -> Result<FindImageResponse, String> {
     let crop = clip_to_virtual(requested.unwrap_or(virtual_rect), virtual_rect)?;
 
     let pixels = grab_screen(crop)?;
-    let screen_gray = to_gray(&pixels);
     let tolerance = request.tolerance.unwrap_or(DEFAULT_TOLERANCE);
-    let scan = image_match::scan(
-        image_match::GrayImage {
-            pixels: &screen_gray,
-            width: crop.width as u32,
-            height: crop.height as u32,
-        },
-        image_match::GrayImage {
-            pixels: &template_gray,
-            width: template_w,
-            height: template_h,
-        },
-        tolerance,
-        threshold,
-        image_match::Limits {
+    let expired = || started.elapsed() >= budget;
+    let scan = match request.color_mode {
+        image_template::ColorMode::Gray => scan_colors::<1>(
+            &pixels,
+            crop,
+            &template,
+            tolerance,
+            threshold,
             max_positions,
-            max_clusters: image_match::MAX_CLUSTERS,
-        },
-        || started.elapsed() >= budget,
-    )?;
+            expired,
+        ),
+        image_template::ColorMode::Rgb => scan_colors::<3>(
+            &pixels,
+            crop,
+            &template,
+            tolerance,
+            threshold,
+            max_positions,
+            expired,
+        ),
+    }?;
     let complete = scan.stop_reason.is_none();
     let best = scan.matches.first();
     Ok(FindImageResponse {
@@ -676,6 +682,14 @@ fn find_image(request: &FindImageRequest) -> Result<FindImageResponse, String> {
         searched: crop,
         template_width: template_w,
         template_height: template_h,
+        source_template_width: template.source_width,
+        source_template_height: template.source_height,
+        color_mode: template_options.color_mode,
+        mask_mode: template_options.mask_mode,
+        alpha_min: template_options.alpha_min,
+        template_scale: template_options.template_scale,
+        resize_filter: "nearest",
+        active_pixel_count: template.active_pixels,
         scale: 1,
         elapsed_ms: started.elapsed().as_millis() as u64,
     })
