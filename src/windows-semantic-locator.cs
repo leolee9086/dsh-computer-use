@@ -1,0 +1,93 @@
+// 层级定位走有界实时遍历，不先导出/封存整树。每级只保留消歧所需候选，
+// 只有唯一命中（或明确 nth）才能继续；整条链共用节点、字节和时间预算。
+using System;
+using System.Collections;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Text;
+using System.Windows.Automation;
+
+internal static partial class SemanticWorker
+{
+    static object Locate(IDictionary<string, object> args, string owner) {
+        string backend = Text(args, "backend", "uia");
+        if (backend != "uia" && backend != "msaa") throw new InvalidOperationException("backend invalid");
+        var path = args["locator"] as IList;
+        if (path == null || path.Count < 1 || path.Count > 16) throw new InvalidOperationException("locator requires 1..16 steps");
+        int limit = Integer(args, "maxNodes", 20000), budget = Integer(args, "budgetMs", 5000), bytesLimit = Integer(args, "maxBytes", 1000000);
+        if (limit < 1 || limit > 20000 || budget < 1 || bytesLimit < 4096) throw new InvalidOperationException("locator budgets invalid");
+        var clock = Stopwatch.StartNew(); var window = ResolveWindow(args, backend); Target root = window.Root;
+        int version = window.Version, visited = 0, stepIndex = 0; bool prefixSelected = false;
+        var ancestors = new List<Target>(); var queries = new List<Dictionary<string, object>>();
+        var trace = new List<object>(); var candidates = new List<object>(); string status = "not_found", reason = null;
+        for (stepIndex = 0; stepIndex < path.Count; stepIndex++) {
+            status = "not_found";
+            var step = (Dictionary<string, object>)path[stepIndex]; var query = (Dictionary<string, object>)step["query"];
+            if (backend == "msaa" && Text(query, "frameworkId").Length > 0) throw new InvalidOperationException("MSAA does not expose framework_id");
+            string scope = Text(step, "scope", "subtree"); int depth = Integer(step, "maxDepth", 128), nth = Integer(step, "nth", -1);
+            if ((scope != "children" && scope != "subtree") || depth < 1 || depth > 128 || nth < -1 || nth > 19999) throw new InvalidOperationException("locator step bounds invalid");
+            if (scope == "children") depth = 1;
+            // root 本身不匹配：每一步查询上一层窗口/容器的后代。
+            var pending = new Stack<Frame>(); pending.Push(new Frame { Node = root, Depth = 0, Entered = true });
+            var hits = new List<Target>(); int matches = 0; bool depthLimited = false; Target chosen = null;
+            while (pending.Count > 0) {
+                if (window.Version != version) throw new ElementNotAvailableException("locator tree changed while resolving");
+                if (clock.ElapsedMilliseconds >= budget) { reason = "time_limit"; break; }
+                var frame = pending.Peek();
+                if (!frame.Entered) {
+                    if (visited >= limit) { reason = "node_limit"; break; }
+                    visited++; frame.Entered = true;
+                    if (Match(QueryFields(frame.Node), query)) {
+                        matches++;
+                        if (nth < 0) {
+                            hits.Add(frame.Node);
+                            if (hits.Count == 2) { status = "ambiguous"; reason = "multiple_matches"; break; }
+                        } else if (matches == nth + 1) { chosen = frame.Node; break; }
+                    }
+                }
+                if (frame.Depth >= depth) {
+                    if (scope != "children" && NextChild(frame, false) != null) depthLimited = true;
+                    pending.Pop(); continue;
+                }
+                var next = NextChild(frame, false);
+                if (next == null) pending.Pop();
+                else pending.Push(new Frame { Node = next, Depth = frame.Depth + 1 });
+            }
+            if (status == "ambiguous") {
+                foreach (var hit in hits) { var row = Describe(hit); Save(hit, row, owner); candidates.Add(row); }
+                break;
+            }
+            // 在 nth 前跳过的深层节点可能包含更早匹配；这时不能声称序号有效。
+            if (reason != null || depthLimited) { status = "incomplete"; reason = reason ?? "depth_limit"; break; }
+            if (chosen == null && hits.Count == 1) chosen = hits[0];
+            if (chosen == null) break;
+            if (chosen.Uia != null && RuntimeId(chosen.Uia) != chosen.Id) throw new ElementNotAvailableException("locator ancestor replaced");
+            if (!Match(QueryFields(chosen, true), query)) throw new ElementNotAvailableException("locator ancestor no longer matches");
+            trace.Add(new Dictionary<string, object> { { "step", stepIndex }, { "element_id", chosen.Id }, { "matches", matches }, { "selection", nth < 0 ? "unique" : "nth" } });
+            if (nth >= 0) prefixSelected = true;
+            ancestors.Add(chosen); queries.Add(query); root = chosen; status = "resolved";
+        }
+        // 未找到也要复查已选容器，避免把一次容器替换误认为目标消失。
+        ValidateWindow(window);
+        for (int i = 0; i < ancestors.Count; i++) {
+            var target = ancestors[i];
+            if (target.Uia != null && RuntimeId(target.Uia) != target.Id) throw new ElementNotAvailableException("locator ancestor unavailable");
+            if (!Match(QueryFields(target, true), queries[i])) throw new ElementNotAvailableException("locator ancestor changed");
+        }
+        Dictionary<string, object> element = null;
+        if (status == "resolved") { element = Describe(root); Save(root, element, owner); }
+        if (window.Version != version) throw new ElementNotAvailableException("locator tree changed while resolving");
+        if (clock.ElapsedMilliseconds >= budget) { status = "incomplete"; reason = "time_limit"; element = null; candidates.Clear(); }
+        // nth 是明确的前缀选择，只有唯一/缺失判断要求穷尽范围；不把 nth 当作唯一。
+        string coverage = status == "incomplete" || status == "ambiguous" || (status == "resolved" && prefixSelected) ? "partial" : "complete";
+        var result = new Dictionary<string, object> {
+            { "status", status }, { "step", Math.Min(stepIndex, path.Count - 1) }, { "element", element }, { "candidates", candidates }, { "trace", trace },
+            { "coverage", new Dictionary<string, object> { { "status", coverage }, { "reason", reason ?? (prefixSelected ? "explicit_nth_prefix" : null) }, { "scope", "locator_steps" }, { "unrealized_items_traversed", false } } },
+            { "consistency", new Dictionary<string, object> { { "mode", "live" }, { "source_atomic", false } } },
+            { "visited_nodes", visited }, { "native_calls", NativeCalls }, { "elapsed_ms", clock.ElapsedMilliseconds }, { "worker_generation", Generation },
+            { "window", new Dictionary<string, object> { { "handle", window.Hwnd.ToInt64().ToString() }, { "processId", (int)window.Pid }, { "title", window.Title } } }
+        };
+        if (Encoding.UTF8.GetByteCount(Json.Serialize(result)) > bytesLimit) throw new InvalidOperationException("locator result exceeds byte budget");
+        return result;
+    }
+}

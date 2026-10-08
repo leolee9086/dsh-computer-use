@@ -427,6 +427,7 @@ public class Startup
             result["selection"] = selections;
             result["selection_support"] = pattern.SupportedTextSelection.ToString();
         }
+        if (Supports(element, SelectionItemPattern.Pattern)) result["selected"] = ((SelectionItemPattern)element.GetCurrentPattern(SelectionItemPattern.Pattern)).Current.IsSelected;
         if (Supports(element, SelectionPattern.Pattern)) {
             var selection = ((SelectionPattern)element.GetCurrentPattern(SelectionPattern.Pattern)).Current;
             var ids = new List<object>(); foreach (var item in selection.GetSelection()) { if (ids.Count >= 128) break; ids.Add(ElementId(item)); }

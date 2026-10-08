@@ -1,5 +1,14 @@
 # 变更记录
 
+## 0.5.8 — 2026-10-08
+
+- 新增 Windows `computer_locate`、`computer_wait`、`computer_act`，共 21 工具。1–16 级窗口/容器定位支持 name、role、automation ID、class/framework、exact/contains 与 children/subtree；每级唯一或显式 nth，歧义和预算截断分别报告，部分覆盖不证明缺失。
+- 等待每轮重新解析固定 HWND/PID/标题内的全部容器和目标，读取 enabled/disabled、值/文本、选择、展开/切换与稳定边界等条件；前置、一次动作和可选后置检查共用截止。动作执行状态与后置确认分开，未知或失败动作不重放。
+- 修复默认 WPF 虚拟项无法读取 runtime ID/普通属性时的 FindItem：只将明确的 ElementNotAvailable 或 `UIA_E_ELEMENTNOTAVAILABLE`（`0x80040201`）且有 VirtualizedItem 模式的结果保存为准确对象占位引用，允许 Realize 后重新观察。其它 COM 错误继续上报。Grid.GetItem 返回独立可操作的 `cell_snapshot_id`；SelectionItem 选中状态可按需读回。
+- 增加真实默认 WPF、生产 worker 与 Cordis ToolRuntime 任务验收：同名消歧、整个容器替换、读回结果、后置超时仅一次动作、取消、惰性树、600 项虚拟列表、Grid 和独立 HWND 弹窗。执行期间模拟人工编辑、切窗和原控件替换，检查窗口绑定及另一个同名窗口未被操作；动作后的人工值改变会使确认失败，工具不重写该值。源 UI 条件与动作之间仍不具有事务保证。
+- 修复移除后的 WPF peer 仍可读属性、保留父链并执行模式的问题：UIA 动作前有界复核父节点当前直属子列表中的准确 runtime ID，从两端只查身份，避免先读尾部目标前的全部兄弟属性。虚拟占位仍检查准确来源容器，窗口标题变化同样拒绝旧引用。
+- 将定位验收加入实际 Electron 回归，维护手工 C# 编译入口和完整工具名单。旧 ToolRuntime 恢复用例按真实进度页有界续取同一代次，核对最终匹配及累计重采次数，避免依赖一次调用内完成的机器速度假设。
+
 ## 0.5.7 — 2026-10-07
 
 - `computer_find(source:"native")` 新增可选 `max_matches`（1–20,000）：snapshot 查询达到指定匹配数后，完整复读已覆盖前缀的命中项、未命中项及顺序，再封存并分页。默认不设置时保留原有范围搜索；匹配上限与每页输出预算分开。

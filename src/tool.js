@@ -4,6 +4,7 @@ import { resolve } from 'node:path';
 import { flattenAccessibilityTree } from './semantics.js';
 import { acquisitionArgs, queryArgs, SEMANTIC_ACQUISITION_SCHEMA } from './semantic-query.js';
 import { NARRATOR_COMMANDS, narratorAction } from './narrator.js';
+import { registerLocatorTools } from './locator-tools.js';
 import { INPUT_STEPS_SCHEMA, MODIFIERS, inputSequenceArgs, keyOptions } from './input-actions.js';
 import { accessibilityElementById, findAccessibilityElements } from './semantics.js';
 import { ELEMENT_OPERATIONS, PATTERN_BY_OPERATION, SEMANTIC_PARAMETERS, semanticActionArgs, textRangeArgs } from './accessibility-actions.js';
@@ -11,6 +12,8 @@ import { ELEMENT_OPERATIONS, PATTERN_BY_OPERATION, SEMANTIC_PARAMETERS, semantic
 const OBSERVATION_TOOLS = new Set([
   'computer_accessibility',
   'computer_find',
+  'computer_locate',
+  'computer_wait',
   'computer_find_image',
   'computer_read',
   'computer_screenshot',
@@ -23,6 +26,7 @@ const TOOL_NAMES = new Set([
   'computer_click_image',
   'computer_drag',
   'computer_element',
+  'computer_act',
   'computer_key',
   'computer_input',
   'computer_move',
@@ -589,6 +593,16 @@ export function apply(ctx, rawConfig) {
       ...(query === undefined ? { tree } : { matches: flattenAccessibilityTree(tree) }),
     };
   };
+  // 直接查询、容器项与 Grid cell 都能发布独立语义引用，不借用旧截图绑定。
+  const publishElements = (exec, elements, focus, backend, coverage) => {
+    const tree = { children: elements }, rows = flattenAccessibilityTree(tree);
+    if (!rows.length) throw new Error('provider returned no observable element identity');
+    const snapshotId = `semantic-${randomUUID()}`, capturedAt = Date.now();
+    rememberBounded(agentState(observations, exec).semanticSnapshots, snapshotId, { capturedAt, tree, focus, backend,
+      workerGeneration: rows[0].worker_generation, coverage,
+      consistency: { mode: 'live', status: 'unverified', source_atomic: false } }, config.maxSemanticSnapshots);
+    return { snapshot_id: snapshotId, captured_at: capturedAt, elements: rows, coverage };
+  };
   const registerTool = (tools, definition) => tools.register({
     ...definition,
     async execute(rawArgs, exec) {
@@ -612,6 +626,10 @@ export function apply(ctx, rawConfig) {
     const decision = policyDecisionForExecution(ctx, config, exec);
     return decision?.kind === 'deny' ? decision.reason : undefined;
   });
+
+  registerLocatorTools({ register: (definition) => registerTool(ctx.tools, definition), textTool,
+    provider: () => computer(ctx), state: (exec) => agentState(observations, exec),
+    window: (id, exec) => freshWindow(observations, exec, id, config), publish: publishElements, control });
 
   // 文件采集无需附件或模型服务，工具始终注册；图像投送才解析附件服务。
   {
@@ -1214,7 +1232,10 @@ export function apply(ctx, rawConfig) {
         Object.assign(parameters, { row: args.row, column: args.column });
       }
       const result = await computer(ctx).performAccessibility({ kind: 'read', elementId, element, owner: agentState(observations, exec).owner, hwnd: snapshot.focus?.handle, ...parameters }, exec.signal);
-      return describeJson({ snapshot_id: snapshotId, element_id: elementId, result });
+      const cell = result?.cell?.native_token === undefined ? undefined : publishElements(exec, [result.cell], snapshot.focus, snapshot.backend,
+        { status: 'partial', reason: 'grid_cell_result', scope: 'cell' });
+      return describeJson({ snapshot_id: snapshotId, element_id: elementId, result,
+        ...(cell === undefined ? {} : { cell_snapshot_id: cell.snapshot_id, cell: cell.elements[0] }) });
     },
   ));
 
@@ -1239,8 +1260,8 @@ export function apply(ctx, rawConfig) {
       const elementId = requiredString(args, 'element_id');
       const element = accessibilityElementById(snapshot.tree, elementId);
       if (element === undefined) throw new Error(`element '${elementId}' is unavailable in semantic snapshot '${snapshotId}'`);
-      if (!element.enabled) throw new Error(`element '${elementId}' is disabled`);
       const operation = enumValue(args, 'operation', ELEMENT_OPERATIONS);
+      if (!element.enabled && operation !== 'realize') throw new Error(`element '${elementId}' is disabled`);
       const requiredPattern = PATTERN_BY_OPERATION[operation];
       if (requiredPattern !== undefined && element.patterns_known !== false && !element.patterns.includes(requiredPattern)) {
         throw new Error(`element '${elementId}' does not support ${operation}`);

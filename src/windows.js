@@ -326,6 +326,7 @@ export class WindowsComputer {
       semanticSnapshots: true,
       semanticSourceAtomic: false,
       semanticQuery: true,
+      semanticLocators: true,
       semanticWorkerIsolation: true,
       inputSequence: true,
       backgroundCapture: true,
@@ -540,6 +541,17 @@ export class WindowsComputer {
     return tree;
   }
 
+  // 定位条件每次从固定窗口解析；不会借旧快照找不到时切换到当前焦点窗口。
+  async locateAccessibility(windowHandle, signal, options = {}) {
+    if (windowHandle == null) throw new ComputerUseError('locator requires a listed native window');
+    return this.semantics.call({ kind: 'locate', backend: options.backend === 'msaa' ? 'msaa' : 'uia',
+      hwnd: windowHandle, owner: options.owner ?? 'driver', locator: options.locator,
+      maxNodes: options.maxNodes ?? 20000, maxBytes: this.config.maxAccessibilityBytes,
+      budgetMs: options.timeoutMs ?? this.config.commandTimeoutMs,
+      ...(options.window === undefined ? {} : { processId: options.window.processId, title: options.window.title }),
+    }, signal, options.timeoutMs ?? this.config.commandTimeoutMs);
+  }
+
   async msaaSnapshot(windowHandle, signal, options = {}) {
     return this.accessibilitySnapshot(windowHandle, signal, { ...options, backend: 'msaa' });
   }
@@ -548,10 +560,10 @@ export class WindowsComputer {
 
   async performAccessibility(action, signal) {
     if (typeof action.element?.native_token === 'string') {
-      const { element, elementId, owner, ...parameters } = action;
+      const { element, elementId, owner, timeoutMs, ...parameters } = action;
       const expected = Object.fromEntries(['name', 'role', 'automation_id', 'class_name', 'process_id'].filter((key) => element[key] !== undefined).map((key) => [key, element[key]]));
       return this.semantics.call({ kind: 'act', owner: owner ?? 'driver', token: element.native_token,
-        workerGeneration: element.worker_generation, expected, action: parameters }, signal);
+        workerGeneration: element.worker_generation, expected, action: parameters }, signal, timeoutMs ?? this.config.commandTimeoutMs);
     }
     throw new ComputerUseError('stale_target: observe this element with the current semantic worker before acting');
   }

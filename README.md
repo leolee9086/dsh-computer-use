@@ -1,6 +1,6 @@
 # dsh-computer-use
 
-独立的 Cordis bundle，为 DeepSeek Harness 提供视觉、原生无障碍和 Windows 讲述人操作路径。0.5.7 注册 **18 个 `computer_*` 工具**；无障碍观测、阅读和语义动作可以独立使用，文本模型也能操作原生应用。
+独立的 Cordis bundle，为 DeepSeek Harness 提供视觉、原生无障碍和 Windows 讲述人操作路径。0.5.8 注册 **21 个 `computer_*` 工具**；无障碍观测、层级定位、条件等待、阅读和语义动作可以独立使用，文本模型也能操作原生应用。
 
 Windows 是经过本机运行时验证的主要后端。macOS AX、Linux AT-SPI 已实现并做契约测试，尚无这两个系统的原生运行时验收。接口覆盖与实测范围见 [EVIDENCE.md](EVIDENCE.md)；对标的官方接口见 [能力矩阵](references/CAPABILITY-MATRIX.md)。目前没有任务成功率基准，也没有 SOTA 等效结论。
 
@@ -12,6 +12,7 @@ Windows 是经过本机运行时验证的主要后端。macOS AX、Linux AT-SPI 
 | 指针 | `computer_move`、`computer_click`、`computer_drag`、`computer_scroll` | 截图像素映射到实际捕获边界；Windows 支持三击、modifier、按住、带路径拖动。 |
 | 键盘/序列 | `computer_key`、`computer_type`、`computer_input` | Windows 支持扩展键、Insert/CapsLock、重复/按住，以及一条有界 down/move/up 序列；纯键盘也接受窗口或绑定窗口的语义证据。 |
 | 无障碍 | `computer_accessibility`、`computer_find`、`computer_read`、`computer_element` | 独立快照、元素查找、文本/选择/值/状态读取与控件模式操作。Windows UIA、MSAA 支持分页、分支展开和原生查询。 |
+| 定位与等待 | `computer_locate`、`computer_wait`、`computer_act` | Windows 窗口内逐级消歧，每轮重解容器与目标；共享截止的条件等待、一次动作及可选结果确认。 |
 | 窗口 | `computer_windows`、`computer_window_input` | Windows 列出含最小化状态的顶层窗口，枚举子 HWND、管理窗口，或向已观测子窗口发送限定点击/滚轮消息。 |
 | 讲述人 | `computer_narrator` | 只读进程状态；向已运行的讲述人发送固定 Microsoft Standard 布局命令。 |
 | 能力 | `computer_status` | 返回平台能力和显示器几何。 |
@@ -74,13 +75,33 @@ Windows 是经过本机运行时验证的主要后端。macOS AX、Linux AT-SPI 
 
 查询同样返回覆盖范围、一致性和游标；续查询可省略原条件及 `max_matches` 并继承它们，提供不同上限需开始新查询。固定结果集在原生工作进程内按缓存字段筛选：未命中项读取并复核名称、角色、automation ID、启用及屏幕外状态等匹配字段，命中项再读取并复核完整摘要、边界和模式可用性，最终只交付命中行。UIA 导航缓存同时取得 runtime ID，动作前仍重新读取实时身份；MSAA 未命中项省去位置与默认动作 getter。live 模式的 UIA 精确条件使用 `PropertyCondition` / `FindFirst(TreeScope.Element)`。缓存范围有界，不使用无界 `FindAll(Descendants)`。原生查询仍有遍历成本，不承诺任意提供者下的常数时间查找。机制对照见 [成熟桌面自动化源码](references/DESKTOP-AUTOMATION-IMPLEMENTATIONS.md)。
 
-正常 Windows 动作使用工作进程注册的原生元素引用，复核窗口生命周期、结构版本、UIA runtime ID 和身份字段后直接调用目标，不从窗口根重扫。引用按会话和进程代次隔离；每个工作进程最多保留 8 个窗口、20000 个元素引用和 32 个 live 游标，另有最多 4 个固定结果集的续页入口；引用时效 120 秒。
+正常 Windows 动作使用工作进程注册的原生元素引用，复核窗口生命周期、标题、结构版本、UIA runtime ID 和身份字段后直接调用目标。UIA 同时沿父链复核每条边：从父节点当前直属子列表两端查准确 runtime ID，最多 128 层、20000 次子节点身份检查，超出预算或无法证明归属则拒绝；只读取兄弟身份，不从窗口根导出整树。它会增加原生查询成本，并继续受动作截止约束。引用按会话和进程代次隔离；每个工作进程最多保留 8 个窗口、20000 个元素引用和 32 个 live 游标，另有最多 4 个固定结果集的续页入口；引用时效 120 秒。
 
 UIA 读取包括 TextPattern 文档/选择/字符范围、ValuePattern、范围值、选择集、scroll/window 状态和 grid 信息/单元格。动作包括多选增删、范围值、scroll、文本选择/滚入视图、窗口状态/关闭与 transform 移动/缩放，均要求对应模式。
 
 虚拟化控件概览不会自动实例化所有项目。`computer_element(operation:"find_item", property:"name" 或 "automation_id", value:...)` 要求 ItemContainerPattern，可能实例化或滚动目标；找到后返回独立元素快照。`operation:"realize"` 显式调用 VirtualizedItemPattern，再获取相关状态。未实现的虚拟节点不属于“全局不存在”的证据。
 
 MSAA 使用 `AccessibleObjectFromWindow` / `AccessibleChildren`，提供传统控件树、名称/角色/状态/值读取、默认动作、值写入和选择。动作使用注册的 IAccessible 引用并检查 HWND/PID、结构版本和身份字段。同一位置出现属性完全相同的替换控件时，MSAA 无法提供 UIA runtime ID 那样的代际保证。
+
+## 层级定位、条件等待与结果确认
+
+`computer_locate` 从本会话已列出的 `window_id` 解析 1–16 级 `locator`。每一级可以指定名称、role、automation ID、class 或 framework（UIA），支持 exact/contains、直属 children/有界 subtree。每级默认要求唯一匹配；两个候选立即报告 ambiguous，显式 `nth`（从 0 开始）选择遍历前缀并报告 partial。深度、节点或时间截断报告 incomplete，不能据此证明缺失。默认包括禁用和屏幕外控件，便于等待启用或显示。
+
+```json
+{"window_id":"<已观测窗口ID>","locator":[{"automation_id":"right-panel"},{"name":"Apply","role":"Button"}]}
+```
+
+`computer_wait` 每次轮询从相同 HWND/PID/标题重新解析整条链，容器或控件被替换后读取新目标。condition 支持 present/absent、enabled/disabled、visible/hidden、focused、value/text、selected、expanded/collapsed、toggled 和 stable；stable 同时比较元素身份与边界。唯一/缺失判断只覆盖暴露的有界树，不自动实例化虚拟项。查询和读取只在明确的执行前目标变化时重试；其它提供者错误上报。
+
+`computer_act` 先等待 before（默认 enabled），执行一次语义 operation，再按可选 after 查询结果。前置、动作和后置共用一个 `timeout_ms`（默认 10 秒，100ms–120 秒），包含排队与原生启动。动作失败或结果 unknown 都不重放；已完成动作与后置超时/错误分开报告。after 可指定另一条 locator 或本会话已经列出的另一个窗口；新弹窗应先重新列出窗口获取证据。
+
+```json
+{"window_id":"<已观测窗口ID>","locator":[{"automation_id":"right-panel"},{"automation_id":"input"}],"operation":"set_value","value":"updated","after":{"condition":{"state":"value","value":"updated"}}}
+```
+
+电脑在执行期间可以被人继续操作。窗口绑定不随前台变化切换到另一个同名控件，目标操作前仍校验原生身份、结构版本、模式及 enabled/readonly 状态。UIA 拒绝当前父子列表中已移除的旧对象，即使旧 peer 仍能读属性或保留父链；等待会重新解析替换目标。MSAA 保持前述身份与事件校验范围。UIA/MSAA 不能把条件读取和后续动作做成源程序事务；人或应用在两者之间再次改变状态时，返回实际执行状态并确认结果。动作完成后被人改掉的值会导致后置确认失败，工具不会因此再次写入。需要保留某个现有值时，应显式给出相应 before 条件；这一读值条件也不提供原子比较后写入。
+
+`find_item` 返回的未实例化 WPF 项可能无法读取普通属性或 runtime ID。工作进程保存 ItemContainer 返回的准确对象，发布标明 `virtualized` / `properties_unavailable` 的独立引用，只允许 `realize`；实例化后重新定位再读/动作。普通可描述项保持完整引用。`computer_read(row,column)` 的 Grid.GetItem 结果也登记为独立 `cell_snapshot_id`，可用于单元格选择和后续按需读取。
 
 ## 视觉与原生输入
 
@@ -122,7 +143,7 @@ helper 不主动请求前台，应用的消息处理仍可能自行激活窗口�
 | --- | --- | --- | --- |
 | 桌面截图/基本输入/窗口列出与聚焦 | 已实测 | 已实现、契约测试 | 已实现、契约测试；输入/窗口需 X11 `xdotool` |
 | 独立无障碍观测/读取/基本动作 | UIA、MSAA 已实测 | AXValue / AXSelectedText；需 Automation + Accessibility | AT-SPI 文本/范围/选择/caret/数值；需 Python + pyatspi + AT-SPI 总线 |
-| 分支展开、续页、原生查询、常驻隔离工作进程 | UIA、MSAA | 明确不支持 | 明确不支持 |
+| 分支展开、续页、原生查询、层级定位/等待、常驻隔离工作进程 | UIA、MSAA | 明确不支持 | 明确不支持 |
 | 每次获取的节点/深度/时间预算 | 支持 | 支持，契约测试 | 支持，契约测试 |
 | 区域/窗口截图、图像匹配 | 已实测 | 明确不支持 | 明确不支持 |
 | 原子输入序列/路径拖动/扩展 hold/repeat | 已实现及核心真机检查 | 明确拒绝 | 明确拒绝 |
@@ -159,6 +180,7 @@ pnpm run smoke:snapshots
 pnpm run smoke:recovery
 pnpm run smoke:matches
 pnpm run smoke:lifetimes
+pnpm run smoke:locators
 pnpm run smoke:windows
 # 用当前桌面端实际可执行文件检查 Electron 原生 ABI；按本机路径替换：
 pnpm run smoke:electron "C:\path\to\DeepSeek Harness.exe"
@@ -169,6 +191,6 @@ pnpm run native:stage
 pnpm pack --pack-destination .local
 ```
 
-`verify` 检查所有 JS 文件并运行单元/提供者合同及真实 ToolRuntime 回归。`verify:profile` 使用独立临时 DSH home 检查真实 Loader、18 工具及提示词，清理后不影响既有 profile。`smoke:semantics` 用真实 Cordis 本地子进程服务测试万节点 UIA/MSAA、分页/分支/查询/引用/虚拟化、阻塞终止和恢复，并与旧采集算法测量同一提供者的调用量与响应大小。`smoke:snapshots` 验证两种后端万节点固定分页、未交付代次变化丢弃、查询未命中节点复核、静默插删/重排/属性更新、封存后原生采集零调用，以及历史结果不能绕过实时目标校验。`smoke:recovery` 验证查询未命中项静默变更后重采一次、持续变化三次尝试后失败、已交付游标不换结果、旧动作引用实时拒绝，以及相同覆盖范围下的按需缓存读取量。`smoke:matches` 验证真实 UIA/MSAA 在相邻及远端属性 getter 阻塞时仍可早停并封存首项；匹配前缀完整复读、每页一项的固定三页、未命中项及重排变更丢弃、无匹配时搜索完整范围，以及动作实时身份拒绝。`smoke:lifetimes` 将自建窗口的真实属性读取延迟 1200ms，并把测试进程私有的代次起点移到距期限 1000ms，验证分段内到期丢弃、旧游标拒绝、引用清除及同进程恢复；还验证未来的展示时间戳不会延长封存时效，不修改机器时钟或生产时效常量。Electron smoke 还将真实 ToolRuntime 与 WindowsComputer/原生工作进程接在一起，按默认 8 条语义观测上限读取 UIA/MSAA 各 13 页，检查采集变化丢弃、固定续页、历史动作消耗状态、会话隔离及变化恢复；也包含已有 WPF/WinForms 动作。每项验收需在模块及清理完成后返回完成标记，加载失败、提前退出或迟到异常均不能只凭退出码 0 判为通过。Windows 动作 smoke 只操作标题唯一、由自己创建的进程，结束后清理自己的进程和临时目录。
+`verify` 检查所有 JS 文件并运行单元/提供者合同及真实 ToolRuntime 回归。`verify:profile` 使用独立临时 DSH home 检查真实 Loader、21 工具及提示词，清理后不影响既有 profile。`smoke:semantics` 用真实 Cordis 本地子进程服务测试万节点 UIA/MSAA、分页/分支/查询/引用/虚拟化、阻塞终止和恢复，并与旧采集算法测量同一提供者的调用量与响应大小。`smoke:snapshots` 验证两种后端万节点固定分页、未交付代次变化丢弃、查询未命中节点复核、静默插删/重排/属性更新、封存后原生采集零调用，以及历史结果不能绕过实时目标校验。`smoke:recovery` 验证查询未命中项静默变更后重采一次、持续变化三次尝试后失败、已交付游标不换结果、旧动作引用实时拒绝，以及相同覆盖范围下的按需缓存读取量。`smoke:matches` 验证真实 UIA/MSAA 在相邻及远端属性 getter 阻塞时仍可早停并封存首项；匹配前缀完整复读、每页一项的固定三页、未命中项及重排变更丢弃、无匹配时搜索完整范围，以及动作实时身份拒绝。`smoke:lifetimes` 将自建窗口的真实属性读取延迟 1200ms，并把测试进程私有的代次起点移到距期限 1000ms，验证分段内到期丢弃、旧游标拒绝、引用清除及同进程恢复；还验证未来的展示时间戳不会延长封存时效，不修改机器时钟或生产时效常量。`smoke:locators` 使用默认 WPF AutomationPeer 与真实 ToolRuntime，验证同名消歧、容器替换、动作一次及读回、取消、惰性树、600 项虚拟列表、Grid 单元格和独立 HWND 弹窗；并在等待期间模拟人工编辑、切窗和原目标替换，检查另一个同名窗口未被操作。Electron smoke 还将真实 ToolRuntime 与 WindowsComputer/原生工作进程接在一起，按默认 8 条语义观测上限读取 UIA/MSAA 各 13 页，检查采集变化丢弃、固定续页、历史动作消耗状态、会话隔离及变化恢复；也包含已有 WPF/WinForms 动作。每项验收需在模块及清理完成后返回完成标记，加载失败、提前退出或迟到异常均不能只凭退出码 0 判为通过。Windows 动作 smoke 只操作标题唯一、由自己创建的进程，结束后清理自己的进程和临时目录。
 
 `native:stage` 复制 release exe 并记录二进制与 Rust 源文件哈希；`prepack` 要求回归成功且产物清单匹配当前版本/源码。打包不含构建缓存或本地检查点。来源、许可与风险边界见 [UPSTREAM.md](references/UPSTREAM.md)、[LICENSE](LICENSE)、[SECURITY.md](SECURITY.md)，变更见 [CHANGELOG.md](CHANGELOG.md)。

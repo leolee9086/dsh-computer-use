@@ -11,6 +11,6 @@ if (process.platform !== 'win32' || !executable || !existsSync(executable)) {
 }
 const root = fileURLToPath(new URL('../', import.meta.url));
 // Own-window GUI checks run sequentially to avoid interfering with each other.
-for (const file of ['win32-csharp-smoke.mjs', 'win32-semantic-focus-smoke.mjs', 'win32-expansion-smoke.mjs', 'win32-msaa-smoke.mjs', 'win32-semantic-large-tree-smoke.mjs', 'win32-semantic-snapshot-smoke.mjs', 'win32-semantic-recovery-smoke.mjs', 'win32-semantic-match-limit-smoke.mjs', 'win32-semantic-tool-runtime-smoke.mjs', 'win32-semantic-lifetime-smoke.mjs', 'win32-semantic-source-consistency-smoke.mjs']) {
+for (const file of ['win32-csharp-smoke.mjs', 'win32-semantic-focus-smoke.mjs', 'win32-expansion-smoke.mjs', 'win32-msaa-smoke.mjs', 'win32-semantic-large-tree-smoke.mjs', 'win32-semantic-snapshot-smoke.mjs', 'win32-semantic-recovery-smoke.mjs', 'win32-semantic-match-limit-smoke.mjs', 'win32-semantic-tool-runtime-smoke.mjs', 'win32-semantic-lifetime-smoke.mjs', 'win32-semantic-source-consistency-smoke.mjs', 'win32-locator-smoke.mjs']) {
   runElectronSmoke(executable, resolve(root, 'test', file), { cwd: root });
 }

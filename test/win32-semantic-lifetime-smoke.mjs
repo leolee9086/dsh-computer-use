@@ -45,7 +45,7 @@ try {
   const probe = join(directory, 'lifetime-probe.exe');
   await runner.run([compiler, '/nologo', '/noconfig', '/target:exe', '/platform:x64', '/main:SnapshotLifetimeFixture', `/out:${probe}`,
     '/r:System.dll', '/r:System.Core.dll', '/r:Microsoft.CSharp.dll', '/r:System.Web.Extensions.dll', ...referenceArgs,
-    path('../src/windows-semantic-worker.cs'), path('../src/windows-semantic-snapshot.cs'), legacy,
+    path('../src/windows-semantic-worker.cs'), path('../src/windows-semantic-snapshot.cs'), path('../src/windows-semantic-locator.cs'), legacy,
     path('./windows-semantic-lifetime-probe.cs')]);
   child = runner.start([fixture]); const nextLine = lineReader(child.stdout);
   const hwnd = await nextLine(); assert.match(hwnd, /^\d+$/);

@@ -1,6 +1,41 @@
-# Capability Evidence — 0.5.7
+# Capability Evidence — 0.5.8
 
-## Current validation — 2026-10-07
+## Current validation — 2026-10-08
+
+0.5.8 adds Windows window-relative hierarchical locators, read-only condition waits and one-action/result-confirmation flows. Locator steps resolve uniquely or use an explicit zero-based nth; ambiguity stops rather than choosing a candidate. Node/depth/time truncation is incomplete, and absence requires complete coverage of the requested exposed-tree scope. All polling stays pinned to the original HWND/PID/title, re-resolves container replacements and shares one deadline with the action and postcondition. Unknown or failed actions are not replayed.
+
+The new task acceptance connects the real Cordis ToolRuntime, production WindowsComputer/managed worker and default WPF AutomationPeers. It creates ordinary WPF controls; it does not supply a fabricated accessibility provider or mock native query results. The initial ordinary Node run and the latest full actual Electron suite passed the tasks below; the added removed-reference, post-action manual-edit and window-title checks were verified in Electron:
+
+| Task | Observed result |
+| --- | --- |
+| Two same-name Apply buttons | Two candidates report ambiguous; explicit nth selects a prefix with partial coverage |
+| Node-budget truncation / actual missing target | Incomplete coverage cannot satisfy absent; fully searched exposed scope can |
+| Entire container and Edit replacement | Wait sees the new element ID and enabled state; SetValue is read back as updated |
+| Invoke and delayed status | Action count becomes one and the delayed postcondition is confirmed |
+| Postcondition timeout / cancellation | Timeout leaves count at two, with no replay; cancelled read-only wait sends no additional action |
+| Evidence isolation | Another agent cannot use the listed window ID |
+| Lazy TreeView | One expand, delayed leaf appears, select and read confirm selected |
+| Virtualized ListBox of 600 strings | Find item579, realize the exact placeholder object, re-resolve and select successfully |
+| DataGrid cell | Grid.GetItem produces a separately registered snapshot, selection works and selected state is read back |
+| Concurrent desktop interaction | While waiting on disabled input, another same-name window actually gains foreground, the original input is manually edited and replaced; the pinned original window is updated, and the other window keeps its value with action count zero |
+| Removed WPF reference | Synchronously replace the whole container after observing its input; the old reference is rejected and the new input keeps its initial value |
+| Manual edit after dispatch | Real SetValue returns, then the fixture changes the value before the real postcondition read; confirmation fails, dispatch count remains one, and the manual value is preserved |
+| Window title changes | The same HWND/PID changes title after observation; control using the old element is rejected without a write |
+| Separate HWND popup | Action opens popup; a fresh list identifies it; confirm is sent once and another list verifies it closed |
+
+The concurrent case records the final foreground independently: the other window was observed in foreground during the wait but was no longer foreground at completion in both the ordinary Node and latest Electron samples. Foreground need not remain constant, and application/provider actions may change it. UIA/MSAA do not offer an atomic transaction between a before-condition read and a later action; concurrent edits during that gap still require checking the actual execution state and result. Failed postcondition confirmation leaves the manual value in place and does not replay SetValue. These checks do not establish arbitrary application task success.
+
+The removed-reference acceptance first reproduced a detached WPF peer that still exposed its runtime ID, ordinary properties and old parent chain and could accept SetValue. Production now checks every parent/child edge against the parent's current direct-child list using exact runtime identities. It alternates from the first and last child, reads no unrelated sibling names or patterns, and retains a 128-ancestor / 20,000-child-identity limit and the original host deadline. This avoids a full scan before validating a tail child in the flat 10,000-node fixture; the original 500ms Invoke acceptance still dispatches once before the blocking action times out. Attachment checks consume the action budget and do not create a UIA transaction.
+
+The WPF ItemContainer returned `COMException` HRESULT `0x80040201` on an unrealized item before ordinary property acquisition. Production now recognizes only that explicit UIA unavailable code or ElementNotAvailableException, checks VirtualizedItem support and retains the exact returned object under a worker placeholder ID; it does not invent a UIA runtime identity or rebind by name. Placeholder references retain owner/window/lifetime/structure validation, validate attachment of their exact originating container and allow only Realize. Describable items retain their normal complete references; other COM failures propagate.
+
+The initial `pnpm run verify` passed 66 JavaScript syntax checks and all 80 tests, including the real ToolRuntime fault/deadline tests. The new locator contract tests use real Cordis services with fault injection confined to the computer provider. The ordinary WPF timeout sample used a 1500ms total deadline and completed confirmation timeout in 1503ms; the latest full Electron sample completed it in 1528ms. These are shared-desktop samples, not universal latency guarantees.
+
+The complete sequential actual Electron 44.0.0 / Node 24.18.1 / ABI149 suite passed all twelve modules, each with its completion marker and no failure marker: bridge, semantic focus, expansion, MSAA, live 10,000-node trees, frozen 10,000-node snapshots, recovery, native match limits, real native ToolRuntime, lifetimes, source consistency and WPF locator tasks. ToolRuntime UIA/MSAA results contain 1607/1601 rows over 13 pages each, with zero continuation native acquisitions and one capture recovery/restart. The source-consistency counterexample still reproduces on both backends; the production source-atomic adapter remains unimplemented. The 0.5.8 manifest matches the unchanged executable and Rust/Cargo source hashes.
+
+Reproduce the new task acceptance with `pnpm run smoke:locators`, or run the twelve-module suite with `pnpm run smoke:electron "C:\path\to\DeepSeek Harness.exe"`. `pnpm pack --pack-destination .local` requires syntax, Node/ToolRuntime and native-manifest gates before packaging. The research baseline is retained in [complex UI automation](references/COMPLEX-UI-AUTOMATION.md); the image candidate/uniqueness repair, OCR/pixel/mask/scale capabilities and standard Win32 content adapters remain further implementation work. No new deployment or installed-package parity is claimed.
+
+## Historical 0.5.7 validation — 2026-10-07
 
 0.5.7 adds an optional `computer_find(source:"native", max_matches:K)` for Windows snapshot queries. The production collector stops after K matches, rereads every covered hit and miss in the same traversal order, then freezes that prefix. It reports `coverage.source_status:"partial"` / `source_reason:"match_limit"`; page budgets are independent. An absent limit retains the previous bounded-scope search. No source-wide transactional guarantee is added.
 

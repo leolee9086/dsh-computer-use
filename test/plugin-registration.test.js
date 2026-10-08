@@ -50,6 +50,7 @@ test('tool plugin registers the complete model-facing tool set', () => {
   });
   assert.deepEqual(tools.map((tool) => tool.name).sort(), [
     'computer_accessibility',
+    'computer_act',
     'computer_click',
     'computer_click_image',
     'computer_drag',
@@ -58,6 +59,7 @@ test('tool plugin registers the complete model-facing tool set', () => {
     'computer_find_image',
     'computer_input',
     'computer_key',
+    'computer_locate',
     'computer_move',
     'computer_narrator',
     'computer_read',
@@ -65,6 +67,7 @@ test('tool plugin registers the complete model-facing tool set', () => {
     'computer_scroll',
     'computer_status',
     'computer_type',
+    'computer_wait',
     'computer_window_input',
     'computer_windows',
   ]);

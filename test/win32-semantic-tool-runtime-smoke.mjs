@@ -93,6 +93,15 @@ try {
       const label = backend === 'uia' ? 'Item' : 'Legacy item';
       const rename = backend === 'uia' ? 'rename' : 'rename_legacy';
       const query = name => ({ ...base, source: 'native', name, match: 'exact', include_offscreen: true, timeout_ms: 10000 });
+      // 三个新工具也穿过真实 UIA/MSAA 后端；以计数与后置读取验证一次动作。
+      const locatorArgs = { window_id: owned.id, backend, timeout_ms: 10000, locator: [{ name: `${label} 0`, match: 'exact' }] };
+      const located = await json('computer_locate', locatorArgs);
+      assert.equal(located.status, 'resolved', JSON.stringify(located)); assert.equal(located.coverage.status, 'complete');
+      const waited = await json('computer_wait', { ...locatorArgs, condition: { state: 'enabled' } }); assert.equal(waited.fulfilled, true);
+      const locatorCount = Number((await command('count')).slice(6));
+      const locatorAction = await json('computer_act', { ...locatorArgs, operation: 'invoke', after: { condition: { state: 'present' } } });
+      assert.equal(locatorAction.execution_state, 'completed', JSON.stringify(locatorAction)); assert.equal(locatorAction.postcondition.fulfilled, true);
+      assert.equal(await command('count'), `count:${locatorCount + 1}`);
       // 先启动工作进程。小分段的短调用交付真正的未完成采集游标。
       await json('computer_find', query(`${label} 0`));
       // 匹配上限穿过真实schema/ToolRuntime，41项分成默认20项的三页。
@@ -198,14 +207,24 @@ try {
       // 还原前面的交换，确保第13项的getter改动的是已经读过的第12项。
       assert.equal(await command(backend === 'uia' ? 'reorder_silent' : 'reorder_legacy_silent'), 'mutated');
       assert.equal(await command(`mutation:${backend}:once`), 'mutation-enabled');
-      const recovered = await json('computer_find', { ...query('Mutation target'), match: 'contains' });
-      assert.equal(recovered.capture_restarts, 1); assert.equal(recovered.consistency.status, 'frozen');
+      let recovered = await json('computer_find', { ...query('Mutation target'), match: 'contains' });
+      let recoveryCalls = 1, recoveryRestarts = recovered.capture_restarts;
+      // 共享桌面上的提供者可能在10秒内仅完成部分验证。保持同一未发布代次，
+      // 有界续取其真实游标；不以一次调用完成作为速度前提，也不重新发起查询。
+      while (recovered.consistency.status !== 'frozen') {
+        assert.equal(recovered.matches.length, 0); assert.ok(recovered.next_cursor); assert.ok(++recoveryCalls <= 5);
+        recovered = await json('computer_find', { source: 'native', snapshot_id: recovered.snapshot_id,
+          cursor: recovered.next_cursor, timeout_ms: 10000 });
+        recoveryRestarts += recovered.capture_restarts;
+      }
+      assert.equal(recoveryRestarts, 1); assert.equal(recovered.consistency.status, 'frozen');
       assert.deepEqual(recovered.matches.map(row => row.name), ['Mutation target 1']);
       assert.equal(await command('mutation_stats'), 'mutations:1');
       assert.equal(await command('mutation:disable'), 'mutation-disabled');
-      samples.push({ backend, captured_nodes: captured.length, pages, capture_calls: captureCalls,
+      samples.push({ backend, locator_resolved: true, locator_wait_enabled: true, locator_action_confirmed_once: true,
+        captured_nodes: captured.length, pages, capture_calls: captureCalls,
         pending_nodes: pending.visited_nodes, discarded_capture: true, continuation_native_calls: 0,
-        consumed_history_actions: 'rejected', live_identity: 'rejected renamed target', capture_restarts: recovered.capture_restarts,
+        consumed_history_actions: 'rejected', live_identity: 'rejected renamed target', capture_restarts: recoveryRestarts, recovery_calls: recoveryCalls,
         match_limit: { retained_rows: 41, pages: 3, covered_nodes: bounded.consistency.captured_nodes, continuation_native_calls: 0,
           inherited_limit: true, changed_limit: 'rejected', source_coverage: boundedLast.coverage.source_status } });
     } finally { await ctx.fiber.dispose(); }

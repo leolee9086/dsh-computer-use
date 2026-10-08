@@ -23,6 +23,7 @@ internal static partial class SemanticWorker
     static readonly TreeWalker Walker = TreeWalker.ControlViewWalker;
     static readonly CacheRequest Cache = CreateCache();
     static readonly CacheRequest QueryCache = CreateQueryCache();
+    static readonly CacheRequest IdentityCache = CreateIdentityCache();
     static int NativeCalls;
     static bool ActionStarted;
     const int ElementLimit = 20000;
@@ -56,7 +57,8 @@ internal static partial class SemanticWorker
     // UIA 引用/运行时身份，或独立 MSAA 对象+child VARIANT。没有整树动作搜索。
     sealed class Target {
         public AutomationElement Uia; public IAccessible Msaa; public object Child = 0;
-        public string Id; public Window Window; public bool SummaryCached;
+        public string Id; public Window Window; public bool SummaryCached, Virtualized;
+        public Target VirtualContainer; // 占位项无法读取父节点；仍验证来源容器属于固定窗口。
     }
     sealed class Saved {
         public Target Target; public Dictionary<string, object> Identity; public string Owner;
@@ -76,10 +78,14 @@ internal static partial class SemanticWorker
         public DateTime At; public Target Root; public Condition ExactCondition;
     }
 
+    static CacheRequest CreateIdentityCache() {
+        var cache = new CacheRequest { TreeScope = TreeScope.Element, AutomationElementMode = AutomationElementMode.Full };
+        cache.Add(AutomationElement.RuntimeIdProperty); return cache;
+    }
     static CacheRequest CreateQueryCache() {
         var cache = new CacheRequest { TreeScope = TreeScope.Element, AutomationElementMode = AutomationElementMode.Full };
         foreach (var property in new [] { AutomationElement.NameProperty, AutomationElement.ControlTypeProperty,
-            AutomationElement.AutomationIdProperty, AutomationElement.ClassNameProperty,
+            AutomationElement.AutomationIdProperty, AutomationElement.ClassNameProperty, AutomationElement.FrameworkIdProperty,
             AutomationElement.IsEnabledProperty, AutomationElement.IsOffscreenProperty, AutomationElement.RuntimeIdProperty }) cache.Add(property);
         return cache;
     }
@@ -109,7 +115,7 @@ internal static partial class SemanticWorker
         if (refresh) { NativeCalls++; target.Uia = target.Uia.GetUpdatedCache(QueryCache); target.SummaryCached = false; }
         var info = target.Uia.Cached;
         return new Dictionary<string, object> { { "name", info.Name }, { "role", info.ControlType.ProgrammaticName.Replace("ControlType.", "") },
-            { "automation_id", info.AutomationId }, { "class_name", info.ClassName }, { "enabled", info.IsEnabled }, { "offscreen", info.IsOffscreen } };
+            { "automation_id", info.AutomationId }, { "class_name", info.ClassName }, { "framework_id", info.FrameworkId }, { "enabled", info.IsEnabled }, { "offscreen", info.IsOffscreen } };
     }
 
     static string Text(IDictionary<string, object> args, string key, string fallback = "") {
@@ -142,7 +148,7 @@ internal static partial class SemanticWorker
         var cache = new CacheRequest { TreeScope = TreeScope.Element, AutomationElementMode = AutomationElementMode.Full };
         foreach (var property in new [] {
             AutomationElement.NameProperty, AutomationElement.ControlTypeProperty, AutomationElement.AutomationIdProperty,
-            AutomationElement.RuntimeIdProperty, AutomationElement.ClassNameProperty, AutomationElement.ProcessIdProperty, AutomationElement.NativeWindowHandleProperty,
+            AutomationElement.RuntimeIdProperty, AutomationElement.ClassNameProperty, AutomationElement.FrameworkIdProperty, AutomationElement.ProcessIdProperty, AutomationElement.NativeWindowHandleProperty,
             AutomationElement.IsEnabledProperty, AutomationElement.IsOffscreenProperty, AutomationElement.IsPasswordProperty,
             AutomationElement.HasKeyboardFocusProperty, AutomationElement.IsKeyboardFocusableProperty, AutomationElement.BoundingRectangleProperty,
             AutomationElement.IsInvokePatternAvailableProperty, AutomationElement.IsValuePatternAvailableProperty,
@@ -243,7 +249,7 @@ internal static partial class SemanticWorker
     }
     static void ValidateWindow(Window window) {
         uint pid; GetWindowThreadProcessId(window.Hwnd, out pid);
-        if (!IsWindow(window.Hwnd) || pid != window.Pid || WindowText(window.Hwnd, true) != window.Class)
+        if (!IsWindow(window.Hwnd) || pid != window.Pid || WindowText(window.Hwnd, true) != window.Class || WindowText(window.Hwnd, false) != window.Title)
             throw new InvalidOperationException("stale_target: window identity changed");
     }
     static Target NextChild(Frame frame, bool summary = true) {
@@ -308,7 +314,7 @@ internal static partial class SemanticWorker
             target.Uia = element; target.SummaryCached = true;
             var info = element.Cached;
             node["name"] = info.Name; node["role"] = info.ControlType.ProgrammaticName.Replace("ControlType.", "");
-            node["automation_id"] = info.AutomationId; node["class_name"] = info.ClassName;
+            node["automation_id"] = info.AutomationId; node["class_name"] = info.ClassName; node["framework_id"] = info.FrameworkId;
             node["enabled"] = info.IsEnabled; node["offscreen"] = info.IsOffscreen; node["password"] = info.IsPassword;
             node["focused"] = info.HasKeyboardFocus; node["focusable"] = info.IsKeyboardFocusable;
             var rect = info.BoundingRectangle;
@@ -342,13 +348,49 @@ internal static partial class SemanticWorker
         }
         return node;
     }
+    static void ValidateUiaAttachment(Target target) {
+        // 结构事件是异步通知；被移除的 WPF peer 可能仍能读属性、保留旧父链。
+        // 因此每条父子边都从父节点的当前子序列复核准确 runtime ID，不能按名称重绑。
+        // 仅检查祖先及其直属子节点；深度/节点有界，阻塞仍受宿主总截止约束。
+        if (target == null || target.Uia == null) throw new InvalidOperationException("stale_target: UIA attachment unavailable");
+        var element = target.Uia; int visited = 0;
+        for (int depth = 0; depth <= 128 && element != null; depth++) {
+            string id = RuntimeId(element);
+            if (id == target.Window.Root.Id) return;
+            NativeCalls++; var parent = Walker.GetParent(element);
+            if (parent == null) break;
+            // 从实时子列表两端交替查身份，尾部目标无需先读上万兄弟的名称/状态。
+            NativeCalls += 2;
+            var first = Walker.GetFirstChild(parent, IdentityCache); var last = Walker.GetLastChild(parent, IdentityCache);
+            bool attached = false; var seen = new HashSet<string>();
+            while (first != null && last != null) {
+                visited += 2;
+                if (visited > ElementLimit) throw new InvalidOperationException("stale_target: UIA attachment node limit reached");
+                string firstId = CachedRuntimeId(first), lastId = CachedRuntimeId(last);
+                if (firstId == id || lastId == id) { attached = true; break; }
+                if (firstId == lastId || !seen.Add(firstId) || !seen.Add(lastId)) break;
+                NativeCalls += 2;
+                first = Walker.GetNextSibling(first, IdentityCache); last = Walker.GetPreviousSibling(last, IdentityCache);
+            }
+            if (!attached) break;
+            element = parent;
+        }
+        throw new InvalidOperationException("stale_target: element no longer attached to the observed window or ancestry limit reached");
+    }
     static Saved Lookup(IDictionary<string, object> args, string key, string owner) {
         Saved saved; string token = Text(args, key);
         if (!Elements.TryGetValue(token, out saved) || saved.Owner != owner || (DateTime.UtcNow - saved.At).TotalMilliseconds > LifetimeMs)
             throw new InvalidOperationException("stale_target: reference expired or not observed in this session");
         ValidateWindow(saved.Target.Window);
         if (saved.Version != saved.Target.Window.Version) throw new InvalidOperationException("stale_target: tree structure changed");
-        if (saved.Target.Uia != null && RuntimeId(saved.Target.Uia) != saved.Target.Id) throw new InvalidOperationException("stale_target: runtime identity changed");
+        // 未实例化的 WPF 项可能连 GetRuntimeId 都不可读；占位 ID 只标识
+        // worker 保存的准确 ItemContainer 返回对象，不能当作 UIA runtime ID。
+        // 上面的窗口、所有者、寿命与结构版本校验仍然适用，该引用仅能 Realize。
+        if (saved.Target.Virtualized) { ValidateUiaAttachment(saved.Target.VirtualContainer); return saved; }
+        if (saved.Target.Uia != null) {
+            if (RuntimeId(saved.Target.Uia) != saved.Target.Id) throw new InvalidOperationException("stale_target: runtime identity changed");
+            ValidateUiaAttachment(saved.Target);
+        }
         // 动作只刷新身份字段，所需模式/状态随后按操作读取；不重取所有概览模式。
         var current = QueryFields(saved.Target, true);
         foreach (var field in new [] { "name", "role", "automation_id", "class_name" }) {
@@ -369,7 +411,7 @@ internal static partial class SemanticWorker
         if (!Flag(query, "includeOffscreen") && Flag(node, "offscreen")) return false;
         if (!Flag(query, "includeDisabled") && !Flag(node, "enabled")) return false;
         bool exact = Text(query, "match", "contains") == "exact";
-        foreach (var pair in new [] { new [] { "name", "name" }, new [] { "role", "role" }, new [] { "automationId", "automation_id" } }) {
+        foreach (var pair in new [] { new [] { "name", "name" }, new [] { "role", "role" }, new [] { "automationId", "automation_id" }, new [] { "className", "class_name" }, new [] { "frameworkId", "framework_id" } }) {
             var expected = Text(query, pair[0]); if (expected.Length == 0) continue;
             var actual = Text(node, pair[1]);
             if (exact ? !string.Equals(actual, expected, StringComparison.OrdinalIgnoreCase) : actual.IndexOf(expected, StringComparison.OrdinalIgnoreCase) < 0) return false;
@@ -513,6 +555,7 @@ internal static partial class SemanticWorker
             }
         }
         var action = (Dictionary<string, object>)args["action"]; string kind = Text(action, "kind");
+        if (target.Virtualized && kind != "realize") throw new InvalidOperationException("virtualized placeholder only supports realize; observe the materialized item before reading or acting");
         if (kind == "find_item") {
             if (target.Uia == null) throw new InvalidOperationException("item_container unavailable on MSAA");
             var container = (ItemContainerPattern)target.Uia.GetCurrentPattern(ItemContainerPattern.Pattern);
@@ -524,14 +567,51 @@ internal static partial class SemanticWorker
             ActionStarted = true;
             var item = container.FindItemByProperty(null, property, value);
             if (item == null) return new Dictionary<string, object> { { "found", false } };
-            var found = new Target { Uia = item, Window = target.Window, Id = RuntimeId(item) };
-            var row = Describe(found); Save(found, row, owner);
+            var found = new Target { Uia = item, Window = target.Window };
+            object virtualPattern;
+            Dictionary<string, object> row = null; bool unavailable = false;
+            try { found.Id = RuntimeId(item); row = Describe(found); }
+            catch (ElementNotAvailableException) { unavailable = true; }
+            catch (COMException error) {
+                // .NET UIA 在部分 WPF 路径直接透传 UIA_E_ELEMENTNOTAVAILABLE。
+                // 只认这一 HRESULT；其它 COM 故障不能伪装成可实例化项。
+                if (error.ErrorCode != unchecked((int)0x80040201)) throw;
+                unavailable = true;
+            }
+            if (unavailable) {
+                if (!item.TryGetCurrentPattern(VirtualizedItemPattern.Pattern, out virtualPattern))
+                    throw new ElementNotAvailableException("ItemContainer result unavailable without VirtualizedItem support");
+                // WPF 未实例化项可能无法读取 RuntimeId 或概览属性。只在明确的
+                // ElementNotAvailable 且确有 VirtualizedItem 模式时发布占位引用。
+                // 保存准确的返回对象，不按名称重新绑定；virtual: 不是原生 runtime ID。
+                // enabled:false 阻止普通动作，Realize 后必须重新观察实际控件。
+                found.Uia = item; found.SummaryCached = false;
+                found.Virtualized = true; found.VirtualContainer = target; found.Id = "virtual:" + Guid.NewGuid().ToString("N");
+                row = new Dictionary<string, object> { { "element_id", found.Id }, { "backend", "uia" },
+                    { "process_id", (int)target.Window.Pid }, { "native_window_handle", target.Window.Hwnd.ToInt64().ToString() }, { "window_title", target.Window.Title },
+                    { "name", propertyName == "name" ? value : "" }, { "automation_id", propertyName == "automation_id" ? value : "" },
+                    { "virtualized", true }, { "properties_unavailable", true }, { "enabled", false }, { "offscreen", true },
+                    { "patterns_known", true }, { "patterns", new List<object> { "virtualized_item" } } };
+            }
+            Save(found, row, owner);
             return new Dictionary<string, object> { { "found", true }, { "element", row } };
         }
         if (target.Uia != null) {
             if (kind == "realize") {
                 var pattern = (VirtualizedItemPattern)target.Uia.GetCurrentPattern(VirtualizedItemPattern.Pattern);
                 ActionStarted = true; pattern.Realize(); return new Dictionary<string, object> { { "ok", true } };
+            }
+            if (kind == "read" && (action.ContainsKey("row") || action.ContainsKey("column"))) {
+                if (!action.ContainsKey("row") || !action.ContainsKey("column")) throw new InvalidOperationException("grid read requires row and column together");
+                var grid = (GridPattern)target.Uia.GetCurrentPattern(GridPattern.Pattern);
+                int rowIndex = Convert.ToInt32(action["row"]), columnIndex = Convert.ToInt32(action["column"]);
+                if (rowIndex < 0 || columnIndex < 0 || rowIndex >= grid.Current.RowCount || columnIndex >= grid.Current.ColumnCount) throw new InvalidOperationException("grid cell out of range");
+                var readArgs = new Dictionary<string, object>(action); readArgs.Remove("row"); readArgs.Remove("column");
+                var result = (Dictionary<string, object>)NativeUia.PerformDirect(target.Uia, readArgs);
+                var cell = grid.GetItem(rowIndex, columnIndex);
+                var found = new Target { Uia = cell, Window = target.Window, Id = RuntimeId(cell) };
+                var node = Describe(found); Save(found, node, owner);
+                result["cell"] = node; return result;
             }
             if (kind != "read" && !target.Uia.Current.IsEnabled) throw new InvalidOperationException("element disabled");
             return NativeUia.PerformDirect(target.Uia, action, delegate() { ActionStarted = true; });
@@ -540,7 +620,7 @@ internal static partial class SemanticWorker
         int state = Convert.ToInt32(acc.get_accState(child));
         if (kind == "read") {
             foreach (var key in new [] { "text", "start", "end", "row", "column" }) if (action.ContainsKey(key)) throw new InvalidOperationException("MSAA does not support range/grid reads");
-            var result = Describe(target);
+            var result = Describe(target); result["selected"] = (state & 2) != 0;
             if ((state & 0x20000000) != 0) { result["redacted"] = true; return result; }
             int max = Integer(action, "maxChars", 16000); if (max < 1 || max > 100000) throw new InvalidOperationException("read limit invalid");
             string value = LegacyOptional(() => acc.get_accValue(child));
@@ -576,10 +656,16 @@ internal static partial class SemanticWorker
                 if (consistency != "snapshot" && consistency != "live") throw new InvalidOperationException("consistency must be snapshot or live");
                 bool acquiring = Text(args, "kind") == "acquire";
                 if (acquiring && SnapshotMatchLimit(args) > 0 && consistency != "snapshot") throw new InvalidOperationException("query maxMatches requires snapshot consistency");
-                object result = acquiring ? (consistency == "snapshot" ? AcquireSnapshot(args, owner) : Acquire(args, owner)) : Act(args, owner);
+                object result = Text(args, "kind") == "locate" ? Locate(args, owner) :
+                    acquiring ? (consistency == "snapshot" ? AcquireSnapshot(args, owner) : Acquire(args, owner)) : Act(args, owner);
                 Console.WriteLine(Json.Serialize(new Dictionary<string, object> { { "id", id }, { "result", result }, { "execution_state", ActionStarted ? "completed" : "not_started" } }));
             } catch (Exception error) {
-                var response = new Dictionary<string, object> { { "id", id }, { "error", error.Message }, { "execution_state", ActionStarted ? "unknown" : "not_started" } };
+                var response = new Dictionary<string, object> { { "id", id }, { "error", error.GetType().FullName + " (0x" + error.HResult.ToString("X8") + "): " + error.Message }, { "execution_state", ActionStarted ? "unknown" : "not_started" } };
+                // 只读解析可以重新执行；动作未知时不发布可重试错误码。
+                var com = error as COMException;
+                bool unavailable = error is ElementNotAvailableException || (com != null && com.ErrorCode == unchecked((int)0x80040201));
+                if (!ActionStarted && (unavailable || error.Message.StartsWith("cursor_stale:"))) response["error_code"] = "COMPUTER_LOCATOR_CHANGED";
+                if (!ActionStarted && error.Message.StartsWith("stale_target:")) response["error_code"] = "COMPUTER_TARGET_STALE";
                 var changed = error as SnapshotChangedException;
                 if (changed != null && !ActionStarted) {
                     response["error_code"] = "COMPUTER_SNAPSHOT_CHANGED";

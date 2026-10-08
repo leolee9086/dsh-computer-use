@@ -39,6 +39,7 @@ function run(command, args, cwd, env) {
 
 const toolNames = [
   'computer_accessibility',
+  'computer_act',
   'computer_click',
   'computer_click_image',
   'computer_drag',
@@ -47,6 +48,7 @@ const toolNames = [
   'computer_find_image',
   'computer_input',
   'computer_key',
+  'computer_locate',
   'computer_move',
   'computer_narrator',
   'computer_read',
@@ -54,6 +56,7 @@ const toolNames = [
   'computer_scroll',
   'computer_status',
   'computer_type',
+  'computer_wait',
   'computer_window_input',
   'computer_windows',
 ];
