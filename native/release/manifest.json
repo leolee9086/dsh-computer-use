@@ -1,13 +1,16 @@
 {
-  "version": "0.5.10",
-  "executableSha256": "3eb899748d201668c6f1f2e071c1325220b704ef5a48678a5c4389e54bb7274a",
+  "version": "0.5.11",
+  "executableSha256": "da34b0e6099bb49d5f0ec40e6c1854c11d3017e6cd1e8ac2f3263cd6fa715329",
   "sources": {
     "native/Cargo.lock": "eebd959a5d7dbdcd2d3761414ac199f38b0be90800da627206acbe57e8b63aaa",
-    "native/Cargo.toml": "dd2bb73cda270c22dd51658673524dc4d63ba3068e95d193ad071a2bb2032a41",
+    "native/Cargo.toml": "c7b034a5fc17a676cf42be7775f44ca03bf53aa5fd0fc9a322384fdaf76d1a25",
+    "native/src/color_search.rs": "f69771cb8c00a961671d4a96fc2ff94571ceb2f917ff9e9f3fb00b24ef4445b9",
     "native/src/image_match.rs": "f6c8d0b2df61d86c4a106141312cd246a80d388aa3b7682e6867b04624b9974e",
     "native/src/image_template.rs": "3a2e374216b69cf2fbfcae8159817ccdae36008ac4b36c7489545245d2a591a5",
     "native/src/input_sequence.rs": "f9d3c768570412984f6f63e74a1a8a3fcf7bed591f3a6d474cbbb67481581476",
-    "native/src/main.rs": "9a9ec9fda1c91c59020c856c9a9f2976a3aa95b56d7599dfd3730637d638ec4d",
+    "native/src/main.rs": "d9294d7f83801e5738db2ff967ed2ba9646205bb8de029011f7110a10e90c034",
+    "native/src/ocr.rs": "ea6875eee03cbf31a1796ce056ed23bb24ee2944ec8b166aab22ef639dab33cd",
+    "native/src/visual.rs": "5f4d9b0833176b81ad2eb03d31b0b6a33f4a8ed94ad855e1aba15a0353f0d16e",
     "native/src/window_control.rs": "3c81ee53f81ec29e01f758e0799c9080d8157e939a3374c0b438e1044c9dca7b"
   }
 }

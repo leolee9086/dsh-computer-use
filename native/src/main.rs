@@ -18,9 +18,12 @@
 //! （见 src/tool.js 的 mapScreenshotPoint），所以区域裁剪只要如实回报边界，
 //! 点击/拖拽/滚动的坐标就自动继续正确。
 
+mod color_search;
 mod image_match;
 mod image_template;
 mod input_sequence;
+mod ocr;
+mod visual;
 mod window_control;
 
 use std::io::{Read, Write};
@@ -1605,6 +1608,12 @@ fn main() -> ExitCode {
         let _ = SetProcessDpiAwareness(PROCESS_PER_MONITOR_DPI_AWARE);
     }
     match command.as_str() {
+        "find-color" => json_command(visual::find_color),
+        "ocr" => json_command(visual::recognize),
+        "ocr-languages" => match ocr::languages().and_then(|result| write_json(&result)) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => fail(error),
+        },
         "child-windows" => json_command(window_control::children),
         "window-message" => json_command(window_control::perform_message),
         "manage-window" => json_command(window_control::manage),
@@ -1697,11 +1706,11 @@ fn main() -> ExitCode {
             Err(e) => fail(e),
         },
         "" => fail(
-            "用法：dsh-screen <list-displays|screenshot|find-image|action|list-windows|focus-window|child-windows|window-message|manage-window|probe-pixels> \
+            "用法：dsh-screen <list-displays|screenshot|find-image|find-color|ocr|ocr-languages|action|list-windows|focus-window|child-windows|window-message|manage-window|probe-pixels> \
              [--x N --y N --width N --height N]",
         ),
         other => fail(format!(
-            "未知命令 '{other}'（支持 list-displays / screenshot / find-image / action / list-windows / focus-window / child-windows / window-message / manage-window / probe-pixels）"
+            "未知命令 '{other}'（支持 list-displays / screenshot / find-image / find-color / ocr / ocr-languages / action / list-windows / focus-window / child-windows / window-message / manage-window / probe-pixels）"
         )),
     }
 }

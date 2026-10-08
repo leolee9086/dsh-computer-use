@@ -11,6 +11,7 @@ import { loadCSharpFile } from './csharp.js';
 import { ComputerUseError, unsupported } from './errors.js';
 import { assertFinitePoint } from './geometry.js';
 import { imageSearchOptions, validateImageResult } from './image-match.js';
+import { colorOptions, ocrOptions, integer, validateColorResult, validateOcrResult, validateOcrStatus } from './visual.js';
 
 const KEY_CODES = {
   alt: 0x12,
@@ -332,6 +333,10 @@ export class WindowsComputer {
       semanticWorkerIsolation: true,
       inputSequence: true,
       backgroundCapture: true,
+      colorSearch: true,
+      ocr: true,
+      ocrConfidence: false,
+      visualWait: true,
       childWindows: true,
       windowManagement: true,
       narrator: true,
@@ -465,6 +470,31 @@ export class WindowsComputer {
     // 给启动/序列化留五秒，系统抓屏卡住时仍由官方 ManagedRunner 的总截止终止进程。
     const result = await runNativeHelper(this.runner, helperPath, ['find-image'], payload, signal, undefined, options.budgetMs + 5000);
     return validateImageResult(result, options);
+  }
+
+  /** 区域视觉观测不提窗；启动、捕获、计算和返回都受同一硬预算约束。 */
+  async findColor(request, signal) {
+    const options = colorOptions({ rgb: request.rgb, tolerance: request.tolerance, direction: request.direction,
+      max_pixels: request.maxPixels, max_samples: request.maxSamples });
+    const budgetMs = integer(request.budgetMs, 'budgetMs', 1, 120000);
+    const payload = { capture: request.capture, ...options, budgetMs };
+    const result = await runNativeHelper(this.runner, requireHelperPath(this.config), ['find-color'], payload, signal, 64 * 1024, budgetMs);
+    return validateColorResult(result, payload);
+  }
+
+  async recognizeText(request, signal) {
+    const options = ocrOptions({ scale: request.scale, language: request.language, max_words: request.maxWords,
+      max_chars: request.maxChars, min_confidence: request.minConfidence });
+    const budgetMs = integer(request.budgetMs, 'budgetMs', 1, 120000);
+    const payload = { capture: request.capture, ...options, budgetMs };
+    const result = await runNativeHelper(this.runner, requireHelperPath(this.config), ['ocr'], payload, signal, 2 * 1024 * 1024, budgetMs);
+    return validateOcrResult(result, payload);
+  }
+
+  async ocrStatus(signal, timeoutMs = 10000) {
+    const result = await runNativeHelper(this.runner, requireHelperPath(this.config), ['ocr-languages'], undefined,
+      signal, 64 * 1024, integer(timeoutMs, 'timeoutMs', 1, 120000));
+    return validateOcrStatus(result);
   }
 
   /**

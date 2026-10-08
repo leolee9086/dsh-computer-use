@@ -1,6 +1,6 @@
 # dsh-computer-use
 
-独立的 Cordis bundle，为 DeepSeek Harness 提供视觉、原生无障碍和 Windows 讲述人操作路径。0.5.10 注册 **21 个 `computer_*` 工具**；无障碍观测、层级定位、条件等待、阅读和语义动作可以独立使用，文本模型也能操作原生应用。
+独立的 Cordis bundle，为 DeepSeek Harness 提供视觉、原生无障碍和 Windows 讲述人操作路径。0.5.11 注册 **24 个 `computer_*` 工具**；无障碍观测、层级定位、条件等待、阅读和语义动作可以独立使用，文本模型也能操作原生应用。
 
 Windows 是经过本机运行时验证的主要后端。macOS AX、Linux AT-SPI 已实现并做契约测试，尚无这两个系统的原生运行时验收。接口覆盖与实测范围见 [EVIDENCE.md](EVIDENCE.md)；对标的官方接口见 [能力矩阵](references/CAPABILITY-MATRIX.md)。目前没有任务成功率基准，也没有 SOTA 等效结论。
 
@@ -9,6 +9,7 @@ Windows 是经过本机运行时验证的主要后端。macOS AX、Linux AT-SPI 
 | 路径 | 工具 | 行为 |
 | --- | --- | --- |
 | 视觉 | `computer_screenshot`、`computer_find_image`、`computer_click_image` | 多显示器、区域/缩放、Windows 前台窗口捕获、显式后台 PrintWindow、模板匹配与唯一匹配点击。截图可返回图像附件或保存 PNG 后返回文件信息。 |
+| 区域视觉观测 | `computer_find_color`、`computer_ocr`、`computer_wait_visual` | Windows 限定区域 RGB 像素检索、系统 OCR 字/行与有界出现/消失等待；不提窗，不产生点击凭据。 |
 | 指针 | `computer_move`、`computer_click`、`computer_drag`、`computer_scroll` | 截图像素映射到实际捕获边界；Windows 支持三击、modifier、按住、带路径拖动。 |
 | 键盘/序列 | `computer_key`、`computer_type`、`computer_input` | Windows 支持扩展键、Insert/CapsLock、重复/按住，以及一条有界 down/move/up 序列；纯键盘也接受窗口或绑定窗口的语义证据。 |
 | 无障碍 | `computer_accessibility`、`computer_find`、`computer_read`、`computer_element` | 独立快照、元素查找、文本/选择/值/状态读取与控件模式操作。Windows UIA、MSAA 支持分页、分支展开和原生查询。 |
@@ -138,6 +139,32 @@ MSAA 使用 `AccessibleObjectFromWindow` / `AccessibleChildren`，提供传统�
 
 `computer_click_image` 使用同样参数、默认阈值 0.95，要求完整覆盖且只有一个视觉聚类；部分覆盖找到零处或一处都不点击。旧 helper 缺少覆盖或模式/变换确认字段时直接报错。指名窗口的找图会提窗，原生失败也会使受影响的旧观测失效。找图和随后输入使用独立调用，屏幕内容或窗口在间隙变化仍可能影响点击；实际输入后应验证应用结果。
 
+### 区域找色、OCR 与视觉等待
+
+三个区域视觉工具都要求整数 `region:{x,y,width,height}`，最多 16,000,000 像素。带 `window_id` 时相对**完整窗口**左上角，原生每次重读身份与边界后换算；省略窗口时使用虚拟桌面物理像素，允许负原点。区域必须完整位于来源内，越界直接报错。默认 `capture_mode:"screen"` 要求指名窗口已在前台，不会暗中提窗；显式 `print_window` 要求窗口，按应用后台渲染裁切，支持情况取决于应用。
+
+`computer_find_color` 按行或反向行扫描，RGB 每个通道的偏差都必须 <= 整数 `tolerance`（0–255，默认 0），alpha 不参与。`matchingPixels` 统计全部已访问匹配像素；`max_samples`（1–32，默认 8）只限制展示坐标，不限制总数。`max_pixels` 默认 16,000,000、最多 100,000,000；位置或时间耗尽返回 partial/incomplete、`stopReason` 与 `visitedPixels/totalPixels`。部分零匹配不能证明缺席；像素数量也不证明控件唯一。
+
+```json
+{"window_id":"<已观测窗口ID>","region":{"x":12,"y":138,"width":28,"height":28},"rgb":[220,237,249],"tolerance":0,"max_samples":2,"timeout_ms":3000}
+```
+
+`computer_ocr(operation:"status")` 返回系统已安装语言、图像尺寸上限及分数可用性。`operation:"read"` 使用 Windows.Media.Ocr，返回 words/lines、`lineIndex`、行的 `wordStart/wordCount`、绝对桌面 `bounds` 与字的 OCR 图像 `imageBounds`。`scale` 是显式 1–4 倍 Lanczos3 放大，坐标按实际取整后的 `imageWidth/Height` 映射。可指定已安装 `language`；省略使用系统 profile 语言，未安装语言明确拒绝。`max_words` 默认 500、最多 2000；`max_chars` 默认 16000、最多 64000，包含重复输出的字和行文本。输出被截断时明确 partial，不把最后一行字前缀合成完整行。
+
+```json
+{"operation":"read","window_id":"<已观测窗口ID>","region":{"x":8,"y":1008,"width":1300,"height":32},"language":"zh-Hans-CN","scale":3,"timeout_ms":5000}
+```
+
+系统引擎**不提供置信度分数**：`confidenceAvailable:false`、`confidenceReason:"engine_does_not_expose_score"`，字与行 `confidence:null`；任何 `min_confidence`（包括 0）均拒绝。OCR 可漏字、误字和符号，不提供文字准确率保证。实际 SketchUp 2024 的完整状态栏在 3 倍读取时识别出选择对象、矩形第一个角等主句，但漏掉部分 Shift/Ctrl 提示并误识别符号；工具状态另外通过原生按钮读回确认，详见 [EVIDENCE.md](EVIDENCE.md)。
+
+`computer_wait_visual` 的 `query.kind` 为 color 或 text，支持 `state:"present"/"absent"`。颜色可给 `min_pixels`，文字支持 exact/contains、word/line 和 `case_sensitive`；默认匹配完整行并区分大小写。每次重新抓取同一身份的区域，共用 `timeout_ms`（默认 10000，等待范围 100–120000）硬截止，包含启动/捕获/识别/返回；`poll_ms` 默认 100、范围 20–1000。单次找色/OCR 的预算范围 1–120000。来源失焦、身份/边界变化等捕获错误停止等待，分别返回 condition、timeout 或 error，不把错误伪装为消失。已知前缀命中可证明出现，消失要求完整覆盖；文字消失只表示这次**没有识别到匹配文字**。
+
+```json
+{"window_id":"<已观测窗口ID>","region":{"x":12,"y":138,"width":28,"height":28},"query":{"kind":"color","rgb":[220,237,249],"min_pixels":675},"state":"present","timeout_ms":3000}
+```
+
+结果的 `visual_id` 是独立报告标识，`coordinate_space:"desktop_native_pixels"`；它不注册截图或语义观测，不能作为点击、键盘或元素动作凭据。三个工具均按观测类审批，不发送输入。
+
 Windows 输入序列最多 256 步，显式等待/按住总和最多 10 秒；全文本最多 100000 UTF-16 单元。整条序列先校验再执行，首错停止。正常结束及处理到的错误释放该序列取得的按键/鼠标按钮；不会取得或释放调用前已由外部按住的输入。绑定窗口的序列每步检查身份及前台状态。强制结束进程无法保证析构清理执行，见 [SECURITY.md](SECURITY.md)。
 
 `computer_key` / `computer_type` 接受有效的 `window_id`、绑定窗口的 `snapshot_id` 或前台截图证据。键盘快捷键的实际含义由应用决定，输入投递成功仍需确认相关结果。
@@ -168,7 +195,7 @@ helper 不主动请求前台，应用的消息处理仍可能自行激活窗口�
 | 独立无障碍观测/读取/基本动作 | UIA、MSAA 已实测 | AXValue / AXSelectedText；需 Automation + Accessibility | AT-SPI 文本/范围/选择/caret/数值；需 Python + pyatspi + AT-SPI 总线 |
 | 分支展开、续页、原生查询、层级定位/等待、常驻隔离工作进程 | UIA、MSAA | 明确不支持 | 明确不支持 |
 | 每次获取的节点/深度/时间预算 | 支持 | 支持，契约测试 | 支持，契约测试 |
-| 区域/窗口截图、图像匹配 | 已实测 | 明确不支持 | 明确不支持 |
+| 区域/窗口截图、图像匹配、RGB 找色/OCR/视觉等待 | 已实测；OCR 无分数 | 明确不支持 | 明确不支持 |
 | 原子输入序列/路径拖动/扩展 hold/repeat | 已实现及核心真机检查 | 明确拒绝 | 明确拒绝 |
 | PrintWindow/子 HWND/窗口管理/讲述人 | Windows 专属 | 明确拒绝 | 明确拒绝 |
 
@@ -209,6 +236,8 @@ pnpm run smoke:windows
 pnpm run smoke:electron "C:\path\to\DeepSeek Harness.exe"
 # 定向检查原生像素覆盖、窗口输入及 Electron 桥：
 pnpm run smoke:images "C:\path\to\DeepSeek Harness.exe"
+# 限定区域找色、系统 OCR 和视觉条件等待：
+pnpm run smoke:visual "C:\path\to\DeepSeek Harness.exe"
 pnpm run verify:profile
 # 修改 Rust 原生源码后：
 cargo build --release --manifest-path native/Cargo.toml
@@ -216,6 +245,6 @@ pnpm run native:stage
 pnpm pack --pack-destination .local
 ```
 
-`verify` 检查所有 JS 文件并运行单元/提供者合同及真实 ToolRuntime 回归。`verify:profile` 使用独立临时 DSH home 检查真实 Loader、21 工具及提示词，清理后不影响既有 profile。`smoke:semantics` 用真实 Cordis 本地子进程服务测试万节点 UIA/MSAA、分页/分支/查询/引用/虚拟化、阻塞终止和恢复，并与旧采集算法测量同一提供者的调用量与响应大小。`smoke:snapshots` 验证两种后端万节点固定分页、未交付代次变化丢弃、查询未命中节点复核、静默插删/重排/属性更新、封存后原生采集零调用，以及历史结果不能绕过实时目标校验。`smoke:recovery` 验证查询未命中项静默变更后重采一次、持续变化三次尝试后失败、已交付游标不换结果、旧动作引用实时拒绝，以及相同覆盖范围下的按需缓存读取量。`smoke:matches` 验证真实 UIA/MSAA 在相邻及远端属性 getter 阻塞时仍可早停并封存首项；匹配前缀完整复读、每页一项的固定三页、未命中项及重排变更丢弃、无匹配时搜索完整范围，以及动作实时身份拒绝。`smoke:lifetimes` 将自建窗口的真实属性读取延迟 1200ms，并把测试进程私有的代次起点移到距期限 1000ms，验证分段内到期丢弃、旧游标拒绝、引用清除及同进程恢复；还验证未来的展示时间戳不会延长封存时效，不修改机器时钟或生产时效常量。`smoke:locators` 使用默认 WPF AutomationPeer 与真实 ToolRuntime，验证同名消歧、容器替换、动作一次及读回、取消、惰性树、600 项虚拟列表、Grid 单元格和独立 HWND 弹窗；并在等待期间模拟人工编辑、切窗和原目标替换，检查另一个同名窗口未被操作。Electron smoke 还将真实 ToolRuntime 与 WindowsComputer/原生工作进程接在一起，按默认 8 条语义观测上限读取 UIA/MSAA 各 13 页，检查采集变化丢弃、固定续页、历史动作消耗状态、会话隔离及变化恢复；也包含已有 WPF/WinForms 动作。每项验收需在模块及清理完成后返回完成标记，加载失败、提前退出或迟到异常均不能只凭退出码 0 判为通过。Windows 动作 smoke 只操作标题唯一、由自己创建的进程，结束后清理自己的进程和临时目录。
+`verify` 检查所有 JS 文件并运行单元/提供者合同及真实 ToolRuntime 回归。`verify:profile` 使用独立临时 DSH home 检查真实 Loader、24 工具及提示词，清理后不影响既有 profile。`smoke:semantics` 用真实 Cordis 本地子进程服务测试万节点 UIA/MSAA、分页/分支/查询/引用/虚拟化、阻塞终止和恢复，并与旧采集算法测量同一提供者的调用量与响应大小。`smoke:snapshots` 验证两种后端万节点固定分页、未交付代次变化丢弃、查询未命中节点复核、静默插删/重排/属性更新、封存后原生采集零调用，以及历史结果不能绕过实时目标校验。`smoke:recovery` 验证查询未命中项静默变更后重采一次、持续变化三次尝试后失败、已交付游标不换结果、旧动作引用实时拒绝，以及相同覆盖范围下的按需缓存读取量。`smoke:matches` 验证真实 UIA/MSAA 在相邻及远端属性 getter 阻塞时仍可早停并封存首项；匹配前缀完整复读、每页一项的固定三页、未命中项及重排变更丢弃、无匹配时搜索完整范围，以及动作实时身份拒绝。`smoke:lifetimes` 将自建窗口的真实属性读取延迟 1200ms，并把测试进程私有的代次起点移到距期限 1000ms，验证分段内到期丢弃、旧游标拒绝、引用清除及同进程恢复；还验证未来的展示时间戳不会延长封存时效，不修改机器时钟或生产时效常量。`smoke:locators` 使用默认 WPF AutomationPeer 与真实 ToolRuntime，验证同名消歧、容器替换、动作一次及读回、取消、惰性树、600 项虚拟列表、Grid 单元格和独立 HWND 弹窗；并在等待期间模拟人工编辑、切窗和原目标替换，检查另一个同名窗口未被操作。Electron smoke 还将真实 ToolRuntime 与 WindowsComputer/原生工作进程接在一起，按默认 8 条语义观测上限读取 UIA/MSAA 各 13 页，检查采集变化丢弃、固定续页、历史动作消耗状态、会话隔离及变化恢复；也包含已有 WPF/WinForms 动作。每项验收需在模块及清理完成后返回完成标记，加载失败、提前退出或迟到异常均不能只凭退出码 0 判为通过。Windows 动作 smoke 只操作标题唯一、由自己创建的进程，结束后清理自己的进程和临时目录。`smoke:visual` 使用真实 ToolRuntime 和系统 OCR 读取自绘 WinForms，覆盖限定区域、方向/容差/计数、截断不能证明消失、定时变化、超时/失焦、遮挡后台读取和移动后相对区域；点击计数保持零。另已完成当前真实 SketchUp 2024 的 R/空格工具切换、中文状态读取及按钮高亮等待，未向画布输入或保存模型；该现场脚本与原始截图/结果仅保存在本地检查点，不是通用应用基准。
 
 `native:stage` 复制 release exe 并记录二进制与 Rust 源文件哈希；`prepack` 要求回归成功且产物清单匹配当前版本/源码。打包不含构建缓存或本地检查点。来源、许可与风险边界见 [UPSTREAM.md](references/UPSTREAM.md)、[LICENSE](LICENSE)、[SECURITY.md](SECURITY.md)，变更见 [CHANGELOG.md](CHANGELOG.md)。

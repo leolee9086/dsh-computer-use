@@ -14,6 +14,9 @@ Windows 捕获、输入与窗口控制后端，版本 0.5.0。单文件 Rust exe
 | `action` | `{action,focus?}` | `{ok:true}`；错误前可能已有输入副作用 |
 | `screenshot --out <path>` | 下述捕获字段 | `path/width/height/sourceBounds/captureMode/bytes/displayId?` |
 | `find-image` | `templatePng/threshold/tolerance/colorMode/maskMode/alphaMin/templateScale/budgetMs/maxPositions/region?/focus?` | `found/status/coverage/visitedPositions/totalPositions/stopReason?/matchCount/matches/…` |
+| `find-color` | `{capture:{region,window?,captureMode},rgb,tolerance,direction,budgetMs,maxPixels,maxSamples}` | `found/status/coverage/searched/windowBounds/visitedPixels/totalPixels/matchingPixels/samples/…` |
+| `ocr` | `{capture:{region,window?,captureMode},scale,language?,maxWords,maxChars,budgetMs}` | `engine/language/coverage/status/searched/windowBounds/imageWidth/imageHeight/words/lines/…` |
+| `ocr-languages` | 无 | 已安装语言、`maxImageDimension` 与置信分数可用性 |
 | `child-windows` | `{window,maxNodes}` | 子 HWND `windows` 与 `truncated` |
 | `window-message` | `{window,child,action}` | `delivered/applicationResultVerified/foregroundChanged` |
 | `manage-window` | `{window,action}` | 操作结果；关闭为 `posted:true,applicationResultVerified:false` |
@@ -51,6 +54,20 @@ GDI 桌面捕获使用 SRCCOPY；此前特定 GPU/DWM 环境下 CAPTUREBLT 产�
 返回请求模式确认 `colorMode/maskMode/alphaMin/templateScale`、`sourceTemplateWidth/Height`、实际 `templateWidth/Height`、`resizeFilter:"nearest"`、`activePixelCount`；原有 `scale:1` 表示抓屏未降采样，与模板比例分别报告。覆盖位置、聚类半径和点击中心使用实际模板尺寸。返回 `visitedPositions/totalPositions`、`coverage:"complete"` 或 `"partial"`。只有完整覆盖的零匹配报告 `status:"not_found"`；时间、位置或 100000 聚类上限耗尽报告 `status:"incomplete"` 及 `stopReason:"time_budget"/"position_limit"/"cluster_limit"`。`found` 只表示已知匹配，部分覆盖的数量是完整计数的下界。
 
 聚类规则 `row_major_fixed_anchor_half_template`：按行首匹配固定锚点，横纵距离分别不超过半模板宽高时归入最早相邻锚点。空间索引限制邻域查找，锚点不随最高分展示点移动，前缀计数不会在继续扫描时下降。`matchCount` 不受八处展示上限影响，`matches` 只输出最高分八处。视觉聚类不等于业务身份，相邻不同对象仍可能合并。宿主点击必须校验完整协议、请求模式与变换、完整覆盖且仅一聚类；旧 helper 缺少确认字段直接拒绝。找图与输入间的界面变化不具有事务保证。
+
+## 区域找色与系统 OCR
+
+`find-color` / `ocr` 的 `capture.region` 必填，面积最多 16,000,000 原生像素。指定 `capture.window` 时，区域相对**完整窗口**左上角，每次读取实时边界换算；省略窗口时使用有符号虚拟桌面坐标。区域必须完整位于实际来源内，越界直接拒绝，不采用 screenshot 的裁切规则。结果 `searched` 是绝对区域，`windowBounds` 为本次窗口边界；桌面模式为 null。
+
+`captureMode` 为 `screen` 或 `print_window`。工具不会聚焦、恢复或输入。窗口 screen 模式要求目标已经前台、可见且未最小化，捕获前后复核身份、边界与前台。print_window 要求窗口身份，先取得完整窗口渲染再裁区域，捕获后复核边界；完整渲染仍受原有 64,000,000 像素上限约束。应用可能不支持后台渲染；错误立即上报，无前台回退。视觉结果属于像素观测，不提供截图或语义元素动作凭据。
+
+找色按 `row_major` / `reverse_row_major` 遍历每个像素，RGB 三个通道分别满足包含边界的 `tolerance`（0–255）才匹配。`maxPixels` 为 1–100,000,000，`maxSamples` 为 1–32；样本展示上限不截断 `matchingPixels`。结果报告方向、请求颜色、容差、实际 RGB 样本和绝对坐标，以及 `visitedPixels/totalPixels`。预算停止时 `coverage:partial/status:incomplete`、`stopReason:timeout/pixel_limit`；部分已知匹配可以证明命中，部分零匹配不能证明缺席。像素数量不等于控件数量或唯一性。
+
+OCR 使用系统 `Windows.Media.Ocr`。`ocr-languages` 无请求体，返回已安装 tags、系统图像最长边上限和分数可用性；显式 language 必须已安装，省略时使用系统 profile 语言，无法创建引擎直接报错。`scale` 为 1–4，以 Lanczos3 放大；返回实际取整后的 `imageWidth/Height`，字框按实际宽高分别映射回原生绝对坐标，不能只除请求比例。原图及 OCR 图面积都最多 16,000,000 像素，OCR 图还受系统最长边约束。
+
+`words` 包含 text、绝对 `bounds`、OCR 图内 `imageBounds` 和 `lineIndex`；`lines` 包含 text、所有成员字框的并集、`lineIndex/wordStart/wordCount`。引擎不暴露置信分数，字/行 `confidence:null`，`confidenceAvailable:false`，原因 `engine_does_not_expose_score`；公开工具拒绝任何 `min_confidence`，包括 0。`maxWords` 为 1–2000，`maxChars` 为 1–64000，字符预算同时计入输出的字和行文本。字、字符或时间预算停止时明确 partial/incomplete（`word_limit/character_limit/timeout`），截断尾部可保留字而没有完整行，不拼接前缀冒充整行。complete 只表示本次引擎结果完整交付，不能证明所有屏幕文字均识别正确。
+
+两命令 `budgetMs` 为 1–120000，包括捕获、准备及扫描/识别；宿主的官方 managed subprocess 用同一总预算终止阻塞，无额外五秒余量。公开 `computer_wait_visual` 每轮重新捕获固定来源，共享单调总截止、链接取消与每轮剩余预算；来源错误立即停止，取消原样上报。出现条件可用已知命中，消失条件要求完整覆盖；OCR 消失只表示无识别匹配。`visual_id` 是独立观测标识，不能用于动作。
 
 ## 有界输入
 

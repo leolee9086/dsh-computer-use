@@ -1,6 +1,53 @@
-# Capability Evidence — 0.5.10
+# Capability Evidence — 0.5.11
 
 ## Current validation — 2026-10-08
+
+0.5.11 adds Windows bounded-region RGB pixel search, system OCR and visual present/absent waits through `computer_find_color`, `computer_ocr` and `computer_wait_visual`, bringing the bundle to 24 tools. These are observations: they neither focus/restore a source nor send input, and their independent `visual_id` is not screenshot or semantic action evidence. A named window retains its observed HWND/PID/title; each capture reads its current whole-window bounds and translates the relative region. Desktop regions use signed native coordinates. Out-of-source regions fail rather than being clipped.
+
+The actual Electron 44.0.0 / Node 24.18.1 / ABI149 acceptance uses a real Cordis Context, ToolRuntime, production WindowsComputer, official managed subprocess and the system `Windows.Media.Ocr` engine. The tested build, staged release and temporary medium-integrity copy share executable SHA-256 `da34b0e6099bb49d5f0ec40e6c1854c11d3017e6cd1e8ac2f3263cd6fa715329`. The ordinary 760×420 WinForms fixture draws text and RGB blocks; it supplies no fabricated query results or OCR scores. Its result contains 24 checks plus the final window/state, 26 recorded entries:
+
+| Task | Observed result |
+| --- | --- |
+| OCR status | Installed tags en-US, zh-Hans-CN and zh-Hant-TW; maximum image dimension 10000; confidence unavailable |
+| Complete exact RGB count | 480 matching pixels across all 4550 region pixels, with only two displayed samples |
+| Reverse traversal | Same count; first forward sample (110,260), first reverse sample (159,271) in absolute native coordinates |
+| Inclusive per-channel tolerance 2 | 720 pixels match; a block differing by 3 in one channel stays excluded |
+| Pixel-limited prefixes | max_pixels 1 gives partial zero; 1311 gives partial one; the known hit satisfies present, while partial zero cannot satisfy absent and times out at its 600ms budget |
+| Region-only OCR | ALPHA READY and STATUS WAIT read; OUTSIDE SECRET outside the region is excluded; all word scores are null |
+| Rounded enlargement | 521×121 at scale 1.5 becomes 782×182; actual dimensions govern word bbox mapping |
+| Word/character limits | One-word output is partial with no fabricated complete line; max_chars 6 also returns a partial word prefix; partial OCR cannot satisfy absent and times out at its 1500ms budget |
+| Unsupported requests | min_confidence 0, uninstalled fr-FR and an escaping region each fail explicitly |
+| Control policy | Separate controlApproval deny rejects an attempted click; this checks policy denial, not visual-ID credential validation |
+| Actual delayed pixel/text changes | Wait observes 480 new-color pixels and the exact ALPHA DONE line after fixture timer changes |
+| Text never appears | The 1200ms wait reports unfulfilled timeout within the asserted bound |
+| Source loses foreground | Screen-window wait stops with a source error, not successful absence or repeated capture recovery |
+| Fully covered target | PrintWindow still reads 480 pixels and ALPHA READY while the explicitly focused cover retains foreground |
+| Window moves after listing | The same identity rebases region to (160,270), first matching pixel (170,280), after window origin changes to (140,100) |
+
+The fixture finishes with click count zero and its completion marker after cleanup. Scan samples and true pixel counts are independent. Coverage-limited zero does not establish absence. A complete OCR result describes delivery of the engine output, not accuracy or completeness of the underlying screen text.
+
+A separate actual-application acceptance used the currently running SketchUp 2024 through the same real ToolRuntime/Electron/official runner and new production code. It pinned HWND 257243938 / PID 72400, found the Select/Rectangle buttons and status bar through native UIA, and read Select toggle_state On before switching. Its 20 recorded samples include source evidence, OCR/color observations, four waits and final UIA readback:
+
+| Actual SketchUp task | Observed result |
+| --- | --- |
+| Chinese Select status | A whole-status region enlarged explicitly by scale 3 reads the main line 单 击 或 拖 动 以 选 择 对 象; Shift/Ctrl symbols are incomplete |
+| Select button color | Interior sample RGB (220,237,249); complete 28×28 scan counts 675 matching pixels |
+| R switches to Rectangle | Key uses fresh native window evidence window-93d6c4e3-a484-484a-a712-d0e074d91d6e; a fresh list returns window-054a0909-5973-445a-8b6c-2c44a3b3ca30; OCR includes 点 击 设 置 第 一 个 角 |
+| Rectangle confirmation | Exact previously observed OCR line fulfills in one attempt / 264ms; Select color becomes complete zero and absent fulfills in one attempt / 200ms |
+| Space restores Select | Key uses fresh native evidence window-a875e720-6b32-402d-a54c-6ffbe12f537b; a fresh list returns window-04a41612-1467-4dc3-bec5-2d5d06493b27; main Select status returns |
+| Restored confirmation | Observed exact text fulfills in one attempt / 265ms; 675 color pixels fulfill in one attempt / 214ms; a new native query/read confirms toggle_state On |
+
+The only application controls were explicit focus, R and Space; there was no canvas input or model save. Each key used evidence from the native surface and was followed by a fresh observation. These are single-run wait durations, not latency distributions or OCR accuracy estimates. Earlier probes stopped before key dispatch on a read-only source change, incorrectly expected toggle state in a summary, or used a narrow OCR region that missed Chinese characters. Region/scale diagnostics and an interior color sample corrected those probes; production checks and action expectations were not relaxed. The final OCR still has misrecognized key labels (including 褳) and omitted punctuation. Before/after images and raw results are local acceptance artifacts; saving them does not claim image inspection by a model.
+
+Twenty-seven Rust tests pass, including the retained 22 image/input tests, three independent color scan checks, actual-rounded OCR bbox mapping and window-relative rebasing. Fourteen focused visual JS tests pass for regions/options, strict response confirmation, complete/partial counting, OCR geometry/word-line membership and character limits, unsupported scores, hard deadlines, cancellation and source errors. The staged new executable also passed the actual Electron native expansion and bridge regressions, with both completion markers after cleanup: occluded PrintWindow pixels/foreground preservation, directed Panel/Button messages with measured application activation, stale child PID refusal, resize, modifier/Unicode input, normal key/mouse release, stop/release on focus loss, and minimized discovery/restoration. One explicitly not_started read-only snapshot change used the existing bounded reacquisition. Bridge checks confirm electron-edge-js, its compiler companion, Narrator status and twelve concurrent calls. Narrator was not running; there is no speech or virtual-cursor claim.
+
+The required source region and enlarged OCR image each have a 16,000,000-pixel limit; PrintWindow full rendering retains its 64,000,000-pixel limit. Screen-window capture requires foreground, visibility and non-minimized state and rechecks identity/bounds; print_window does not activate the source and has no screen fallback. OCR uses one explicit scale 1–4 with Lanczos3 and maps bboxes using actual rounded dimensions. Word and line texts share the character budget; a truncated final word group may lack a complete line. The engine provides no confidence API, so words/lines report confidence:null and every min_confidence request is rejected. Explicit language must be installed; no invented score or silent language substitution is supplied.
+
+Visual waits share one monotonic deadline, linked cancellation and remaining-budget managed subprocess calls without an extra five-second allowance. Known partial hits can satisfy present; absent requires complete output. OCR absence means no recognized match, not proof of no visible text. Source errors stop immediately. Pixel locations are observations, not business-object identities or input authorization, and the system offers no transaction across observation and later controls.
+
+Reproduce the controlled region acceptance with `pnpm run smoke:visual "C:\path\to\DeepSeek Harness.exe"`; native/bridge regression with `pnpm run smoke:images "C:\path\to\DeepSeek Harness.exe" native bridge`. `pnpm pack --pack-destination .local` runs the required syntax, Node/ToolRuntime and executable/source-manifest checks. SketchUp was exercised independently with new code; the installed GUI was not upgraded or restarted. Standard Win32 content adapters and further menu/dialog tasks remain under the broader goal. The controlled checks and one actual-application flow do not establish a general application success rate, installation or full capability parity.
+
+## Historical 0.5.10 validation — 2026-10-08
 
 0.5.10 extends the complete screen-resolution scan with explicit RGB comparison, alpha exclusion and one nearest-neighbor template ratio. Gray remains the default. An RGB pixel matches only when all three channels satisfy tolerance; the threshold denominator is the number of participating pixels. Alpha mode includes pixels whose alpha is >= the requested cutoff, without background compositing or alpha weighting. The same scanning kernel handles all modes, with the existing coverage, fixed-anchor clustering and partial-click refusal rules.
 

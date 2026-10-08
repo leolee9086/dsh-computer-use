@@ -5,6 +5,7 @@ import { flattenAccessibilityTree } from './semantics.js';
 import { acquisitionArgs, queryArgs, SEMANTIC_ACQUISITION_SCHEMA } from './semantic-query.js';
 import { NARRATOR_COMMANDS, narratorAction } from './narrator.js';
 import { registerLocatorTools } from './locator-tools.js';
+import { registerVisualTools } from './visual-tools.js';
 import { IMAGE_SEARCH_OPTIONS, imageSearchOptions, validateImageResult, imageClickPoint } from './image-match.js';
 import { INPUT_STEPS_SCHEMA, MODIFIERS, inputSequenceArgs, keyOptions } from './input-actions.js';
 import { accessibilityElementById, findAccessibilityElements } from './semantics.js';
@@ -16,6 +17,9 @@ const OBSERVATION_TOOLS = new Set([
   'computer_locate',
   'computer_wait',
   'computer_find_image',
+  'computer_find_color',
+  'computer_ocr',
+  'computer_wait_visual',
   'computer_read',
   'computer_screenshot',
   'computer_status',
@@ -631,6 +635,8 @@ export function apply(ctx, rawConfig) {
   registerLocatorTools({ register: (definition) => registerTool(ctx.tools, definition), textTool,
     provider: () => computer(ctx), state: (exec) => agentState(observations, exec),
     window: (id, exec) => freshWindow(observations, exec, id, config), publish: publishElements, control });
+  registerVisualTools({ register: (definition) => registerTool(ctx.tools, definition), textTool,
+    provider: () => computer(ctx), window: (id, exec) => freshWindow(observations, exec, id, config) });
 
   // 文件采集无需附件或模型服务，工具始终注册；图像投送才解析附件服务。
   {
