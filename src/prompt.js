@@ -16,6 +16,7 @@ export function apply(ctx) {
       '- Windows keyboard input accepts window_id or a window-bound snapshot_id without an image. computer_input executes bounded sequences, stops on failure and releases its held inputs. A timeout after dispatch may have an unknown result; verify it before repeating an action.',
       '- Foreground image coordinates refer to that exact delivered screenshot. PrintWindow background images are application-rendered and cannot ground global pointer input. Use supported semantic controls or child HWND client coordinates for targeted messages and inspect foregroundChanged and the result.',
       '- computer_screenshot(output:file, save_to:...) saves PNG metadata without sending an image. This mode does not establish that the model viewed the image. Image delivery requires an image-capable route.',
+      '- computer_find_image scans grayscale at native scale and reports coverage, visitedPositions and totalPositions. Partial coverage cannot prove absence or uniqueness; computer_click_image requires complete coverage and one visual cluster. Nearby objects may share a cluster. Verify the application result after input.',
       '- Windows Narrator commands assume a running reader, Microsoft Standard layout and the chosen Insert/CapsLock modifier. Its virtual cursor, UIA focus and speech are separate: inputDelivered does not verify cursor movement or speech.',
     ].join('\n'),
   });

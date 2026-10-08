@@ -1,6 +1,34 @@
-# Capability Evidence — 0.5.8
+# Capability Evidence — 0.5.9
 
 ## Current validation — 2026-10-08
+
+0.5.9 repairs image candidate counts that could not establish complete search coverage. Production now evaluates every legal original-resolution top-left position, retaining only sound per-position early rejection. Grayscale tolerance and the fraction-of-matched-pixels threshold remain the scoring rule. Threshold decisions use the same division as final scoring, including exact 0.9/0.95 boundaries.
+
+The actual Electron 44.0.0 / Node 24.18.1 / ABI149 image acceptance connects the real Cordis ToolRuntime, production WindowsComputer, official local subprocess service and an ordinary borderless 600×360 WinForms pixel canvas. The fixture generates a 24×24 PNG, draws the same native pixels without scaling, and reads its actual MouseUp count and client coordinates after each tool action. It does not supply fabricated match results or accessibility identities. The new build SHA-256 is `222010162545be45984845bf7e30f235bbe126dad75b310f7e99c555913d6f15`; the temporary medium-integrity helper copy has exactly the same bytes. All cases use threshold1/tolerance0:
+
+| Task | Observed result |
+| --- | --- |
+| Two identical templates | Complete coverage of 194,449 legal positions; two clusters; click refused and MouseUp count remains zero |
+| Nine nearby coarse-equivalent distractors and two real templates | New helper reports both real matches, including the distant target; click refused. The unchanged 0.5.8 helper on the same drawn screen reports only the early match, `matchCount:1`, and no coverage field |
+| Unique match at the final legal position | Complete scan returns client576,336 / screen616,396 with one cluster |
+| No drawn template | Complete `not_found`, zero matches; click refused, zero MouseUp |
+| Position budget one | Partial/incomplete, visited1/194449, no known hit; click refused without claiming absence |
+| Position budget23,121 | Partial/incomplete with the early hit and unknown tail; click refused even though `matchCount:1` |
+| Complete unique target | Tool dispatch produces exactly one MouseUp at client212,172 / screen252,232; a fresh window list and application state verify the result |
+
+The previous-helper counterexample used the already-delivered executable SHA-256 `9a86acbb39edde4d36972c913fb5b5dd594e50a8e944386016e63bdd8b10b789`. Distractors preserve each 4×4 block average while changing fine pixels, occupying the old top-eight coarse candidates before the distant match. This establishes the specific false-unique failure and its repair on one controlled screen, not general application task success. The image module delivered its completion marker after cleanup.
+
+Ten matching-core Rust tests and the three existing input tests pass. They cover full tail coverage, duplicate targets, eleven clusters despite an eight-row display limit, threshold boundaries, exact position budgets, partial zero/one counts, timeout and cluster-capacity reasons, fixed-anchor clustering, small/oversized templates and agreement with a separate brute-force threshold check. Nine focused JS policy tests pass for integer budgets/tolerance, negative desktop coordinates, coverage/count consistency, legacy helper refusal, invalid geometry and partial-click rejection. No runtime context is mocked in the native acceptance.
+
+The staged new native executable also passed the actual Electron native expansion and bridge modules, each with its completion marker. Expansion checks cover PrintWindow pixels under full occlusion with foreground preserved, Panel/Button messages and measured application activation, stale child PID refusal, resize, modifier selection/Unicode, normal key/mouse release, stop-and-release after focus changes, and minimized-target discovery/restoration. The initial test setup failed to acquire the occluding foreground; the fixture now explicitly focuses its freshly listed owned cover before testing background preservation. A source-change error during later snapshot reading led to bounded reacquisition of only a `not_started` read; actions and expected application effects were not replayed or weakened. Bridge checks confirm electron-edge-js, its companion assembly, Narrator status and twelve concurrent calls.
+
+`coverage:"partial"` always pairs with `status:"incomplete"` and a time/position/cluster stop reason. `found` denotes known hits only, and `matchCount` is a lower bound until coverage is complete. The fixed rule `row_major_fixed_anchor_half_template` groups positions around the first row-major hit within half-template width/height; the first anchor never moves, so continuing the scan cannot reduce the prefix count. A cluster's displayed point may improve in score. Counts include all clusters; only the highest eight are displayed. At most 100,000 clusters are retained, with partial coverage on capacity exhaustion.
+
+Matching still discards RGB hue and alpha, supports only native template scale, and refuses grayscale standard deviation below3. The old implicit 16×16 coarse-template minimum is gone; templates are bounded at1,048,576 pixels. Nearby business objects can share a visual cluster. Search coverage describes the captured image; it is not a transaction with the subsequent click, and screen/window changes in that gap require application-result verification. Native budget covers decode/preparation/capture/search; a blocked system call is terminated by the host deadline with five seconds of startup/output allowance and returns an error rather than invented partial success.
+
+Reproduce with `pnpm run smoke:images "C:\path\to\DeepSeek Harness.exe"`; optional final arguments `image`, `native`, `bridge` select only relevant modules. The default image test uses the staged native helper; `DSH_IMAGE_HELPER` can explicitly select a build, and `DSH_IMAGE_PREVIOUS_HELPER` enables the historical executable counterexample. `pnpm pack --pack-destination .local` enforces syntax, Node/ToolRuntime tests and executable/source-manifest consistency. The semantic twelve-module suite was already delivered at0.5.8; this image-only change did not alter its C# worker. OCR/pixel/mask/template-scale and standard Win32 content adapters remain implementation work under the broader task matrix. No installation, application restart or installed-package parity is claimed.
+
+## Historical 0.5.8 validation — 2026-10-08
 
 0.5.8 adds Windows window-relative hierarchical locators, read-only condition waits and one-action/result-confirmation flows. Locator steps resolve uniquely or use an explicit zero-based nth; ambiguity stops rather than choosing a candidate. Node/depth/time truncation is incomplete, and absence requires complete coverage of the requested exposed-tree scope. All polling stays pinned to the original HWND/PID/title, re-resolves container replacements and shares one deadline with the action and postcondition. Unknown or failed actions are not replayed.
 

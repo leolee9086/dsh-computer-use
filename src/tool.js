@@ -5,6 +5,7 @@ import { flattenAccessibilityTree } from './semantics.js';
 import { acquisitionArgs, queryArgs, SEMANTIC_ACQUISITION_SCHEMA } from './semantic-query.js';
 import { NARRATOR_COMMANDS, narratorAction } from './narrator.js';
 import { registerLocatorTools } from './locator-tools.js';
+import { IMAGE_SEARCH_OPTIONS, imageSearchOptions, validateImageResult, imageClickPoint } from './image-match.js';
 import { INPUT_STEPS_SCHEMA, MODIFIERS, inputSequenceArgs, keyOptions } from './input-actions.js';
 import { accessibilityElementById, findAccessibilityElements } from './semantics.js';
 import { ELEMENT_OPERATIONS, PATTERN_BY_OPERATION, SEMANTIC_PARAMETERS, semanticActionArgs, textRangeArgs } from './accessibility-actions.js';
@@ -754,9 +755,9 @@ export function apply(ctx, rawConfig) {
     'computer_find_image',
     'Find a small image (a template PNG) on screen and report where it is. '
     + 'The template is a valid PNG file path. '
-    + 'Matching is pixel-based with a colour tolerance, so it also works on surfaces that expose no accessibility tree '
-    + '(canvas, games, remote desktops). '
-    + 'Not finding it is a normal result (found:false), not an error. '
+    + 'Matching compares original-resolution grayscale pixels, including surfaces with no accessibility tree '
+    + '(canvas, games, remote desktops). RGB hue, transparency masks and template scaling are not supported. '
+    + 'Only complete coverage can establish absence or uniqueness. Partial coverage has status:incomplete; found only reports known hits. '
     + 'Passing window_id raises that window and searches the bounds it actually has — that moves the foreground, so that form counts as desktop control.',
     {
       type: 'object', additionalProperties: false,
@@ -769,8 +770,7 @@ export function apply(ctx, rawConfig) {
         y: { type: 'number', description: 'Optional search region top edge, in virtual-desktop pixels (may be negative).' },
         width: { type: 'number', description: 'Optional search region width in pixels.' },
         height: { type: 'number', description: 'Optional search region height in pixels.' },
-        threshold: { type: 'number', description: 'Minimum similarity to count as a match, 0..1 (default 0.9). Similarity is the fraction of pixels within the colour tolerance — 0.9 means nine in ten pixels matched.' },
-        tolerance: { type: 'number', description: 'Per-channel colour tolerance, 0..255 (default 12). Absorbs anti-aliasing and small rendering differences without treating a neighbouring grey button as a match.' },
+        ...IMAGE_SEARCH_OPTIONS,
       },
     },
     async (rawArgs, exec) => {
@@ -782,10 +782,7 @@ export function apply(ctx, rawConfig) {
       if (windowId !== undefined && (region !== undefined || displayId !== undefined)) {
         throw new Error('window_id searches that window on its own; drop x, y, width, height and display_id');
       }
-      const threshold = optionalFiniteNumber(args, 'threshold');
-      const tolerance = optionalFiniteNumber(args, 'tolerance');
-      if (threshold !== undefined && !(threshold > 0 && threshold <= 1)) throw new Error('threshold must be within (0, 1]');
-      if (tolerance !== undefined && (tolerance < 0 || tolerance > 255)) throw new Error('tolerance must be within [0, 255]');
+      const options = imageSearchOptions(args);
       let focus = null;
       if (windowId !== undefined) {
         const record = freshWindow(observations, exec, windowId, config);
@@ -795,24 +792,22 @@ export function apply(ctx, rawConfig) {
           title: record.nativeWindow.title,
         };
       }
-      const result = await computer(ctx).findImage({
-        templatePath,
-        displayId,
-        region: region ?? null,
-        threshold: threshold ?? null,
-        tolerance: tolerance ?? null,
-        focus,
-      }, exec.signal);
-      if (focus !== null) consumeAllObservations(observations, exec, focus, false, true);
-      return describeJson(result);
+      let result;
+      try {
+        result = await computer(ctx).findImage({ templatePath, displayId, region: region ?? null, ...options, focus }, exec.signal);
+      } finally {
+        // 原生失败也可能已经提窗；不能让旧观测继续驱动动作。
+        if (focus !== null) consumeAllObservations(observations, exec, focus, false, true);
+      }
+      return describeJson(validateImageResult(result, options.threshold));
     },
   ));
 
   registerTool(ctx.tools, textTool(
     'computer_click_image',
     'Find a template image inside one window and click it — but only when it is found in exactly one place. '
-    + 'This refuses to act on ambiguity: if the template matches more than once, or nothing meets the confidence bar, '
-    + 'nothing is clicked and the candidates are reported instead. '
+    + 'This requires complete original-resolution grayscale search coverage and exactly one visual cluster. '
+    + 'Incomplete search, multiple clusters or no match sends no click and reports the coverage and known candidates. '
     + 'Raising the window changes the foreground, so this counts as desktop control.',
     {
       type: 'object', additionalProperties: false,
@@ -820,8 +815,8 @@ export function apply(ctx, rawConfig) {
       properties: {
         template: { type: 'string', description: 'Path to a PNG template, e.g. written earlier with computer_screenshot save_to.' },
         window_id: { type: 'string', description: 'Required: a session window_id from computer_windows within its lifetime. The window is raised and the search is confined to its bounds, so uniqueness is judged inside that window rather than across the whole desktop.' },
-        threshold: { type: 'number', description: 'Minimum similarity, 0..1 (default 0.95 — stricter than computer_find_image, because this one actually clicks).' },
-        tolerance: { type: 'number', description: 'Per-channel colour tolerance, 0..255 (default 12).' },
+        ...IMAGE_SEARCH_OPTIONS,
+        threshold: { ...IMAGE_SEARCH_OPTIONS.threshold, description: 'Minimum grayscale similarity within (0,1], default 0.95. Complete coverage and exactly one visual cluster are also required.' },
         button: { type: 'string', enum: ['left', 'middle', 'right'] },
         clicks: { type: 'number', enum: [1, 2] },
       },
@@ -830,10 +825,8 @@ export function apply(ctx, rawConfig) {
       const args = object(rawArgs);
       const templatePath = requiredString(args, 'template');
       const windowId = requiredString(args, 'window_id');
-      const threshold = optionalFiniteNumber(args, 'threshold') ?? CLICK_IMAGE_THRESHOLD;
-      const tolerance = optionalFiniteNumber(args, 'tolerance');
-      if (!(threshold > 0 && threshold <= 1)) throw new Error('threshold must be within (0, 1]');
-      if (tolerance !== undefined && (tolerance < 0 || tolerance > 255)) throw new Error('tolerance must be within [0, 255]');
+      const options = imageSearchOptions(args, CLICK_IMAGE_THRESHOLD);
+      const { threshold } = options;
       const button = enumValue(args, 'button', ['left', 'middle', 'right'], 'left');
       const clickCount = enumValue(args, 'clicks', [1, 2], 1);
 
@@ -843,36 +836,28 @@ export function apply(ctx, rawConfig) {
         processId: record.nativeWindow.processId,
         title: record.nativeWindow.title,
       };
-      const result = await computer(ctx).findImage({
-        templatePath,
-        displayId: undefined,
-        region: null,
-        threshold,
-        tolerance: tolerance ?? null,
-        focus,
-      }, exec.signal);
-      // 提窗改变了前台，此前所有截图与语义快照都不再可信。
-      consumeAllObservations(observations, exec, focus, false, true);
-
-      // ---- 硬约束：找得到、且**只找到一处**，两个条件都要 ----
-      // 不满足就什么都不做，把情况报回去。这里刻意不做"那就取最好的那个"的降级：
-      // 一个会自己拿主意去点的工具，比一个不会点的工具危险得多。
-      if (result.found !== true || result.matchCount !== 1) {
+      let result;
+      try {
+        result = await computer(ctx).findImage({ templatePath, displayId: undefined, region: null, ...options, focus }, exec.signal);
+      } finally {
+        // 提窗改变了前台，即使 helper 失败也不能复用此前截图与语义快照。
+        consumeAllObservations(observations, exec, focus, false, true);
+      }
+      const point = imageClickPoint(result, threshold);
+      // 只有完整覆盖的一处视觉聚类可以进入输入派发。
+      if (point === null) {
         const spots = Array.isArray(result.matches) && result.matches.length > 0
           ? `匹配位置：${result.matches.map((spot) => `(${spot.x}, ${spot.y}) ${Number(spot.score).toFixed(3)}`).join('、')}。`
           : '';
-        const why = result.found !== true
-          ? '没有找到达到门槛的匹配'
-          : `找到 ${result.matchCount} 处匹配，无法确定该点哪一个`;
+        const why = result.coverage !== 'complete'
+          ? `搜索未完成（${result.stopReason}，已覆盖 ${result.visitedPositions}/${result.totalPositions} 个位置，已知至少 ${result.matchCount} 处匹配），不能判断缺席或唯一`
+          : result.found !== true ? '完整搜索没有找到达到门槛的匹配'
+            : `完整搜索找到 ${result.matchCount} 处视觉聚类，无法确定该点哪一个`;
         return `未点击：${why}（门槛 ${threshold}，窗口「${record.window.title}」）。${spots}`
           + '窗口已提到前台，未发送点击。可以把搜索缩到更小的区域、换一张更有辨识度的模板，或先用 computer_find_image 看清楚情况。';
       }
 
       const spot = result.matches[0];
-      const point = {
-        x: spot.x + Math.floor(Number(result.templateWidth) / 2),
-        y: spot.y + Math.floor(Number(result.templateHeight) / 2),
-      };
       await performInput({ kind: 'click', point, button, clickCount, focus }, exec);
       return `已点击窗口「${record.window.title}」里唯一匹配到的那一处：屏幕坐标 (${point.x}, ${point.y})，`
         + `相似度 ${Number(spot.score).toFixed(3)}（模板 ${result.templateWidth}×${result.templateHeight}，左上角在 (${spot.x}, ${spot.y})）。`

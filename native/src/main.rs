@@ -18,6 +18,7 @@
 //! （见 src/tool.js 的 mapScreenshotPoint），所以区域裁剪只要如实回报边界，
 //! 点击/拖拽/滚动的坐标就自动继续正确。
 
+mod image_match;
 mod input_sequence;
 mod window_control;
 
@@ -328,13 +329,18 @@ struct FindImageRequest {
     region: Option<Region>,
     #[serde(default)]
     display_id: Option<String>,
-    /// 低于这个分数就不算「找到」（默认 0.9）。真正决定敢不敢点的是它与次佳的差距。
+    /// 容差内灰度像素比例的下限（默认 0.9）。点击还必须有完整覆盖与唯一聚类。
     #[serde(default)]
     threshold: Option<f64>,
-    /// 每个通道允许的偏差（0-255，默认 12）。够吸收抗锯齿与轻微渲染差异，
-    /// 又不至于把「旁边那个灰色按钮」也算成匹配 —— 这个参数就是按键精灵/大漠里的「偏色」。
+    /// 灰度亮度允许的偏差（整数 0-255，默认 12），不比较 RGB 色相。
     #[serde(default)]
     tolerance: Option<u8>,
+    /// 从解码开始的匹配预算；阻塞的系统抓屏另受宿主进程截止保护。
+    #[serde(default)]
+    budget_ms: Option<u64>,
+    /// 最多判定多少个合法模板左上角，耗尽时明确返回部分覆盖。
+    #[serde(default)]
+    max_positions: Option<u64>,
     /// 指名窗口：先把它提到前台，再按它**聚焦之后**的实际边界搜索。
     /// 与截图同一条理由 —— 聚焦与抓屏必须挤在同一次进程调用里，
     /// 否则第二次 spawn 冒出来的控制台窗口会盖住刚聚焦好的目标。
@@ -354,8 +360,16 @@ struct MatchSpot {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct FindImageResponse {
+    /// 只说明已知有匹配；部分覆盖时不能据此判断唯一或缺席。
     found: bool,
-    /// 模板左上角在**虚拟桌面坐标**里的位置。找不到时省略。
+    status: &'static str,
+    coverage: &'static str,
+    visited_positions: u64,
+    total_positions: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stop_reason: Option<&'static str>,
+    cluster_rule: &'static str,
+    /// 模板左上角在**虚拟桌面坐标**里的位置。没有已知匹配时省略。
     #[serde(skip_serializing_if = "Option::is_none")]
     x: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -365,17 +379,16 @@ struct FindImageResponse {
     /// 远离最佳的次佳得分（也就是第二处的分数）。**屏幕上没有第二处像的地方时省略**。
     #[serde(skip_serializing_if = "Option::is_none")]
     runner_up: Option<f64>,
-    /// 通过阈值的**不同位置**数量（已按「距离不超过半个模板」聚类）。
-    /// `computer_click_image` 的硬约束就建立在这个数上：只有等于 1 才允许点击 ——
-    /// 靠一个次佳分数去猜「唯不唯一」是猜不准的，直接数出来才是事实。
+    /// 固定首匹配锚点、半模板矩形聚类的数量；部分覆盖时只是完整数量的下界。
+    /// 聚类表达视觉位置，不证明业务对象身份。
     match_count: usize,
-    /// 各处的位置与分数（按分数降序，最多 `CANDIDATE_KEEP` 个）。
+    /// 各处的位置与分数（按分数降序，最多 `image_match::DISPLAY_LIMIT` 个）。
     /// 不止一处时调用方需要知道**是哪些地方**像，才能自己决定下一步。
     matches: Vec<MatchSpot>,
     searched: Region,
     template_width: u32,
     template_height: u32,
-    /// 为控制运算量而采用的降采样倍率（1 = 原分辨率）。坐标误差不超过这个值。
+    /// 当前匹配只支持原分辨率，始终为 1，不代表模板缩放搜索。
     scale: u32,
     elapsed_ms: u64,
 }
@@ -505,24 +518,10 @@ fn read_body<T: for<'de> Deserialize<'de>>() -> Result<T, String> {
     serde_json::from_str(&text).map_err(|e| format!("请求 JSON 解析失败：{e}"))
 }
 
-/// 保留的候选数：次佳不能取「紧挨着最佳的那一格」—— 那只是同一个目标的邻居，
-/// 「拉开差距」这件事就无从谈起。所以要留几个候选，最后挑一个离最佳足够远的。
-const CANDIDATE_KEEP: usize = 8;
-
-/// 默认的每通道容差。这个量级能吸收抗锯齿、字体渲染和轻微压缩差异，
-/// 又不足以把「旁边那个灰色按钮」算成匹配 —— 再大就该调的是模板，不是容差。
+/// 原分辨率灰度容差与有界扫描的默认预算。
 const DEFAULT_TOLERANCE: u8 = 12;
-
-/// 金字塔粗筛层的降采样倍率。粗筛只用它回答「可能在哪」，不回答「是不是」——
-/// 降采样会把像素平均掉，位置精度只到 ±COARSE_SCALE，真正的判定在精算层做。
-const COARSE_SCALE: u32 = 4;
-
-/// 粗筛层的相似度阈值。**故意比精算层低**：降采样之后本来就不可能逐像素对上，
-/// 拿严格阈值去筛只会一个候选都不剩 —— 这正是先前那次失败的方式。
-const WEAK_THRESHOLD: f64 = 0.7;
-
-/// 粗筛层的容差放大倍数：降采样做了平均，像素值本身就带偏移，容差要跟着松。
-const COARSE_TOLERANCE_BOOST: u8 = 2;
+const DEFAULT_FIND_BUDGET_MS: u64 = 5_000;
+const DEFAULT_MAX_POSITIONS: u64 = 20_000_000;
 
 /// 模板灰度标准差的下限。低于它基本就是纯色：这种模板会在任何同色区域拿到满分，
 /// 于是「第一个遇到的同色位置」成了答案 —— 那不是匹配，是碰运气，
@@ -548,130 +547,18 @@ fn to_gray(rgba: &[u8]) -> Vec<u8> {
     gray
 }
 
-/// 盒式降采样（factor <= 1 时原样返回一份拷贝）。
-fn downsample_gray(gray: &[u8], width: u32, height: u32, factor: u32) -> (Vec<u8>, u32, u32) {
-    if factor <= 1 {
-        return (gray.to_vec(), width, height);
-    }
-    let step = factor as usize;
-    let out_w = (width as usize / step).max(1);
-    let out_h = (height as usize / step).max(1);
-    let mut out = vec![0u8; out_w * out_h];
-    for oy in 0..out_h {
-        for ox in 0..out_w {
-            let mut sum = 0u32;
-            let mut count = 0u32;
-            for dy in 0..step {
-                let sy = oy * step + dy;
-                if sy >= height as usize {
-                    break;
-                }
-                for dx in 0..step {
-                    let sx = ox * step + dx;
-                    if sx >= width as usize {
-                        break;
-                    }
-                    sum += u32::from(gray[sy * width as usize + sx]);
-                    count += 1;
-                }
-            }
-            out[oy * out_w + ox] = if count == 0 { 0 } else { (sum / count) as u8 };
-        }
-    }
-    (out, out_w as u32, out_h as u32)
-}
-
-/// 在 `region` 指定的窗口内滑窗匹配，返回得分最高的至多 `top_k` 个位置。
-///
-/// 分数 = **容差内像素数 / 总像素数**，跟按键精灵、大漠插件里那个「相似度」是同一个含义：
-/// 0.9 就是「九成像素对上了」。这个语义能用，恰恰因为它**不归一化** ——
-/// 相关系数（ZNCC）先减去均值、除以标准差，于是「布局一样、内容不同」的两块区域
-/// 也能拿 0.99，而 UI 截图里这种地方遍地都是。
-///
-/// 提前退出：不匹配数一旦超过阈值允许的上限，这个位置就没希望了，立刻换下一个。
-/// 再叠一层**按区分度排序**：先比模板里最有辨识力的像素（离模板均值最远那些）。
-///
-/// 为什么带 `region`：精算层只需在每个粗筛候选附近 ±scale 的小窗口里滑窗，
-/// 把搜索范围收窄到几个像素见方，比全图重扫便宜好几个数量级。
-fn scan_region(
-    screen: &[u8],
-    screen_w: u32,
-    screen_h: u32,
-    template: &[u8],
-    template_w: u32,
-    template_h: u32,
-    tolerance: u8,
-    min_score: f64,
-    region: (u32, u32, u32, u32),
-    top_k: usize,
-) -> Vec<(f64, u32, u32)> {
-    let mut candidates: Vec<(f64, u32, u32)> = Vec::new();
-    if template_w > screen_w || template_h > screen_h {
-        return candidates;
-    }
-    let tw = template_w as usize;
-    let th = template_h as usize;
-    let sw = screen_w as usize;
-    let sh = screen_h as usize;
-    let total = tw * th;
-    let tol = i32::from(tolerance);
-    let budget = ((1.0 - min_score) * total as f64).floor().max(0.0) as usize;
-
-    // 搜索窗口夹进图内
-    let last_x = sw - tw;
-    let last_y = sh - th;
-    let start_x = (region.0 as usize).min(last_x);
-    let start_y = (region.1 as usize).min(last_y);
-    let end_x = (region.0 as usize + region.2 as usize).min(last_x + 1);
-    let end_y = (region.1 as usize + region.3 as usize).min(last_y + 1);
-    if start_x >= end_x || start_y >= end_y {
-        return candidates;
-    }
-
-    // 区分度：离模板均值越远越有辨识力。按它降序检查像素，是最省时间的淘汰顺序。
-    let mean = template.iter().map(|value| f64::from(*value)).sum::<f64>() / total as f64;
-    let mut order: Vec<usize> = (0..total).collect();
-    order.sort_by(|&a, &b| {
-        let left = (f64::from(template[a]) - mean).abs();
-        let right = (f64::from(template[b]) - mean).abs();
-        right
-            .partial_cmp(&left)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-
-    candidates.reserve(top_k.max(1));
-    for oy in start_y..end_y {
-        for ox in start_x..end_x {
-            let mut mismatch = 0usize;
-            for &index in &order {
-                let tx = index % tw;
-                let ty = index / tw;
-                let s = (oy + ty) * sw + ox + tx;
-                if (i32::from(screen[s]) - i32::from(template[index])).abs() > tol {
-                    mismatch += 1;
-                    if mismatch > budget {
-                        break;
-                    }
-                }
-            }
-            if mismatch > budget {
-                continue;
-            }
-            let score = 1.0 - mismatch as f64 / total as f64;
-            let worst = candidates.last().map_or(f64::NEG_INFINITY, |entry| entry.0);
-            if candidates.len() < top_k || score > worst {
-                candidates.push((score, ox as u32, oy as u32));
-                candidates
-                    .sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-                candidates.truncate(top_k);
-            }
-        }
-    }
-    candidates
-}
-
 fn find_image(request: &FindImageRequest) -> Result<FindImageResponse, String> {
     let started = std::time::Instant::now();
+    let budget_ms = request.budget_ms.unwrap_or(DEFAULT_FIND_BUDGET_MS);
+    let max_positions = request.max_positions.unwrap_or(DEFAULT_MAX_POSITIONS);
+    let threshold = request.threshold.unwrap_or(0.9);
+    if !(1..=120_000).contains(&budget_ms) || !(1..=100_000_000).contains(&max_positions) {
+        return Err("budgetMs 必须是 1..120000，maxPositions 必须是 1..100000000".into());
+    }
+    if !threshold.is_finite() || threshold <= 0.0 || threshold > 1.0 {
+        return Err("threshold 必须在 (0, 1] 内".into());
+    }
+    let budget = std::time::Duration::from_millis(budget_ms);
     // DPI 感知必须在任何坐标查询之前设置，理由同 capture：否则缩放屏上的坐标会整体偏一圈。
     unsafe {
         let _ = SetProcessDpiAwareness(PROCESS_PER_MONITOR_DPI_AWARE);
@@ -686,6 +573,12 @@ fn find_image(request: &FindImageRequest) -> Result<FindImageResponse, String> {
     let (template_w, template_h) = template_image.dimensions();
     if template_w == 0 || template_h == 0 {
         return Err("模板图尺寸为 0".into());
+    }
+    if u64::from(template_w) * u64::from(template_h) > image_match::MAX_TEMPLATE_PIXELS as u64 {
+        return Err(format!(
+            "模板不得超过 {} 像素",
+            image_match::MAX_TEMPLATE_PIXELS
+        ));
     }
     let template_gray = to_gray(template_image.as_raw());
     // 纯色模板当场拒绝：它没有可匹配的结构，会在任何同色区域拿满分，
@@ -730,122 +623,60 @@ fn find_image(request: &FindImageRequest) -> Result<FindImageResponse, String> {
 
     let pixels = grab_screen(crop)?;
     let screen_gray = to_gray(&pixels);
-    let threshold = request.threshold.unwrap_or(0.9);
     let tolerance = request.tolerance.unwrap_or(DEFAULT_TOLERANCE);
-
-    // ---- 第一层：粗筛 ----
-    // 降采样只回答「可能在哪」。位置精度只到 ±COARSE_SCALE，而且降采样做了平均，
-    // 像素值本身就带偏移 —— 所以这一层**必须**用宽松的阈值和容差。
-    // 先前把这一层当成了最终答案（降采样之后直接判定），结果阈值严到一个候选都不剩。
-    let scale = COARSE_SCALE;
-    let (coarse_screen, coarse_w, coarse_h) =
-        downsample_gray(&screen_gray, crop.width as u32, crop.height as u32, scale);
-    let (coarse_template, coarse_tw, coarse_th) =
-        downsample_gray(&template_gray, template_w, template_h, scale);
-    if coarse_tw < 4 || coarse_th < 4 {
-        return Err(format!(
-            "模板降采样后只剩 {coarse_tw}x{coarse_th}，太小了（模板至少要 {}x{} 像素）",
-            scale * 4,
-            scale * 4
-        ));
-    }
-    let coarse = scan_region(
-        &coarse_screen,
-        coarse_w,
-        coarse_h,
-        &coarse_template,
-        coarse_tw,
-        coarse_th,
-        tolerance.saturating_mul(COARSE_TOLERANCE_BOOST),
-        WEAK_THRESHOLD,
-        (0, 0, coarse_w, coarse_h),
-        CANDIDATE_KEEP,
-    );
-
-    // ---- 第二层：精算 ----
-    // 回到原分辨率，只在每个候选周围 ±scale 的窗口里滑窗，用严格阈值。
-    // **这一层算出来的分数才是能拿来做判断的分数。**
-    //
-    // 这里收集的是**每一处**的最佳，而不只是全局最佳：「找到几处」是 click_image 的硬约束
-    // （只有一处才允许点），所以数量必须在这一层数出来 —— 数出来的是事实，猜出来的是概率。
-    let mut refined: Vec<(f64, u32, u32)> = Vec::new();
-    for (_, candidate_x, candidate_y) in &coarse {
-        let base_x = candidate_x * scale;
-        let base_y = candidate_y * scale;
-        let window = (
-            base_x.saturating_sub(scale),
-            base_y.saturating_sub(scale),
-            scale * 2 + 1,
-            scale * 2 + 1,
-        );
-        refined.extend(scan_region(
-            &screen_gray,
-            crop.width as u32,
-            crop.height as u32,
-            &template_gray,
-            template_w,
-            template_h,
-            tolerance,
-            threshold,
-            window,
-            1,
-        ));
-    }
-
-    // 聚类：粗筛给出的候选可能彼此相邻（同一个目标的邻居），必须合并成「一处」。
-    // 判据是距离不超过半个模板 —— 在这个范围内就是同一个目标，不是两处。
-    refined.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-    let mut distinct: Vec<(f64, u32, u32)> = Vec::new();
-    for (score, x, y) in refined {
-        let same_spot = distinct.iter().any(|(_, dx, dy)| {
-            x.abs_diff(*dx) <= template_w / 2 && y.abs_diff(*dy) <= template_h / 2
-        });
-        if !same_spot {
-            distinct.push((score, x, y));
-        }
-    }
-
-    // 「没找到」是正常结果，不是错误：屏幕内容变了、目标不在这块屏上、或者模板不够有辨识度，
-    // 都会走到这里。返回 found:false 让调用方决定怎么办（换区域、换模板、还是人工看一眼），
-    // 比抛错误更贴合它的含义 —— 错误该留给「请求本身有问题」（模板是纯色、区域越界这种）。
-    let Some(&(score, match_x, match_y)) = distinct.first() else {
-        return Ok(FindImageResponse {
-            found: false,
-            x: None,
-            y: None,
-            score: 0.0,
-            runner_up: None,
-            match_count: 0,
-            matches: Vec::new(),
-            searched: crop,
-            template_width: template_w,
-            template_height: template_h,
-            scale,
-            elapsed_ms: started.elapsed().as_millis() as u64,
-        });
-    };
-
+    let scan = image_match::scan(
+        image_match::GrayImage {
+            pixels: &screen_gray,
+            width: crop.width as u32,
+            height: crop.height as u32,
+        },
+        image_match::GrayImage {
+            pixels: &template_gray,
+            width: template_w,
+            height: template_h,
+        },
+        tolerance,
+        threshold,
+        image_match::Limits {
+            max_positions,
+            max_clusters: image_match::MAX_CLUSTERS,
+        },
+        || started.elapsed() >= budget,
+    )?;
+    let complete = scan.stop_reason.is_none();
+    let best = scan.matches.first();
     Ok(FindImageResponse {
-        found: score >= threshold,
-        // match_x/y 已经是**原分辨率**坐标（精算层就是在原图上滑的），不要再乘 scale。
-        x: Some(crop.x + match_x as i32),
-        y: Some(crop.y + match_y as i32),
-        score,
-        runner_up: distinct.get(1).map(|entry| entry.0),
-        match_count: distinct.len(),
-        matches: distinct
+        found: scan.match_count > 0,
+        status: if !complete {
+            "incomplete"
+        } else if best.is_some() {
+            "found"
+        } else {
+            "not_found"
+        },
+        coverage: if complete { "complete" } else { "partial" },
+        visited_positions: scan.visited_positions,
+        total_positions: scan.total_positions,
+        stop_reason: scan.stop_reason,
+        cluster_rule: "row_major_fixed_anchor_half_template",
+        x: best.map(|spot| crop.x + spot.x as i32),
+        y: best.map(|spot| crop.y + spot.y as i32),
+        score: best.map_or(0.0, |spot| spot.score),
+        runner_up: scan.matches.get(1).map(|spot| spot.score),
+        match_count: scan.match_count,
+        matches: scan
+            .matches
             .iter()
-            .take(CANDIDATE_KEEP)
-            .map(|(spot_score, x, y)| MatchSpot {
-                x: crop.x + *x as i32,
-                y: crop.y + *y as i32,
-                score: *spot_score,
+            .map(|spot| MatchSpot {
+                x: crop.x + spot.x as i32,
+                y: crop.y + spot.y as i32,
+                score: spot.score,
             })
             .collect(),
         searched: crop,
         template_width: template_w,
         template_height: template_h,
-        scale,
+        scale: 1,
         elapsed_ms: started.elapsed().as_millis() as u64,
     })
 }

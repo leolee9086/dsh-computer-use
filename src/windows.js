@@ -10,6 +10,7 @@ import { resolveHostConfig } from './config.js';
 import { loadCSharpFile } from './csharp.js';
 import { ComputerUseError, unsupported } from './errors.js';
 import { assertFinitePoint } from './geometry.js';
+import { imageSearchOptions, validateImageResult } from './image-match.js';
 
 const KEY_CODES = {
   alt: 0x12,
@@ -116,10 +117,11 @@ function requireHelperPath(config) {
 }
 
 /** 调原生 helper 的某个子命令，payload 走 stdin（base64(UTF8 JSON)），结果解析为 JSON */
-async function runNativeHelper(runner, helperPath, args, payload, signal, maxBytes) {
+async function runNativeHelper(runner, helperPath, args, payload, signal, maxBytes, timeoutMs) {
   const encode = (value) => Buffer.from(JSON.stringify(value), 'utf8').toString('base64');
   return runner.runJson([helperPath, ...args], {
     signal,
+    ...(timeoutMs === undefined ? {} : { timeoutMs }),
     stdoutMaxBytes: maxBytes ?? 8 * 1024 * 1024,
     // 截图走文件模式，stdout 只回小 JSON，所以这里的上限不需要很大
     stdin: payload === undefined ? undefined : encode(payload),
@@ -440,7 +442,7 @@ export class WindowsComputer {
   }
 
   /**
-   * 在一屏里找一张小图，返回它的位置与相似度；**找不到是正常结果，不是错误**。
+   * 在一屏里找一张小图。完整扫描后才能报缺席；部分扫描返回已知匹配下界。
    *
    * 匹配整个在原生 helper 里做：一张 1920×1080 的屏幕转成 RGBA 是 8MB，
    * 把像素来回穿进程边界比匹配本身还贵，所以只在最后过一道坐标和分数。
@@ -453,17 +455,15 @@ export class WindowsComputer {
     const helperPath = requireHelperPath(this.config);
     // 模板按路径读：模型给不了 base64，只能给路径 —— 由 computer_screenshot 的 save_to 落下来。
     const template = await readFile(request.templatePath);
-    const payload = { templatePng: template.toString('base64') };
-    if (request.threshold !== undefined && request.threshold !== null) payload.threshold = request.threshold;
-    if (request.tolerance !== undefined && request.tolerance !== null) payload.tolerance = request.tolerance;
+    const options = imageSearchOptions({ threshold: request.threshold, tolerance: request.tolerance,
+      timeout_ms: request.budgetMs, max_positions: request.maxPositions });
+    const payload = { templatePng: template.toString('base64'), ...options };
     if (request.displayId !== undefined && request.displayId !== null) payload.displayId = request.displayId;
     if (request.region !== undefined && request.region !== null) payload.region = request.region;
     if (request.focus !== undefined && request.focus !== null) payload.focus = request.focus;
-    const result = await runNativeHelper(this.runner, helperPath, ['find-image'], payload, signal);
-    if (result === null || typeof result !== 'object' || typeof result.found !== 'boolean') {
-      throw new ComputerUseError('native find-image helper returned invalid result');
-    }
-    return result;
+    // 给启动/序列化留五秒，系统抓屏卡住时仍由官方 ManagedRunner 的总截止终止进程。
+    const result = await runNativeHelper(this.runner, helperPath, ['find-image'], payload, signal, undefined, options.budgetMs + 5000);
+    return validateImageResult(result, options.threshold);
   }
 
   /**

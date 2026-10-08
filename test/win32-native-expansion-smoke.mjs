@@ -70,6 +70,9 @@ try {
   const cover = await until(async () => (await driver.listWindows()).find((window) => window.title === coverTitle && window.processId === processFixture.pid), 'cover ready');
   const focused = async () => (await driver.listWindows()).find((window) => window.focused)?.id;
   console.log(JSON.stringify({ stage: 'fixture ready', target, cover }));
+  // Activate 受 Windows 前台锁限制，启动夹具不等于遮挡已生效。
+  // 用刚列出的自有窗口明确建立前台前置条件，后台捕获仍必须保持该前台。
+  await driver.focusWindow(cover);
   await until(async () => (await focused()) === cover.id, 'cover must actually occlude the target before capture');
   const before = await focused();
   console.log(JSON.stringify({ stage: 'background capture', before }));
@@ -90,7 +93,16 @@ try {
   assert.equal(await focused(), messageBefore, 'foreground checked immediately after message delivery');
   assert.equal(result.delivered, true);
   assert.equal(result.applicationResultVerified, false);
-  const nodes = async () => flattenAccessibilityTree(await driver.accessibilitySnapshot(target.id));
+  const nodes = async () => until(async () => {
+    try { return flattenAccessibilityTree(await driver.accessibilitySnapshot(target.id)); }
+    catch (error) {
+      // 输入/窗口变化后的事件可能尚在到达；直接 driver 读取没有工具层的新观测重采。
+      // 只重新开始明确未执行动作的读取，未知或其它错误仍让验收失败。
+      if (error.code !== 'COMPUTER_SNAPSHOT_CHANGED' || error.executionState !== 'not_started') throw error;
+      console.log(JSON.stringify({ stage: 'readonly snapshot changed; reacquire', window: target.id }));
+      return null;
+    }
+  }, 'stable native state snapshot');
   await until(async () => (await nodes()).some((node) => node.name === 'Background mouse messages received' || node.name === 'Background committed'), 'background mouse messages');
   assert.equal(result.foregroundChanged, false);
   checks.push('child HWND mouse messages received by non-focusable surface; foreground preserved');

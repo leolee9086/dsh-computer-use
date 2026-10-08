@@ -1,11 +1,12 @@
 {
-  "version": "0.5.8",
-  "executableSha256": "9a86acbb39edde4d36972c913fb5b5dd594e50a8e944386016e63bdd8b10b789",
+  "version": "0.5.9",
+  "executableSha256": "222010162545be45984845bf7e30f235bbe126dad75b310f7e99c555913d6f15",
   "sources": {
     "native/Cargo.lock": "eebd959a5d7dbdcd2d3761414ac199f38b0be90800da627206acbe57e8b63aaa",
     "native/Cargo.toml": "dd2bb73cda270c22dd51658673524dc4d63ba3068e95d193ad071a2bb2032a41",
+    "native/src/image_match.rs": "4ff09ff79bb3278c9c9784b899e087f75758075b0352e1beff01952ea739b6a0",
     "native/src/input_sequence.rs": "f9d3c768570412984f6f63e74a1a8a3fcf7bed591f3a6d474cbbb67481581476",
-    "native/src/main.rs": "0a99b7431a2c4667a18d072a63c8fcaf87f1f4f79ead1adc31583f9d41e52c46",
+    "native/src/main.rs": "d9b2d3a7a767fa9aef8bbca6ded24c148b48f37ef6d851d139cc484cf6632fbf",
     "native/src/window_control.rs": "3c81ee53f81ec29e01f758e0799c9080d8157e939a3374c0b438e1044c9dca7b"
   }
 }

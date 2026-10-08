@@ -13,7 +13,7 @@ Windows 捕获、输入与窗口控制后端，版本 0.5.0。单文件 Rust exe
 | `focus-window` | `{id,processId,title}` | 身份/前台确认后 `{ok:true}`，最小化目标先恢复 |
 | `action` | `{action,focus?}` | `{ok:true}`；错误前可能已有输入副作用 |
 | `screenshot --out <path>` | 下述捕获字段 | `path/width/height/sourceBounds/captureMode/bytes/displayId?` |
-| `find-image` | `templatePng/threshold/tolerance/region?/…` | `found/x/y/score/matchCount/matches/…` |
+| `find-image` | `templatePng/threshold/tolerance/budgetMs/maxPositions/region?/focus?` | `found/status/coverage/visitedPositions/totalPositions/stopReason?/matchCount/matches/…` |
 | `child-windows` | `{window,maxNodes}` | 子 HWND `windows` 与 `truncated` |
 | `window-message` | `{window,child,action}` | `delivered/applicationResultVerified/foregroundChanged` |
 | `manage-window` | `{window,action}` | 操作结果；关闭为 `posted:true,applicationResultVerified:false` |
@@ -35,6 +35,18 @@ Windows 捕获、输入与窗口控制后端，版本 0.5.0。单文件 Rust exe
 对应 argv 参数覆盖 stdin 选项。`sourceBounds` 必须等于实际捕获区域；上层按图像尺寸和 sourceBounds 映射指针。后台 captureMode 是 `print-window`；该图不能授权全局指针动作。PrintWindow 拒绝最小化窗口，应用不配合、GPU 或保护内容可能失败/空白，没有前台回退。同步 PrintWindow 的挂起由外层 DSH managed subprocess deadline 限制。
 
 GDI 桌面捕获使用 SRCCOPY；此前特定 GPU/DWM 环境下 CAPTUREBLT 产出全黑，因此未开启。读取位图前将其从 DC 移出；GetDIBits 使用有效的兼容 DC。调试设置 `DSH_SCREEN_DEBUG=1`，耗时与像素诊断写 stderr，不污染 stdout JSON。
+
+## 完整覆盖的灰度模板搜索
+
+`find-image` 请求的 `templatePng` 是 base64 PNG。`threshold` 默认 0.9，是灰度亮度容差内像素比例；`tolerance` 为整数 0–255，默认 12。模板先转 Rec.601 灰度，标准差低于 3 拒绝，最大 1,048,576 像素。当前没有 RGB 色相比较、透明度掩码或模板缩放搜索；旧降采样算法造成的 16×16 最小模板限制已经移除。
+
+所有合法左上角按行、步长一像素扫描，区分度排列只改变单位置的比较顺序。超过阈值允许的不匹配数时才提前淘汰该位置；阈值预算使用最终评分的相同除法判据，避免 0.9/0.95 浮点边界误拒。没有 top-8 候选排除未搜索区域。
+
+`budgetMs` 为 1–120000，默认 5000；`maxPositions` 为 1–100000000，默认 20000000。预算从模板解码开始，包括准备和抓屏；扫描本身定期检查截止，单个大模板比较也可以中断。Win32 系统调用阻塞由宿主 managed subprocess 的额外五秒启动/输出余量截止终止并报错，不伪造成功的部分扫描。
+
+返回 `visitedPositions/totalPositions`、`coverage:"complete"` 或 `"partial"`。只有完整覆盖的零匹配报告 `status:"not_found"`；时间、位置或 100000 聚类上限耗尽报告 `status:"incomplete"` 及 `stopReason:"time_budget"/"position_limit"/"cluster_limit"`。`found` 只表示已知匹配，部分覆盖的数量是完整计数的下界。
+
+聚类规则 `row_major_fixed_anchor_half_template`：按行首匹配固定锚点，横纵距离分别不超过半模板宽高时归入最早相邻锚点。空间索引限制邻域查找，锚点不随最高分展示点移动，前缀计数不会在继续扫描时下降。`matchCount` 不受八处展示上限影响，`matches` 只输出最高分八处；`scale` 始终为 1。视觉聚类不等于业务身份，相邻不同对象仍可能合并。宿主点击必须校验完整协议、完整覆盖且仅一聚类；找图与输入间的界面变化不具有事务保证。
 
 ## 有界输入
 

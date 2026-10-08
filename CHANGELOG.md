@@ -1,5 +1,14 @@
 # 变更记录
 
+## 0.5.9 — 2026-10-08
+
+- 修复粗筛仅保留八候选、局部精算后把候选数当成全部匹配数的问题。Windows 找图改为原分辨率、步长一像素的全位置灰度扫描，单位置只在已无法达到阈值时提前淘汰；阈值计算修正 0.9/0.95 浮点边界误拒。
+- 新增 `timeout_ms` / `max_positions` 预算及 `coverage/status/visitedPositions/totalPositions/stopReason`。时间、位置或聚类资源截断明确报告 incomplete/partial；零匹配不冒充缺席，一处匹配不冒充唯一。八处展示上限不截断 `matchCount`。
+- 聚类明确为按行首匹配固定锚点、半模板矩形内归最早锚点；空间索引保持有界邻域查找，部分扫描计数为完整计数下界。该规则描述视觉位置，不等于业务对象身份。
+- `computer_click_image` 仅在完整覆盖且一处聚类时点击，缺少覆盖协议的旧 helper 直接拒绝。提窗失败也使受影响的旧观测失效；tolerance 统一为整数灰度亮度偏差。移除旧算法隐含的 16×16 最小模板限制，保留低对比模板拒绝，增加 1,048,576 像素模板上限。
+- 新增真实 WinForms 像素、生产 WindowsComputer、官方 subprocess 和 Cordis ToolRuntime 的实际 Electron 验收。同画面旧产物漏掉远处目标并报一处，新产物完整扫描报两处；末尾匹配、真正无匹配、部分零/一处拒点击和完整唯一实际 MouseUp 一次均通过。原生输入/后台捕获及运行时桥定向回归通过；夹具明确建立遮挡前台，并只对明确 not_started 的快照变化有界重读。
+- 原生搜索仍比较灰度，不提供 RGB 色相、透明掩码、模板缩放或应用业务身份；找图与输入间的界面变化仍须确认结果。新增 `smoke:images` 定向验收入口；详情见 [EVIDENCE.md](EVIDENCE.md)。
+
 ## 0.5.8 — 2026-10-08
 
 - 新增 Windows `computer_locate`、`computer_wait`、`computer_act`，共 21 工具。1–16 级窗口/容器定位支持 name、role、automation ID、class/framework、exact/contains 与 children/subtree；每级唯一或显式 nth，歧义和预算截断分别报告，部分覆盖不证明缺失。
