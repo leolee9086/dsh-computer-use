@@ -1,13 +1,15 @@
 // 默认 WPF AutomationPeer + 真实 Cordis ToolRuntime + 生产 worker 的任务验收。
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { WindowsComputer } from '../src/windows.js';
 import { apply as applyTools } from '../src/tool.js';
+import { compileSemanticWorker } from '../src/semantic-worker.js';
 import { createManagedRunner } from './win32-runner.mjs';
 
 if (process.platform !== 'win32') throw new Error('Windows locator fixture requires Windows');
@@ -20,7 +22,7 @@ const [{ Context }, { default: ToolRuntime }, { default: SystemPrompt }] = await
 ]);
 const runner = await createManagedRunner(), computer = new WindowsComputer(runner, { semanticWorkerCount: 1 });
 const directory = await mkdtemp(join(tmpdir(), 'dsh-locator-fixture-')), ctx = new Context();
-const samples = {}; let child, nextLine;
+const samples = { observedAt: new Date().toISOString(), sources: {} }; let child, nextLine, completed = false;
 function lines(stream) {
   let buffer = ''; const queued = [], pending = [];
   stream.setEncoding('utf8'); stream.on('data', chunk => {
@@ -46,8 +48,18 @@ async function gac(name) {
   throw new Error(`Windows .NET assembly ${name} unavailable`);
 }
 try {
+  for (const source of ['src/locator.js', 'src/windows-semantic-locator.cs', 'test/win32-locator-smoke.mjs',
+    'test/windows-locator-fixture.cs', 'test/windows-locator-predicate-contract.cs']) {
+    samples.sources[source] = createHash('sha256').update(await readFile(new URL(`../${source}`, import.meta.url))).digest('hex');
+  }
   const compiler = join(process.env.WINDIR ?? 'C:\\Windows', 'Microsoft.NET', 'Framework64', 'v4.0.30319', 'csc.exe');
   const executable = join(directory, 'fixture.exe');
+  const contracts = join(directory, 'predicate-contracts.exe');
+  const productionWorker = await compileSemanticWorker(runner);
+  await runner.run([compiler, '/nologo', '/noconfig', '/target:exe', `/out:${contracts}`, '/r:System.dll', '/r:System.Core.dll',
+    fileURLToPath(new URL('./windows-locator-predicate-contract.cs', import.meta.url))]);
+  samples.predicate_matcher = JSON.parse(await runner.run([contracts, productionWorker]));
+  assert.equal(samples.predicate_matcher.production_matcher, 'passed');
   const refs = await Promise.all(['PresentationFramework', 'PresentationCore', 'WindowsBase', 'UIAutomationClient', 'UIAutomationTypes'].map(gac));
   await runner.run([compiler, '/nologo', '/noconfig', '/target:exe', `/out:${executable}`, '/r:System.dll', '/r:System.Core.dll', '/r:System.Xaml.dll',
     ...refs.map(path => `/r:${path}`), fileURLToPath(new URL('./windows-locator-fixture.cs', import.meta.url))]);
@@ -67,9 +79,38 @@ try {
   const listed = await json('computer_windows', { operation: 'list' });
   const owned = listed.windows.find(w => w.processId === native.processId && w.title === 'Computer locator fixture'); assert.ok(owned);
   const base = { window_id: owned.id, backend: 'uia', timeout_ms: 10000 };
-  const right = [{ automation_id: 'right-panel', role: 'Group' }];
-  const input = [...right, { automation_id: 'input', role: 'Edit', framework_id: 'WPF' }];
-  const apply = [...right, { name: 'Apply', role: 'Button' }];
+  const right = [{ role: 'Group', where: { all: [
+    { any: [{ name: '\\ARight\\s+panel\\z', match: 'regex' }, { automation_id: 'right-panel' }] },
+    { not: { automation_id: 'left-panel' } },
+  ] } }];
+  const input = [...right, { where: { all: [
+    { any: [{ automation_id: 'input' }, { name: '\\AInput\\z', match: 'regex' }] },
+    { role: 'Edit', framework_id: 'WPF' },
+  ] } }];
+  const apply = [...right, { role: 'Button', where: { any: [{ name: 'Apply' }, { automation_id: 'apply' }] } }];
+  const overlapping = await json('computer_locate', { ...base, locator: apply });
+  assert.equal(overlapping.status, 'resolved'); assert.equal(overlapping.trace.at(-1).matches, 1);
+  const eitherPanel = [{ role: 'Group', where: { any: [{ name: 'Left panel' }, { name: 'Right panel' }] } }];
+  const acrossBranches = await json('computer_locate', { ...base, locator: eitherPanel });
+  assert.equal(acrossBranches.status, 'ambiguous'); assert.equal(acrossBranches.candidates.length, 2);
+  assert.equal(new Set(acrossBranches.candidates.map(row => row.element_id)).size, 2);
+  const explicitNth = await json('computer_locate', { ...base, locator: [{ ...eitherPanel[0], nth: 1 }] });
+  assert.equal(explicitNth.status, 'resolved'); assert.equal(explicitNth.element.automation_id, 'right-panel');
+  assert.equal(explicitNth.coverage.reason, 'explicit_nth_prefix');
+  // 完整编译所有步骤/分支，不能用前一层缺失或 OR 短路掩盖语法错误。
+  const invalid = await execute('computer_wait', { ...base, locator: [{ name: 'Missing' }, { name: '[', match: 'regex' }], condition: { state: 'absent' } });
+  assert.equal(invalid.isError, true); assert.match(JSON.stringify(invalid), /locator_regex_invalid/);
+  const unsupported = await execute('computer_locate', { ...base, backend: 'msaa', locator: [{ where: { any: [{ name: 'Apply' }, { not: { framework_id: 'WPF' } }] } }] });
+  assert.equal(unsupported.isError, true); assert.match(JSON.stringify(unsupported), /MSAA does not expose framework_id/);
+  assert.equal(await command('regex-pathological'), 'regex-name-set');
+  const regexStarted = performance.now();
+  const regexTimeout = await execute('computer_wait', { ...base, locator: [{ automation_id: 'status', where: { name: '(a+)+$', match: 'regex' } }], condition: { state: 'absent' } });
+  assert.equal(regexTimeout.isError, true); assert.match(JSON.stringify(regexTimeout), /locator_regex_timeout/);
+  const regexElapsed = Math.round(performance.now() - regexStarted);
+  assert.equal(await command('regex-reset'), 'regex-name-reset');
+  assert.match(await command('state'), /^actions:0;/);
+  samples.boolean_locators = { overlapping_or_one_match: true, separate_nodes_ambiguous: true, explicit_nth: true,
+    invalid_regex_not_absent: true, msaa_unsupported_branch_rejected: true, regex_timeout_not_absent: true, regex_timeout_elapsed_ms: regexElapsed, actions: 0 };
   const old = await json('computer_wait', { ...base, locator: input, condition: { state: 'disabled' } }); assert.equal(old.fulfilled, true);
   const ambiguous = await json('computer_locate', { ...base, locator: [{ name: 'Apply', role: 'Button' }] });
   assert.equal(ambiguous.status, 'ambiguous'); assert.equal(ambiguous.candidates.length, 2); assert.equal(ambiguous.coverage.status, 'partial');
@@ -194,11 +235,14 @@ try {
   assert.equal(confirm.execution_state, 'completed');
   const closed = await json('computer_windows', { operation: 'list' }); assert.equal(closed.windows.some(w => w.title === 'Computer locator popup'), false);
   assert.match(await command('state'), /^actions:4;/); samples.popup = { separate_hwnd_observed: true, confirmed_once: true, closed_verified: true };
-  console.log(JSON.stringify({ native_locator_tasks: 'passed', samples }, null, 2));
+  completed = true;
 } finally {
-  await mkdir(new URL('../.local/', import.meta.url), { recursive: true });
-  await writeFile(new URL('../.local/locator-smoke-metrics.json', import.meta.url), JSON.stringify(samples, null, 2));
   await ctx.fiber.dispose(); await computer.dispose();
-  if (child) { child.terminate(); await child.waitForExit(AbortSignal.timeout(3000)); }
+  if (child) { child.terminate(); assert.equal(await child.waitForExit(AbortSignal.timeout(3000)), true, 'fixture exit must be observed'); }
   await runner.dispose(); loader.unregister(); await rm(directory, { recursive: true, force: true });
+  // 新matcher的证据另存；0.5.8/0.5.14的不可变source hash不被覆盖。
+  samples.fullAcceptance = completed;
+  await mkdir(new URL('../.local/', import.meta.url), { recursive: true });
+  await writeFile(new URL('../.local/locator-0.5.15-smoke-metrics.json', import.meta.url), JSON.stringify(samples, null, 2));
 }
+console.log(JSON.stringify({ native_locator_tasks: 'passed', samples }, null, 2));

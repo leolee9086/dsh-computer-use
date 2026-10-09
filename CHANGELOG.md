@@ -1,5 +1,15 @@
 # 变更记录
 
+## 0.5.15 — 2026-10-09
+
+- Windows locator 增加同节点 `where` 的 all/any/not 与 exact/contains/.NET regex 属性叶子。顶层属性仍与 where AND，重叠 OR 对同一节点只计一次，不同节点仍要求消歧；step 的范围、深度、nth 和 inclusion 合同保留，基础 `computer_find` 不变。
+- JS 与生产 C# 双重验证深度 4、64 表达式节点、32 属性比较及 all/any 的 1–16 项预算。每轮访问窗口前编译全部 path/分支，正则默认 IgnoreCase + CultureInvariant、允许 inline flags，每次匹配限 25ms、输入限 16,000 UTF-16 单元；语法、超时和输入上限错误不转为缺席或重试。
+- 缺失/null 属性保持未知，NOT 未知不会制造命中；最终未知返回 `locator_property_unavailable`，已能证明的 any true / all false 可短路。MSAA 在遍历前拒绝任意分支中的 automation ID / framework ID。遍历、chosen 和 ancestor 复读使用同一 matcher，继续保持身份、覆盖、总节点/时间及不重放规则。
+- 新增生产编译 matcher 的 24 项反射合同检查，以及默认 WPF 的布尔链、隐藏无效正则、MSAA 不支持分支和真实长名称正则超时零动作验收。原有替换等待、并发编辑/切窗、惰性树、虚拟项、Grid 和独立 HWND 弹窗任务通过。
+- 新 `smoke:locators:electron` 顺序验收默认 WPF 与实际系统声音设备：跨节点 OR 歧义、同节点重叠 OR 唯一、NOT 排除另节点、一次 Select 与独立 selected 读回，再 Cancel 并确认自己新开的窗口关闭。清理后标记、本轮指标时间与 accepted source 哈希全部核对。
+- `verify:profile` 改为无安装的本地组合验收：读取实际 bundle patch、应用官方 overlay 语义，解析本地 package exports，再通过真实 Loader/Include 检查逐行激活、27 工具、提示词与观察允许/控制拒绝。验收前后清理临时组合，不把此路径写成 CLI 安装或当前 GUI 升级。
+- 受影响的树/滚动任务定向回归通过，另存带版本的子集证据并标明非完整联合验收；0.5.14 原始应用证据保留。工作流提示词、正则示例与运行入口更新，工具总数仍为 27，Rust helper 内容保持已验收版本。实测范围及来源错误见 [EVIDENCE.md](EVIDENCE.md)。
+
 ## 0.5.14 — 2026-10-09
 
 - 新增 Windows `computer_tree` 和 `computer_scroll_find`，共 27 工具。树路径按直属 TreeItem 逐层展开、重定位与确认，所需祖先各展开一次、末项选择一次；窗口、容器与已观察分支身份固定，移除/替换停止并保留已发生步骤，缺失分支有界超时且零选择。

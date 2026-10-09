@@ -4,13 +4,24 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { ComputerUseError } from './errors.js';
 import { WINDOW_QUERY_SCHEMA } from './window-query.js';
 
+const SELECTOR_FIELDS = [['name', 'name', 1024], ['role', 'role', 128], ['automation_id', 'automationId', 1024],
+  ['class_name', 'className', 512], ['framework_id', 'frameworkId', 128]];
+const SELECTOR_PROPERTIES = Object.fromEntries(SELECTOR_FIELDS.map(([key, , maxLength]) => [key, { type: 'string', minLength: 1, maxLength }]));
+const MATCH_SCHEMA = { type: 'string', enum: ['exact', 'contains', 'regex'],
+  description: 'Case-insensitive exact/contains, or .NET regex (IgnoreCase + CultureInvariant, inline options allowed). Regex is parsed once per resolution; 25 ms per match, input at most 16000 characters. Invalid patterns/timeouts are errors.' };
+// 不用指向工具根的 $ref：同一 locator schema 还会嵌入 after/path/item。
+// 子表达式沿用根节点形状，完整递归互斥/深度/总量由 locatorArgs 验证。
+const EXPRESSION_CHILD = { type: 'object', description: 'Same expression shape as where: selector leaf, or exactly one all/any/not. No step options. Maximum expression depth 4.' };
+const WHERE_SCHEMA = { type: 'object', additionalProperties: false,
+  description: 'Same-node boolean predicate. A leaf ANDs selector fields with its own match (default exact); an operator node has exactly one all/any/not and no selector fields. Maximum depth 4, 64 nodes and 32 property comparisons. Missing properties stay unknown under NOT; a final unknown result is an error, never a match or proof of absence. Top-level selectors AND with where. MSAA rejects automation_id/framework_id in every branch.',
+  properties: { ...SELECTOR_PROPERTIES, match: MATCH_SCHEMA,
+    all: { type: 'array', minItems: 1, maxItems: 16, items: EXPRESSION_CHILD },
+    any: { type: 'array', minItems: 1, maxItems: 16, items: EXPRESSION_CHILD }, not: EXPRESSION_CHILD } };
 export const LOCATOR_SCHEMA = Object.freeze({
   type: 'array', minItems: 1, maxItems: 16,
   description: 'Ordered window-relative container/target steps. Each step must uniquely match unless nth is explicitly supplied (zero based). Re-resolved from the window on every attempt.',
   items: { type: 'object', additionalProperties: false, properties: {
-    name: { type: 'string', maxLength: 1024 }, role: { type: 'string', maxLength: 128 },
-    automation_id: { type: 'string', maxLength: 1024 }, class_name: { type: 'string', maxLength: 512 }, framework_id: { type: 'string', maxLength: 128 },
-    match: { type: 'string', enum: ['exact', 'contains'] },
+    ...SELECTOR_PROPERTIES, match: MATCH_SCHEMA, where: WHERE_SCHEMA,
     include_offscreen: { type: 'boolean' }, include_disabled: { type: 'boolean' },
     scope: { type: 'string', enum: ['children', 'subtree'] }, max_depth: { type: 'integer', minimum: 1, maximum: 128 },
     nth: { type: 'integer', minimum: 0, maximum: 19999 },
@@ -32,22 +43,48 @@ export const LOCATOR_OPTIONS_SCHEMA = Object.freeze({
 function record(value, name) {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) throw new Error(`${name} must be an object`);
 }
+function selectorArgs(raw, limits) {
+  const query = { match: raw.match ?? 'exact' };
+  if (!MATCH_SCHEMA.enum.includes(query.match)) throw new Error('locator match must be exact, contains or regex');
+  let count = 0;
+  for (const [key, output, limit] of SELECTOR_FIELDS) {
+    if (raw[key] === undefined) continue;
+    if (typeof raw[key] !== 'string' || raw[key].length < 1 || raw[key].length > limit) throw new Error(`${key} must contain 1..${limit} characters`);
+    query[output] = raw[key]; count++;
+    if (++limits.terms > 32) throw new Error('locator predicate exceeds 32 property comparisons');
+  }
+  return { query, count };
+}
+function expressionArgs(raw, limits, depth = 1) {
+  record(raw, 'locator expression');
+  if (depth > 4) throw new Error('locator predicate exceeds depth 4');
+  if (++limits.nodes > 64) throw new Error('locator predicate exceeds 64 expression nodes');
+  const operators = ['all', 'any', 'not'].filter(key => raw[key] !== undefined);
+  if (operators.length) {
+    if (operators.length !== 1 || Object.keys(raw).length !== 1) throw new Error('locator expression requires exactly one all/any/not without selector fields');
+    const op = operators[0];
+    if (op === 'not') return { not: expressionArgs(raw.not, limits, depth + 1) };
+    if (!Array.isArray(raw[op]) || raw[op].length < 1 || raw[op].length > 16) throw new Error(`locator ${op} requires 1..16 expressions`);
+    return { [op]: raw[op].map(child => expressionArgs(child, limits, depth + 1)) };
+  }
+  const allowed = new Set([...SELECTOR_FIELDS.map(([key]) => key), 'match']);
+  for (const key of Object.keys(raw)) if (!allowed.has(key)) throw new Error(`unsupported locator expression field '${key}'`);
+  const { query, count } = selectorArgs(raw, limits);
+  if (!count) throw new Error('locator expression requires a name, role, automation_id, class_name or framework_id');
+  // 正则不能拿 JS 引擎预判语法；生产 .NET matcher 是唯一解释者。
+  return query;
+}
 export function locatorArgs(raw) {
   if (!Array.isArray(raw) || raw.length < 1 || raw.length > 16) throw new Error('locator must contain 1..16 steps');
   return raw.map((step) => {
     record(step, 'locator step');
-    const query = { match: step.match ?? 'exact', includeOffscreen: step.include_offscreen ?? true, includeDisabled: step.include_disabled ?? true };
-    const fields = [['name', 'name', 1024], ['role', 'role', 128], ['automation_id', 'automationId', 1024], ['class_name', 'className', 512], ['framework_id', 'frameworkId', 128]];
-    const allowed = new Set([...fields.map(([key]) => key), 'match', 'include_offscreen', 'include_disabled', 'scope', 'max_depth', 'nth']);
+    const limits = { nodes: 0, terms: 0 };
+    const allowed = new Set([...SELECTOR_FIELDS.map(([key]) => key), 'match', 'where', 'include_offscreen', 'include_disabled', 'scope', 'max_depth', 'nth']);
     for (const key of Object.keys(step)) if (!allowed.has(key)) throw new Error(`unsupported locator field '${key}'`);
-    let selectors = 0;
-    for (const [key, output, limit] of fields) {
-      if (step[key] === undefined) continue;
-      if (typeof step[key] !== 'string' || step[key].length < 1 || step[key].length > limit) throw new Error(`${key} must contain 1..${limit} characters`);
-      query[output] = step[key]; selectors++;
-    }
-    if (!selectors) throw new Error('each locator step requires a name, role, automation_id, class_name or framework_id');
-    if (!['exact', 'contains'].includes(query.match)) throw new Error('locator match must be exact or contains');
+    const { query, count } = selectorArgs(step, limits);
+    if (step.where !== undefined) query.where = expressionArgs(step.where, limits);
+    if (!count && step.where === undefined) throw new Error('each locator step requires a name, role, automation_id, class_name or framework_id, or where');
+    query.includeOffscreen = step.include_offscreen ?? true; query.includeDisabled = step.include_disabled ?? true;
     if (typeof query.includeOffscreen !== 'boolean' || typeof query.includeDisabled !== 'boolean') throw new Error('locator inclusion options must be boolean');
     const scope = step.scope ?? 'subtree', maxDepth = step.max_depth ?? 128;
     if (!['children', 'subtree'].includes(scope) || !Number.isInteger(maxDepth) || maxDepth < 1 || maxDepth > 128) throw new Error('invalid locator scope/max_depth');

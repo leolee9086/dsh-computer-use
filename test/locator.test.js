@@ -53,6 +53,39 @@ test('locator validation keeps state queries visible and rejects accidental sele
   assert.throws(() => conditionArgs({ state: 'selected' }), /boolean/);
 });
 
+test('boolean locator normalization preserves independent leaf modes and step options', () => {
+  const raw = [{ role: 'Button', include_disabled: false, scope: 'children', where: { all: [
+    { any: [{ name: '\\AApply\\z', match: 'regex' }, { automation_id: 'apply', match: 'contains' }] },
+    { not: { framework_id: 'WinForm' } },
+  ] } }];
+  const [step] = locatorArgs(raw);
+  assert.equal(step.query.includeDisabled, false); assert.equal(step.maxDepth, 1);
+  assert.deepEqual(step.query.where, { all: [{ any: [{ name: '\\AApply\\z', match: 'regex' },
+    { automationId: 'apply', match: 'contains' }] }, { not: { frameworkId: 'WinForm', match: 'exact' } }] });
+  assert.equal(raw[0].where.all[0].any[1].automation_id, 'apply');
+  assert.equal(locatorArgs([{ name: '[', match: 'regex' }])[0].query.name, '[', 'only .NET validates regex syntax');
+});
+test('boolean locator rejects malformed, unbounded or ambiguous expression shapes', () => {
+  for (const where of [{}, { any: [] }, { any: [{ name: 'Apply' }], name: 'Apply' }, { not: null },
+    { all: [{ scope: 'children', name: 'Apply' }] }, { any: [{ match: 'regex' }] }, { not: { name: 'Apply' }, all: [{ role: 'Button' }] }]) {
+    assert.throws(() => locatorArgs([{ where }]));
+  }
+  const depth4 = { not: { not: { not: { name: 'Apply' } } } };
+  assert.doesNotThrow(() => locatorArgs([{ where: depth4 }]));
+  assert.throws(() => locatorArgs([{ where: { not: depth4 } }]), /depth 4/);
+  const branch16 = { any: Array.from({ length: 16 }, () => ({ name: 'Apply' })) };
+  const comparisons32 = { all: [branch16, branch16] };
+  assert.doesNotThrow(() => locatorArgs([{ where: comparisons32 }]));
+  assert.throws(() => locatorArgs([{ name: 'Apply', where: comparisons32 }]), /32 property/);
+  assert.throws(() => locatorArgs([{ where: { any: Array.from({ length: 17 }, () => ({ name: 'Apply' })) } }]), /1\.\.16/);
+});
+test('predicate source errors stop a wait instead of becoming absence or another attempt', async () => {
+  let attempts = 0;
+  const error = Object.assign(new Error('locator_regex_timeout'), { code: 'COMPUTER_OPERATION_FAILED', executionState: 'not_started' });
+  await assert.rejects(waitForLocator({ condition: conditionArgs({ state: 'absent' }), resolve: async () => { attempts++; throw error; } }), actual => actual === error);
+  assert.equal(attempts, 1);
+});
+
 test('wait re-resolves replacements and retries only typed read changes', async () => {
   let calls = 0;
   const result = await waitForLocator({ timeoutMs: 500, pollMs: 20, condition: conditionArgs({ state: 'enabled' }), resolve: async () => {

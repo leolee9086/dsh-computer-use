@@ -65,6 +65,8 @@ public class LocatorFixture {
         else if (text == "disable") { Right.IsEnabled = false; Console.WriteLine("disabled"); }
         else if (text == "enable") { Right.IsEnabled = true; Console.WriteLine("enabled"); }
         else if (text == "popup") { OpenPopup = true; Console.WriteLine("popup-enabled"); }
+        else if (text == "regex-pathological") { AutomationProperties.SetName(Status, new string('a', 12000) + "!"); Console.WriteLine("regex-name-set"); }
+        else if (text == "regex-reset") { AutomationProperties.SetName(Status, "Status"); Console.WriteLine("regex-name-reset"); }
         else if (text == "state") Console.WriteLine("actions:" + Actions + ";generation:" + Generation + ";value:" + Input.Text);
         else if (text == "quit") { Console.WriteLine("quitting"); Application.Current.Shutdown(); }
         else Console.WriteLine("unknown");

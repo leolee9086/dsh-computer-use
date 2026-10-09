@@ -1,6 +1,6 @@
 # dsh-computer-use
 
-独立的 Cordis bundle，为 DeepSeek Harness 提供视觉、原生无障碍和 Windows 讲述人操作路径。0.5.14 注册 **27 个 `computer_*` 工具**；无障碍观测、层级定位、条件等待、阅读和语义动作可以独立使用，文本模型也能操作原生应用。
+独立的 Cordis bundle，为 DeepSeek Harness 提供视觉、原生无障碍和 Windows 讲述人操作路径。0.5.15 注册 **27 个 `computer_*` 工具**；无障碍观测、层级定位、条件等待、阅读和语义动作可以独立使用，文本模型也能操作原生应用。
 
 Windows 是经过本机运行时验证的主要后端。macOS AX、Linux AT-SPI 已实现并做契约测试，尚无这两个系统的原生运行时验收。接口覆盖与实测范围见 [EVIDENCE.md](EVIDENCE.md)；对标的官方接口见 [能力矩阵](references/CAPABILITY-MATRIX.md)。目前没有任务成功率基准，也没有 SOTA 等效结论。
 
@@ -88,11 +88,21 @@ MSAA 使用 `AccessibleObjectFromWindow` / `AccessibleChildren`，提供传统�
 
 ## 层级定位、条件等待与结果确认
 
-`computer_locate` 从本会话已列出的 `window_id` 解析 1–16 级 `locator`。每一级可以指定名称、role、automation ID、class 或 framework（UIA），支持 exact/contains、直属 children/有界 subtree。每级默认要求唯一匹配；两个候选立即报告 ambiguous，显式 `nth`（从 0 开始）选择遍历前缀并报告 partial。深度、节点或时间截断报告 incomplete，不能据此证明缺失。默认包括禁用和屏幕外控件，便于等待启用或显示。
+`computer_locate` 从本会话已列出的 `window_id` 解析 1–16 级 `locator`。每一级可以指定名称、role、automation ID、class 或 framework（UIA），支持 exact/contains/regex、直属 children/有界 subtree。每级默认要求唯一匹配；两个候选立即报告 ambiguous，显式 `nth`（从 0 开始）选择遍历前缀并报告 partial。深度、节点或时间截断报告 incomplete，不能据此证明缺失。默认包括禁用和屏幕外控件，便于等待启用或显示。
 
 ```json
 {"window_id":"<已观测窗口ID>","locator":[{"automation_id":"right-panel"},{"name":"Apply","role":"Button"}]}
 ```
+
+`where` 在同一个节点上组合 `all`（AND）、`any`（OR）和 `not`。属性叶子接受上述五个字符串属性及自己的 `match`（默认 exact）；同一叶子的多个属性，以及 step 顶层属性与 `where`，都按 AND。`scope`、`max_depth`、`nth` 和是否包含禁用/屏幕外控件只放在 step。重叠 OR 在一个节点上只计一个候选；两个不同节点命中仍为 ambiguous。
+
+```json
+{"window_id":"<已观测窗口ID>","locator":[{"automation_id":"right-panel"},{"role":"Button","where":{"all":[{"any":[{"name":"Apply"},{"name":"\\ACommit(?: changes)?\\z","match":"regex"}]},{"not":{"automation_id":"preview"}}]}}]}
+```
+
+正则使用 **.NET** 语义，默认 IgnoreCase + CultureInvariant，允许内联 flags；JSON 中反斜杠须转义。每轮在访问窗口前编译全部 path 和分支，不会因短路而忽略无效正则。每次匹配最多 25ms，正则输入最多 16,000 个 UTF-16 单元；每步 `where` 深度最多 4、表达式节点最多 64、属性比较最多 32（含顶层属性），每个 all/any 含 1–16 项。无效表达式、正则语法/超时/输入上限都是来源错误，等待不把它们当成不存在或自动重试。
+
+属性缺失或 null 为未知，NOT 未知仍为未知；最终无法判定时返回 `locator_property_unavailable`，不能用它证明缺席。已能证明的 any true / all false 可短路。MSAA 不提供 automation ID / framework ID，任何分支使用它们都会在遍历前拒绝。这个谓词合同适用于 locator、before/after、树路径和 scroll item；`computer_find` 保持原 exact/contains 查询合同。
 
 `computer_wait` 每次轮询从相同 HWND/PID/标题重新解析整条链，容器或控件被替换后读取新目标。condition 支持 present/absent、enabled/disabled、visible/hidden、focused、value/text、selected、expanded/collapsed、toggled 和 stable；stable 同时比较元素身份与边界。唯一/缺失判断只覆盖暴露的有界树，不自动实例化虚拟项。查询和读取只在明确的执行前目标变化时重试；其它提供者错误上报。
 
@@ -296,6 +306,8 @@ pnpm run smoke:visual "C:\path\to\DeepSeek Harness.exe"
 # 标准 ListView 的 32/64 位夹具和真正系统声音应用：
 pnpm run smoke:listview "C:\path\to\DeepSeek Harness.exe"
 pnpm run smoke:listview "C:\path\to\DeepSeek Harness.exe" app
+# 定位谓词：默认 WPF、生产 matcher 合同与真实系统声音设备选择：
+pnpm run smoke:locators:electron "C:\path\to\DeepSeek Harness.exe"
 # 四类真实菜单/Popup/外部对话框与系统声音属性查看：
 pnpm run smoke:popups "C:\path\to\DeepSeek Harness.exe"
 # WPF 数据任务、真实系统信息树、真正 Out-GridView：
@@ -307,9 +319,11 @@ pnpm run native:stage
 pnpm pack --pack-destination .local
 ```
 
-`verify` 检查所有 JS 文件并运行单元/提供者合同及真实 ToolRuntime 回归。`verify:profile` 使用独立临时 DSH home 检查真实 Loader、27 工具及提示词，清理后不影响既有 profile。`smoke:semantics` 用真实 Cordis 本地子进程服务测试万节点 UIA/MSAA、分页/分支/查询/引用/虚拟化、阻塞终止和恢复，并与旧采集算法测量同一提供者的调用量与响应大小。`smoke:snapshots` 验证两种后端万节点固定分页、未交付代次变化丢弃、查询未命中节点复核、静默插删/重排/属性更新、封存后原生采集零调用，以及历史结果不能绕过实时目标校验。`smoke:recovery` 验证查询未命中项静默变更后重采一次、持续变化三次尝试后失败、已交付游标不换结果、旧动作引用实时拒绝，以及相同覆盖范围下的按需缓存读取量。`smoke:matches` 验证真实 UIA/MSAA 在相邻及远端属性 getter 阻塞时仍可早停并封存首项；匹配前缀完整复读、每页一项的固定三页、未命中项及重排变更丢弃、无匹配时搜索完整范围，以及动作实时身份拒绝。`smoke:lifetimes` 将自建窗口的真实属性读取延迟 1200ms，并把测试进程私有的代次起点移到距期限 1000ms，验证分段内到期丢弃、旧游标拒绝、引用清除及同进程恢复；还验证未来的展示时间戳不会延长封存时效，不修改机器时钟或生产时效常量。`smoke:locators` 使用默认 WPF AutomationPeer 与真实 ToolRuntime，验证同名消歧、容器替换、动作一次及读回、取消、惰性树、600 项虚拟列表、Grid 单元格和独立 HWND 弹窗；并在等待期间模拟人工编辑、切窗和原目标替换，检查另一个同名窗口未被操作。Electron smoke 还将真实 ToolRuntime 与 WindowsComputer/原生工作进程接在一起，按默认 8 条语义观测上限读取 UIA/MSAA 各 13 页，检查采集变化丢弃、固定续页、历史动作消耗状态、会话隔离及变化恢复；也包含已有 WPF/WinForms 动作。每项验收需在模块及清理完成后返回完成标记，加载失败、提前退出或迟到异常均不能只凭退出码 0 判为通过。Windows 动作 smoke 只操作标题唯一、由自己创建的进程，结束后清理自己的进程和临时目录。`smoke:visual` 使用真实 ToolRuntime 和系统 OCR 读取自绘 WinForms，覆盖限定区域、方向/容差/计数、截断不能证明消失、定时变化、超时/失焦、遮挡后台读取和移动后相对区域；点击计数保持零。另已完成当前真实 SketchUp 2024 的 R/空格工具切换、中文状态读取及按钮高亮等待，未向画布输入或保存模型；该现场脚本与原始截图/结果仅保存在本地检查点，不是通用应用基准。
+`verify` 检查所有 JS 文件并运行单元/提供者合同及真实 ToolRuntime 回归。`verify:profile` 读取实际 bundle patch，使用官方 patch 语义及本地 package exports 的解析结果，在临时文件组合中检查真实 Loader、逐行激活、27 工具、提示词和观察允许/控制拒绝。它不执行插件安装或 CLI/profile 层叠，也不改当前 GUI；原 CLI 临时安装验收保留为历史证据。`smoke:semantics` 用真实 Cordis 本地子进程服务测试万节点 UIA/MSAA、分页/分支/查询/引用/虚拟化、阻塞终止和恢复，并与旧采集算法测量同一提供者的调用量与响应大小。`smoke:snapshots` 验证两种后端万节点固定分页、未交付代次变化丢弃、查询未命中节点复核、静默插删/重排/属性更新、封存后原生采集零调用，以及历史结果不能绕过实时目标校验。`smoke:recovery` 验证查询未命中项静默变更后重采一次、持续变化三次尝试后失败、已交付游标不换结果、旧动作引用实时拒绝，以及相同覆盖范围下的按需缓存读取量。`smoke:matches` 验证真实 UIA/MSAA 在相邻及远端属性 getter 阻塞时仍可早停并封存首项；匹配前缀完整复读、每页一项的固定三页、未命中项及重排变更丢弃、无匹配时搜索完整范围，以及动作实时身份拒绝。`smoke:lifetimes` 将自建窗口的真实属性读取延迟 1200ms，并把测试进程私有的代次起点移到距期限 1000ms，验证分段内到期丢弃、旧游标拒绝、引用清除及同进程恢复；还验证未来的展示时间戳不会延长封存时效，不修改机器时钟或生产时效常量。`smoke:locators` 使用默认 WPF AutomationPeer 与真实 ToolRuntime，验证同名消歧、容器替换、动作一次及读回、取消、惰性树、600 项虚拟列表、Grid 单元格和独立 HWND 弹窗；并在等待期间模拟人工编辑、切窗和原目标替换，检查另一个同名窗口未被操作。Electron smoke 还将真实 ToolRuntime 与 WindowsComputer/原生工作进程接在一起，按默认 8 条语义观测上限读取 UIA/MSAA 各 13 页，检查采集变化丢弃、固定续页、历史动作消耗状态、会话隔离及变化恢复；也包含已有 WPF/WinForms 动作。每项验收需在模块及清理完成后返回完成标记，加载失败、提前退出或迟到异常均不能只凭退出码 0 判为通过。Windows 动作 smoke 只操作标题唯一、由自己创建的进程，结束后清理自己的进程和临时目录。`smoke:visual` 使用真实 ToolRuntime 和系统 OCR 读取自绘 WinForms，覆盖限定区域、方向/容差/计数、截断不能证明消失、定时变化、超时/失焦、遮挡后台读取和移动后相对区域；点击计数保持零。另已完成当前真实 SketchUp 2024 的 R/空格工具切换、中文状态读取及按钮高亮等待，未向画布输入或保存模型；该现场脚本与原始截图/结果仅保存在本地检查点，不是通用应用基准。
 
 `smoke:listview` 使用真实 Electron、ToolRuntime 和官方 managed subprocess，检查 32/64 位标准控件、UTF-16 与行/列预算、遮挡/禁用读取、零尺寸目录成员、超时/取消后的缓冲保留和后续分配拒绝。`app` 模式启动真正系统声音应用，逐字对照 UIA 的五个设备名称、重复读取选择/焦点与前台不变，然后清理本次声音进程。Explorer 桌面的 owner-data 拒绝也有实际证据；本机服务窗口读取遇到 Win32 access denied，声音窗口整树 MSAA 枚举失败，不能把这些路径算作成功。它们的限制与成功证据一起记录在 [EVIDENCE.md](EVIDENCE.md)。
+
+`smoke:locators:electron` 顺序运行默认 WPF 定位验收和本次新开的系统声音窗口。它检查生产编译 matcher 的布尔/正则/未知属性合同、真实 WPF 正则超时零动作，以及声音设备的跨节点 OR 歧义、同节点重叠 OR 唯一、NOT 排除、一次 Select 与独立 selected 读回；只关闭自己新开的声音实例。清理后的完成标记、本轮指标时间和全部 accepted source 哈希都一致才写联合验收。声音阶段不更改音频设置；该任务范围不代表通用应用成功率。
 
 `smoke:popups` 顺序运行四类真实框架/provider 夹具和本次新开的系统声音窗口，两轮打开/动作计数、关闭后的完整缺席与旧引用拒绝、Forms/WPF 根替换、同名 owned 根歧义、部分范围、取消与 anchor 改名错误均检查。声音窗口只查看属性并 Cancel，不修改设置。调试时可设 `DSH_POPUP_MODES` 为 `native,forms,wpf,external` 的非重复子集；该路径跳过真实声音阶段、另存 subset 指标并标明 `fullAcceptance:false`，不能代替完整验收。
 

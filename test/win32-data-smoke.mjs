@@ -2,7 +2,8 @@
 import assert from 'node:assert/strict';
 import { setTimeout as delay } from 'node:timers/promises';
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -21,6 +22,9 @@ const [{ Context }, { default: ToolRuntime }, { default: SystemPrompt }] = await
 ]);
 const modes = process.env.DSH_DATA_MODES?.split(',') ?? ['tree', 'virtual', 'grid', 'scroll'];
 if (!modes.length || new Set(modes).size !== modes.length || modes.some(mode => !['tree', 'virtual', 'grid', 'scroll'].includes(mode))) throw new Error('invalid DSH_DATA_MODES');
+// 后续版本回归另存证据，避免覆盖已交付版本联合记录引用的不可变源文件。
+const evidenceTag = process.env.DSH_DATA_EVIDENCE_TAG;
+if (evidenceTag !== undefined && !/^[a-z0-9][a-z0-9.-]{0,39}$/.test(evidenceTag)) throw new Error('invalid DSH_DATA_EVIDENCE_TAG');
 const runner = await createManagedRunner(), computer = new WindowsComputer(runner, { semanticWorkerCount: 1 });
 const directory = await mkdtemp(join(tmpdir(), 'dsh-data-fixture-')), ctx = new Context();
 const evidence = { observedAt: new Date().toISOString(), fullAcceptance: modes.length === 4, modes,
@@ -50,6 +54,10 @@ async function gac(name) {
   throw new Error(`Windows .NET assembly ${name} unavailable`);
 }
 try {
+  evidence.sources = {};
+  for (const source of ['src/locator.js', 'src/windows-semantic-locator.cs', 'src/data-tools.js', 'test/win32-data-smoke.mjs', 'test/windows-data-fixture.cs']) {
+    evidence.sources[source] = createHash('sha256').update(await readFile(new URL(`../${source}`, import.meta.url))).digest('hex');
+  }
   const compiler = join(process.env.WINDIR ?? 'C:\\Windows', 'Microsoft.NET', 'Framework64', 'v4.0.30319', 'csc.exe');
   const executable = join(directory, 'fixture.exe');
   const refs = await Promise.all(['PresentationFramework', 'PresentationCore', 'WindowsBase', 'UIAutomationClient', 'UIAutomationTypes'].map(gac));
@@ -220,7 +228,9 @@ try {
 } catch (error) { failure = error; evidence.failure = { message: error.message, stack: error.stack }; throw error; }
 finally {
   await mkdir(new URL('../.local/', import.meta.url), { recursive: true });
-  const metrics = failure ? `data-smoke-failure-${evidence.observedAt.replace(/[^0-9]/g, '')}.json` : evidence.fullAcceptance ? 'data-smoke-metrics.json' : `data-smoke-${modes.join('-')}-metrics.json`;
+  const metrics = failure ? `data-smoke-failure-${evidence.observedAt.replace(/[^0-9]/g, '')}.json`
+    : evidenceTag ? `data-smoke-${evidenceTag}-${modes.join('-')}-metrics.json`
+    : evidence.fullAcceptance ? 'data-smoke-metrics.json' : `data-smoke-${modes.join('-')}-metrics.json`;
   await writeFile(new URL(`../.local/${metrics}`, import.meta.url), JSON.stringify(evidence, null, 2));
   await ctx.fiber.dispose(); await computer.dispose();
   if (child) { child.terminate(); await child.waitForExit(AbortSignal.timeout(3000)); }
