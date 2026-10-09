@@ -97,5 +97,8 @@ try {
 assert.equal(completed, true);
 result.fullAcceptance = true;
 await mkdir(join(projectRoot, '.local'), { recursive: true });
-await writeFile(join(projectRoot, '.local', 'composition-0.5.15-metrics.json'), JSON.stringify(result, null, 2));
+// 用实际 package 版本命名，不覆盖已交付版本的原始组合证据。
+const packageVersion = JSON.parse(await readFile(join(projectRoot, 'package.json'), 'utf8')).version;
+assert.match(packageVersion, /^\d+\.\d+\.\d+$/);
+await writeFile(join(projectRoot, '.local', `composition-${packageVersion}-metrics.json`), JSON.stringify(result, null, 2));
 console.log(JSON.stringify({ compositionAcceptance: result }, null, 2));

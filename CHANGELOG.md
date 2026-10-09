@@ -1,5 +1,16 @@
 # 变更记录
 
+## 0.5.16 — 2026-10-09
+
+- Windows locator 的每个 step 增加候选相对后代 `has` / `has_not`，可与顶层 selector 和同节点 `where` AND。内层支持 selector、where、inclusion、children/subtree 与 max_depth，严格排除候选自身；多个后代见证只算一个候选，内层不允许 window、nth 或嵌套关系。
+- 关系与外层共享每 step 的 64 表达式节点 / 32 属性比较及整轮节点、时间和总深度预算；所有 path 和关系分支在遍历前编译，隐藏无效正则或 MSAA 不支持字段仍直接报错。outer scope:children 只限制候选层级，关系继续受从外层根计算的总深度限制。
+- 找到后代可证明 has；has_not 仅在声明范围完整遍历且无匹配时通过。节点、时间或可达深度截断保留未知，返回 incomplete 并清空目标，不跳过未知候选选择后续 nth。来源属性/正则错误不转成缺席或重试。
+- 候选、选中目标与已选祖先实时复查全部使用同一共享预算；重复访问也计数，避免复查或重试扩张预算。保留窗口/节点身份、source_atomic:false、一次动作与不重放合同，Rust helper 内容保持已验收版本。
+- 默认 WPF 真实 provider 通过正负/AND、多个见证、自身排除、相对 children、共享节点/深度截断、未知 nth 和隐藏错误零动作验收；替换等待、写值/动作确认的原路径携带关系复查。既有并发编辑、惰性树、虚拟项、Grid 和弹窗任务也通过。
+- 实际系统声音窗口先观察 List 父节点和五个无子节点的 ListItem，再用 has 设备 / has_not 缺失后代定位；叶子自身不算后代，多个负关系叶子保持歧义。一轮 Select 后独立 selected 读回，Cancel 后新目录确认关闭；WPF/声音联合在 23,912ms 内完成并核对清理后标记和当前源哈希。
+- 共享遍历预算影响的树/滚动子集回归通过，另存 fullAcceptance:false 的 0.5.16 证据；无安装真实 Loader 验收确认所有行、27 工具、提示词与观察允许/控制拒绝。组合指标按实际包版本命名，保留原 0.5.15 / 0.5.14 记录。
+- 更新关系示例、工作流提示词和版本清单；91 个 JavaScript 文件语法检查、124 项 Node/ToolRuntime 测试通过。工具总数仍为 27，实测范围与预算边界见 [EVIDENCE.md](EVIDENCE.md)。
+
 ## 0.5.15 — 2026-10-09
 
 - Windows locator 增加同节点 `where` 的 all/any/not 与 exact/contains/.NET regex 属性叶子。顶层属性仍与 where AND，重叠 OR 对同一节点只计一次，不同节点仍要求消歧；step 的范围、深度、nth 和 inclusion 合同保留，基础 `computer_find` 不变。

@@ -13,17 +13,21 @@ const MATCH_SCHEMA = { type: 'string', enum: ['exact', 'contains', 'regex'],
 // 子表达式沿用根节点形状，完整递归互斥/深度/总量由 locatorArgs 验证。
 const EXPRESSION_CHILD = { type: 'object', description: 'Same expression shape as where: selector leaf, or exactly one all/any/not. No step options. Maximum expression depth 4.' };
 const WHERE_SCHEMA = { type: 'object', additionalProperties: false,
-  description: 'Same-node boolean predicate. A leaf ANDs selector fields with its own match (default exact); an operator node has exactly one all/any/not and no selector fields. Maximum depth 4, 64 nodes and 32 property comparisons. Missing properties stay unknown under NOT; a final unknown result is an error, never a match or proof of absence. Top-level selectors AND with where. MSAA rejects automation_id/framework_id in every branch.',
+  description: 'Same-node boolean predicate. A leaf ANDs selector fields with its own match (default exact); an operator node has exactly one all/any/not and no selector fields. Maximum depth 4. Outer and relative queries share 64 expression nodes and 32 property comparisons per step. Missing properties stay unknown under NOT; a final unknown result is an error, never a match or proof of absence. Top-level selectors AND with where. MSAA rejects automation_id/framework_id in every branch.',
   properties: { ...SELECTOR_PROPERTIES, match: MATCH_SCHEMA,
     all: { type: 'array', minItems: 1, maxItems: 16, items: EXPRESSION_CHILD },
     any: { type: 'array', minItems: 1, maxItems: 16, items: EXPRESSION_CHILD }, not: EXPRESSION_CHILD } };
+const QUERY_PROPERTIES = { ...SELECTOR_PROPERTIES, match: MATCH_SCHEMA, where: WHERE_SCHEMA,
+  include_offscreen: { type: 'boolean' }, include_disabled: { type: 'boolean' },
+  scope: { type: 'string', enum: ['children', 'subtree'] }, max_depth: { type: 'integer', minimum: 1, maximum: 128 } };
+// 关系只接受叶层 relative query，不递归引用 outer step，避免嵌套扩大预算。
+const RELATION_SCHEMA = { type: 'object', additionalProperties: false, properties: QUERY_PROPERTIES,
+  description: 'Existential query over candidate descendants, excluding the candidate itself. Requires selectors or where; no window, nth or nested relations. Default scope subtree. Shares outer node/time budget and total max_depth; its own max_depth can further restrict the relative scope. has_not passes only after complete absence; truncation stays incomplete.' };
 export const LOCATOR_SCHEMA = Object.freeze({
   type: 'array', minItems: 1, maxItems: 16,
-  description: 'Ordered window-relative container/target steps. Each step must uniquely match unless nth is explicitly supplied (zero based). Re-resolved from the window on every attempt.',
+  description: 'Ordered window-relative container/target steps. Each step must uniquely match unless nth is explicitly supplied (zero based). Selectors/where AND with has/has_not descendant queries. max_depth bounds candidates and relations together, measured from this step root; children restricts candidates only. Re-resolved from the window on every attempt.',
   items: { type: 'object', additionalProperties: false, properties: {
-    ...SELECTOR_PROPERTIES, match: MATCH_SCHEMA, where: WHERE_SCHEMA,
-    include_offscreen: { type: 'boolean' }, include_disabled: { type: 'boolean' },
-    scope: { type: 'string', enum: ['children', 'subtree'] }, max_depth: { type: 'integer', minimum: 1, maximum: 128 },
+    ...QUERY_PROPERTIES, has: RELATION_SCHEMA, has_not: RELATION_SCHEMA,
     nth: { type: 'integer', minimum: 0, maximum: 19999 },
   } },
 });
@@ -74,22 +78,39 @@ function expressionArgs(raw, limits, depth = 1) {
   // 正则不能拿 JS 引擎预判语法；生产 .NET matcher 是唯一解释者。
   return query;
 }
+function queryArgs(raw, limits) {
+  const { query, count } = selectorArgs(raw, limits);
+  if (raw.where !== undefined) query.where = expressionArgs(raw.where, limits);
+  if (!count && raw.where === undefined) throw new Error('locator query requires a name, role, automation_id, class_name or framework_id, or where');
+  query.includeOffscreen = raw.include_offscreen ?? true; query.includeDisabled = raw.include_disabled ?? true;
+  if (typeof query.includeOffscreen !== 'boolean' || typeof query.includeDisabled !== 'boolean') throw new Error('locator inclusion options must be boolean');
+  return query;
+}
+function scopeArgs(raw) {
+  const scope = raw.scope ?? 'subtree', maxDepth = raw.max_depth ?? 128;
+  if (!['children', 'subtree'].includes(scope) || !Number.isInteger(maxDepth) || maxDepth < 1 || maxDepth > 128) throw new Error('invalid locator scope/max_depth');
+  return { scope, maxDepth };
+}
+function relationArgs(raw, limits) {
+  record(raw, 'locator relation');
+  for (const key of Object.keys(raw)) if (!Object.hasOwn(QUERY_PROPERTIES, key)) throw new Error(`unsupported locator relation field '${key}'`);
+  const query = queryArgs(raw, limits), { scope, maxDepth } = scopeArgs(raw);
+  return { query, scope, maxDepth: scope === 'children' ? 1 : maxDepth };
+}
 export function locatorArgs(raw) {
   if (!Array.isArray(raw) || raw.length < 1 || raw.length > 16) throw new Error('locator must contain 1..16 steps');
   return raw.map((step) => {
     record(step, 'locator step');
     const limits = { nodes: 0, terms: 0 };
-    const allowed = new Set([...SELECTOR_FIELDS.map(([key]) => key), 'match', 'where', 'include_offscreen', 'include_disabled', 'scope', 'max_depth', 'nth']);
-    for (const key of Object.keys(step)) if (!allowed.has(key)) throw new Error(`unsupported locator field '${key}'`);
-    const { query, count } = selectorArgs(step, limits);
-    if (step.where !== undefined) query.where = expressionArgs(step.where, limits);
-    if (!count && step.where === undefined) throw new Error('each locator step requires a name, role, automation_id, class_name or framework_id, or where');
-    query.includeOffscreen = step.include_offscreen ?? true; query.includeDisabled = step.include_disabled ?? true;
-    if (typeof query.includeOffscreen !== 'boolean' || typeof query.includeDisabled !== 'boolean') throw new Error('locator inclusion options must be boolean');
-    const scope = step.scope ?? 'subtree', maxDepth = step.max_depth ?? 128;
-    if (!['children', 'subtree'].includes(scope) || !Number.isInteger(maxDepth) || maxDepth < 1 || maxDepth > 128) throw new Error('invalid locator scope/max_depth');
+    for (const key of Object.keys(step)) if (!Object.hasOwn(LOCATOR_SCHEMA.items.properties, key)) throw new Error(`unsupported locator field '${key}'`);
+    const query = queryArgs(step, limits), { scope, maxDepth } = scopeArgs(step);
+    // 外层与两个关系共享 expression/selector 上限；不因运行时短路漏校验分支。
+    if (step.has !== undefined) query.has = relationArgs(step.has, limits);
+    if (step.has_not !== undefined) query.hasNot = relationArgs(step.has_not, limits);
     if (step.nth !== undefined && (!Number.isInteger(step.nth) || step.nth < 0 || step.nth > 19999)) throw new Error('locator nth must be 0..19999');
-    return { query, scope, maxDepth: scope === 'children' ? 1 : maxDepth, ...(step.nth === undefined ? {} : { nth: step.nth }) };
+    // children 只限制外层候选；关系仍需要以 step root 为起点的总深度预算。
+    const hasRelations = query.has !== undefined || query.hasNot !== undefined;
+    return { query, scope, maxDepth: scope === 'children' && !hasRelations ? 1 : maxDepth, ...(step.nth === undefined ? {} : { nth: step.nth }) };
   });
 }
 export function conditionArgs(raw = { state: 'present' }) {

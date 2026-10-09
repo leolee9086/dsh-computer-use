@@ -82,12 +82,58 @@ try {
   const right = [{ role: 'Group', where: { all: [
     { any: [{ name: '\\ARight\\s+panel\\z', match: 'regex' }, { automation_id: 'right-panel' }] },
     { not: { automation_id: 'left-panel' } },
-  ] } }];
+  ] }, has: { role: 'Edit', name: 'Input' }, has_not: { name: 'Missing descendant' } }];
   const input = [...right, { where: { all: [
     { any: [{ automation_id: 'input' }, { name: '\\AInput\\z', match: 'regex' }] },
     { role: 'Edit', framework_id: 'WPF' },
   ] } }];
   const apply = [...right, { role: 'Button', where: { any: [{ name: 'Apply' }, { automation_id: 'apply' }] } }];
+  // 同名容器通过真实后代状态消歧；snapshot 证明关系来自 provider 树。
+  assert.equal(await command('relations-names'), 'panels-same-name');
+  const observed = await json('computer_accessibility', { window_id: owned.id, backend: 'uia', max_depth: 6 });
+  const flatten = tree => [tree, ...(tree.children ?? []).flatMap(flatten)];
+  const panels = flatten(observed.tree).filter(row => row.role === 'Group' && row.name === 'Panel');
+  assert.equal(panels.length, 2);
+  assert.deepEqual(panels.map(panel => flatten(panel).find(row => row.role === 'Edit' && row.name === 'Input').enabled), [true, false]);
+  const panel = { role: 'Group', name: 'Panel' }, enabledInput = { role: 'Edit', name: 'Input', include_disabled: false };
+  const positive = await json('computer_locate', { ...base, locator: [{ ...panel, has: enabledInput }] });
+  assert.equal(positive.status, 'resolved'); assert.equal(positive.element.automation_id, 'left-panel');
+  const negative = await json('computer_locate', { ...base, locator: [{ ...panel, has_not: enabledInput }] });
+  assert.equal(negative.status, 'resolved'); assert.equal(negative.element.automation_id, 'right-panel');
+  const both = await json('computer_locate', { ...base, locator: [{ ...panel, has: enabledInput, has_not: { name: 'Missing descendant' } }] });
+  assert.equal(both.status, 'resolved'); assert.equal(both.element.automation_id, 'left-panel');
+  const duplicates = await json('computer_locate', { ...base, locator: [{ ...panel, has: { where: { any: [{ name: 'Input' }, { name: 'Apply' }] } } }] });
+  assert.equal(duplicates.status, 'ambiguous'); assert.equal(duplicates.candidates.length, 2);
+  assert.equal(new Set(duplicates.candidates.map(row => row.element_id)).size, 2);
+  const self = await json('computer_locate', { ...base, locator: [{ ...panel, has: panel }] });
+  assert.equal(self.status, 'not_found'); assert.equal(self.coverage.status, 'complete');
+  const direct = await json('computer_locate', { ...base, locator: [{ ...panel, scope: 'children', has: { ...enabledInput, scope: 'children' } }] });
+  assert.equal(direct.status, 'resolved'); assert.equal(direct.element.automation_id, 'left-panel');
+  const wrongScope = await json('computer_locate', { ...base, locator: [{ ...panel, has: { role: 'Text', name: 'Apply', scope: 'children' } }] });
+  assert.equal(wrongScope.status, 'not_found'); assert.equal(wrongScope.coverage.status, 'complete');
+  const sharedNodes = await json('computer_locate', { ...base, max_nodes: 1, locator: [{ ...panel, has: enabledInput }] });
+  assert.equal(sharedNodes.status, 'incomplete'); assert.equal(sharedNodes.coverage.reason, 'node_limit');
+  assert.equal(sharedNodes.element, null); assert.equal(sharedNodes.candidates.length, 0); assert.equal(sharedNodes.visited_nodes, 1);
+  const deep = await json('computer_locate', { ...base, locator: [{ ...panel, scope: 'children', max_depth: 1, has_not: { name: 'Missing descendant' }, nth: 0 }] });
+  assert.equal(deep.status, 'incomplete'); assert.equal(deep.coverage.reason, 'depth_limit'); assert.equal(deep.element, null);
+  const innerDepth = await json('computer_locate', { ...base, locator: [{ ...panel, has_not: { name: 'Missing descendant', max_depth: 1 } }] });
+  assert.equal(innerDepth.status, 'incomplete'); assert.equal(innerDepth.coverage.reason, 'depth_limit');
+  const notAbsent = await json('computer_wait', { ...base, timeout_ms: 300, max_nodes: 1, locator: [{ ...panel, has_not: enabledInput }], condition: { state: 'absent' } });
+  assert.equal(notAbsent.fulfilled, false);
+  // missing outer 不能掩盖两个关系内的编译错误，错误也不能成为 absent。
+  for (const relation of ['has', 'has_not']) {
+    const badRegex = await execute('computer_wait', { ...base, locator: [{ name: 'Missing', [relation]: { name: '[', match: 'regex' } }], condition: { state: 'absent' } });
+    assert.equal(badRegex.isError, true); assert.match(JSON.stringify(badRegex), /locator_regex_invalid/);
+    const badMsaa = await execute('computer_locate', { ...base, backend: 'msaa', locator: [{ name: 'Missing', [relation]: { framework_id: 'WPF' } }] });
+    assert.equal(badMsaa.isError, true); assert.match(JSON.stringify(badMsaa), /MSAA does not expose framework_id/);
+  }
+  assert.match(await command('state'), /^actions:0;/);
+  samples.relative_locators = { source_snapshot_id: observed.snapshot_id, two_same_name_groups: true,
+    has_enabled_child_selected_left: true, has_not_enabled_child_selected_right: true, conjunction: true,
+    multiple_witnesses_no_duplicate_candidate: true, excludes_self: true, relative_children: true, wrong_scope_complete_missing: true,
+    shared_node_limit: true, total_depth_limit: true, relative_depth_limit: true, unknown_nth_not_selected: true,
+    incomplete_not_absent: true, both_relation_compile_errors_rejected: true, actions: 0 };
+  assert.equal(await command('relations-reset'), 'panels-names-restored');
   const overlapping = await json('computer_locate', { ...base, locator: apply });
   assert.equal(overlapping.status, 'resolved'); assert.equal(overlapping.trace.at(-1).matches, 1);
   const eitherPanel = [{ role: 'Group', where: { any: [{ name: 'Left panel' }, { name: 'Right panel' }] } }];
@@ -240,9 +286,10 @@ try {
   await ctx.fiber.dispose(); await computer.dispose();
   if (child) { child.terminate(); assert.equal(await child.waitForExit(AbortSignal.timeout(3000)), true, 'fixture exit must be observed'); }
   await runner.dispose(); loader.unregister(); await rm(directory, { recursive: true, force: true });
-  // 新matcher的证据另存；0.5.8/0.5.14的不可变source hash不被覆盖。
+  // 新关系证据另存；包括 0.5.15 在内的旧 source hash 不被覆盖。
   samples.fullAcceptance = completed;
   await mkdir(new URL('../.local/', import.meta.url), { recursive: true });
-  await writeFile(new URL('../.local/locator-0.5.15-smoke-metrics.json', import.meta.url), JSON.stringify(samples, null, 2));
+  const metrics = completed ? 'locator-0.5.16-smoke-metrics.json' : `locator-0.5.16-smoke-failure-${samples.observedAt.replace(/[^0-9]/g, '')}.json`;
+  await writeFile(new URL(`../.local/${metrics}`, import.meta.url), JSON.stringify(samples, null, 2));
 }
 console.log(JSON.stringify({ native_locator_tasks: 'passed', samples }, null, 2));

@@ -1,5 +1,5 @@
 // 层级定位走有界实时遍历，不先导出/封存整树。每级只保留消歧所需候选，
-// 只有唯一命中（或明确 nth）才能继续；整条链共用节点、字节和时间预算。
+// 只有唯一命中（或明确 nth）才能继续；整条链及关系复查共用节点和时间预算。
 using System;
 using System.Collections;
 using System.Collections.Generic;
@@ -10,9 +10,8 @@ using System.Windows.Automation;
 
 internal static partial class SemanticWorker
 {
-    // 这是 locator 专用 matcher，不改变基础 find 的封存/分页查询。
-    // 一次请求先编译完整 path，包括短路时不会执行的分支；无效正则/不支持属性
-    // 必须在遍历前失败。布尔树作用于同一个节点，重叠 OR 不重复计数。
+    // 一次请求先编译完整 path，包括短路时不会执行的关系/布尔分支。
+    // 无效正则和不支持属性在遍历前失败；同节点 OR 不重复计数。
     sealed class LocatorCompiler {
         public string Backend; public int Nodes, Terms;
         static readonly string[][] Fields = { new [] { "name", "name", "1024" }, new [] { "role", "role", "128" },
@@ -86,24 +85,107 @@ internal static partial class SemanticWorker
             return Leaf(raw, false);
         }
     }
+    // 不把关系扫描或 fresh recheck 的额外工作藏在独立预算中。
+    sealed class LocatorBudget {
+        public Window Window; public int Version, MaxNodes, BudgetMs, Visited;
+        public Stopwatch Clock; public string Reason;
+        public bool Check() {
+            if (Window.Version != Version) throw new ElementNotAvailableException("locator tree changed while resolving");
+            if (Clock.ElapsedMilliseconds >= BudgetMs) Reason = "time_limit";
+            return Reason == null;
+        }
+        public bool Visit() {
+            if (!Check()) return false;
+            if (Visited >= MaxNodes) { Reason = "node_limit"; return false; }
+            Visited++; return true;
+        }
+    }
+    sealed class LocatorRelation {
+        public LocatorMatcher Matcher; public string Scope; public int MaxDepth;
+        public static LocatorRelation Build(object value, LocatorCompiler compiler) {
+            var raw = value as Dictionary<string, object>; object query;
+            if (raw == null || !raw.TryGetValue("query", out query)) throw new InvalidOperationException("locator relation requires query");
+            foreach (string key in raw.Keys) if (key != "query" && key != "scope" && key != "maxDepth") throw new InvalidOperationException("unsupported locator relation field: " + key);
+            string scope = Text(raw, "scope", "subtree"); int depth = Integer(raw, "maxDepth", 128);
+            if ((scope != "children" && scope != "subtree") || depth < 1 || depth > 128) throw new InvalidOperationException("locator relation bounds invalid");
+            return new LocatorRelation { Matcher = LocatorMatcher.Build(query as Dictionary<string, object>, compiler, false), Scope = scope, MaxDepth = scope == "children" ? 1 : depth };
+        }
+        public bool? Contains(Target candidate, LocatorBudget budget, int remainingDepth) {
+            int depth = Math.Min(MaxDepth, remainingDepth); bool depthLimited = false;
+            // candidate 本身永不参与匹配。root 只用于取得相对后代。
+            var pending = new Stack<Frame>(); pending.Push(new Frame { Node = candidate, Depth = 0, Entered = true });
+            while (pending.Count > 0) {
+                if (!budget.Check()) return null;
+                var frame = pending.Peek();
+                if (!frame.Entered) {
+                    if (!budget.Visit()) return null;
+                    frame.Entered = true;
+                    bool found = Matcher.Matches(QueryFields(frame.Node));
+                    if (!budget.Check()) return null;
+                    // 任意一个 witness 已能证明存在，别支深度截断不否定该证明。
+                    if (found) return true;
+                }
+                if (frame.Depth >= depth) {
+                    // children 的完整范围只有直接孩子；若总深度连孩子都容不下则仍未知。
+                    if ((Scope != "children" || depth < 1) && NextChild(frame, false) != null) depthLimited = true;
+                    pending.Pop(); continue;
+                }
+                var next = NextChild(frame, false);
+                if (next == null) pending.Pop();
+                else pending.Push(new Frame { Node = next, Depth = frame.Depth + 1 });
+            }
+            if (!budget.Check()) return null;
+            if (depthLimited) { budget.Reason = "depth_limit"; return null; }
+            return false;
+        }
+    }
     sealed class LocatorMatcher {
         Func<Dictionary<string, object>, bool?> Test; bool IncludeOffscreen, IncludeDisabled;
+        LocatorRelation Has, HasNot;
+        public bool HasRelations { get { return Has != null || HasNot != null; } }
+        // 保留 Compile/Matches 的纯属性契约，编译器也校验所有关系分支。
         public static LocatorMatcher Compile(Dictionary<string, object> query, string backend) {
+            return Build(query, new LocatorCompiler { Backend = backend }, true);
+        }
+        public static LocatorMatcher Build(Dictionary<string, object> query, LocatorCompiler compiler, bool allowRelations) {
             if (query == null) throw new InvalidOperationException("locator query must be an object");
-            var compiler = new LocatorCompiler { Backend = backend };
+            foreach (string key in query.Keys) {
+                if (key == "has" || key == "hasNot") {
+                    if (!allowRelations) throw new InvalidOperationException("nested locator relations are unsupported");
+                } else if (key != "name" && key != "role" && key != "automationId" && key != "className" && key != "frameworkId" && key != "match" && key != "where" && key != "includeOffscreen" && key != "includeDisabled")
+                    throw new InvalidOperationException("unsupported locator query field: " + key);
+            }
             var tests = new List<Func<Dictionary<string, object>, bool?>>();
             var top = compiler.Leaf(query, true); if (top != null) tests.Add(top);
-            object expression; if (query.TryGetValue("where", out expression)) tests.Add(compiler.Expression(expression, 1));
+            object value; if (query.TryGetValue("where", out value)) tests.Add(compiler.Expression(value, 1));
             if (tests.Count == 0) throw new InvalidOperationException("locator query requires selectors or where");
-            return new LocatorMatcher { Test = LocatorCompiler.Combine(tests, true), IncludeOffscreen = Flag(query, "includeOffscreen"), IncludeDisabled = Flag(query, "includeDisabled") };
+            var matcher = new LocatorMatcher { Test = LocatorCompiler.Combine(tests, true), IncludeOffscreen = Flag(query, "includeOffscreen"), IncludeDisabled = Flag(query, "includeDisabled") };
+            if (query.TryGetValue("has", out value)) matcher.Has = LocatorRelation.Build(value, compiler);
+            if (query.TryGetValue("hasNot", out value)) matcher.HasNot = LocatorRelation.Build(value, compiler);
+            return matcher;
         }
         public bool Matches(Dictionary<string, object> node) {
             if (!IncludeOffscreen && Flag(node, "offscreen")) return false;
             if (!IncludeDisabled && !Flag(node, "enabled")) return false;
             bool? result = Test(node);
-            // 无法判定不能当作不命中，否则完整遍历会给 absent 一个错误的证明。
             if (!result.HasValue) throw new InvalidOperationException("locator_property_unavailable: predicate result is unknown");
             return result.Value;
+        }
+        public bool? Evaluate(Target target, LocatorBudget budget, int remainingDepth, bool refresh = false) {
+            if (!budget.Check()) return null;
+            bool propertyMatch = Matches(QueryFields(target, refresh));
+            if (!budget.Check()) return null;
+            if (!propertyMatch) return false;
+            if (Has != null) {
+                bool? present = Has.Contains(target, budget, remainingDepth);
+                if (present != true) return present;
+            }
+            if (HasNot != null) {
+                bool? present = HasNot.Contains(target, budget, remainingDepth);
+                if (!present.HasValue) return null;
+                if (present.Value) return false;
+            }
+            return budget.Check() ? (bool?)true : null;
         }
     }
     static object Locate(IDictionary<string, object> args, string owner) {
@@ -111,8 +193,8 @@ internal static partial class SemanticWorker
         if (backend != "uia" && backend != "msaa") throw new InvalidOperationException("backend invalid");
         var path = args["locator"] as IList;
         if (path == null || path.Count < 1 || path.Count > 16) throw new InvalidOperationException("locator requires 1..16 steps");
-        int limit = Integer(args, "maxNodes", 20000), budget = Integer(args, "budgetMs", 5000), bytesLimit = Integer(args, "maxBytes", 1000000);
-        if (limit < 1 || limit > 20000 || budget < 1 || bytesLimit < 4096) throw new InvalidOperationException("locator budgets invalid");
+        int limit = Integer(args, "maxNodes", 20000), budgetMs = Integer(args, "budgetMs", 5000), bytesLimit = Integer(args, "maxBytes", 1000000);
+        if (limit < 1 || limit > 20000 || budgetMs < 1 || bytesLimit < 4096) throw new InvalidOperationException("locator budgets invalid");
         var clock = Stopwatch.StartNew(); var matchers = new List<LocatorMatcher>();
         foreach (var item in path) {
             var step = item as Dictionary<string, object>; object query;
@@ -120,34 +202,38 @@ internal static partial class SemanticWorker
             matchers.Add(LocatorMatcher.Compile(query as Dictionary<string, object>, backend));
         }
         var window = ResolveWindow(args, backend); Target root = window.Root;
-        int version = window.Version, visited = 0, stepIndex = 0; bool prefixSelected = false;
-        var ancestors = new List<Target>();
-        var trace = new List<object>(); var candidates = new List<object>(); string status = "not_found", reason = null;
+        var budget = new LocatorBudget { Window = window, Version = window.Version, Clock = clock, MaxNodes = limit, BudgetMs = budgetMs };
+        int stepIndex = 0; bool prefixSelected = false;
+        var ancestors = new List<Target>(); var remainingDepths = new List<int>();
+        var trace = new List<object>(); var candidates = new List<object>(); var candidateHits = new List<Target>();
+        string status = "not_found", reason = null;
         for (stepIndex = 0; stepIndex < path.Count; stepIndex++) {
             status = "not_found";
             var step = (Dictionary<string, object>)path[stepIndex]; var matcher = matchers[stepIndex];
             string scope = Text(step, "scope", "subtree"); int depth = Integer(step, "maxDepth", 128), nth = Integer(step, "nth", -1);
             if ((scope != "children" && scope != "subtree") || depth < 1 || depth > 128 || nth < -1 || nth > 19999) throw new InvalidOperationException("locator step bounds invalid");
-            if (scope == "children") depth = 1;
-            // root 本身不匹配：每一步查询上一层窗口/容器的后代。
+            if (scope == "children" && !matcher.HasRelations) depth = 1;
+            int candidateDepth = scope == "children" ? 1 : depth;
             var pending = new Stack<Frame>(); pending.Push(new Frame { Node = root, Depth = 0, Entered = true });
-            var hits = new List<Target>(); int matches = 0; bool depthLimited = false; Target chosen = null;
+            var hits = new List<Target>(); var hitDepths = new List<int>();
+            int matches = 0, chosenDepth = 0; bool depthLimited = false; Target chosen = null;
             while (pending.Count > 0) {
-                if (window.Version != version) throw new ElementNotAvailableException("locator tree changed while resolving");
-                if (clock.ElapsedMilliseconds >= budget) { reason = "time_limit"; break; }
+                if (!budget.Check()) break;
                 var frame = pending.Peek();
                 if (!frame.Entered) {
-                    if (visited >= limit) { reason = "node_limit"; break; }
-                    visited++; frame.Entered = true;
-                    if (matcher.Matches(QueryFields(frame.Node))) {
+                    if (!budget.Visit()) break;
+                    frame.Entered = true;
+                    bool? matched = matcher.Evaluate(frame.Node, budget, depth - frame.Depth);
+                    if (!matched.HasValue) break;
+                    if (matched.Value) {
                         matches++;
                         if (nth < 0) {
-                            hits.Add(frame.Node);
+                            hits.Add(frame.Node); hitDepths.Add(frame.Depth);
                             if (hits.Count == 2) { status = "ambiguous"; reason = "multiple_matches"; break; }
-                        } else if (matches == nth + 1) { chosen = frame.Node; break; }
+                        } else if (matches == nth + 1) { chosen = frame.Node; chosenDepth = frame.Depth; break; }
                     }
                 }
-                if (frame.Depth >= depth) {
+                if (frame.Depth >= candidateDepth) {
                     if (scope != "children" && NextChild(frame, false) != null) depthLimited = true;
                     pending.Pop(); continue;
                 }
@@ -155,38 +241,43 @@ internal static partial class SemanticWorker
                 if (next == null) pending.Pop();
                 else pending.Push(new Frame { Node = next, Depth = frame.Depth + 1 });
             }
-            if (status == "ambiguous") {
-                foreach (var hit in hits) { var row = Describe(hit); Save(hit, row, owner); candidates.Add(row); }
-                break;
-            }
-            // 在 nth 前跳过的深层节点可能包含更早匹配；这时不能声称序号有效。
-            if (reason != null || depthLimited) { status = "incomplete"; reason = reason ?? "depth_limit"; break; }
-            if (chosen == null && hits.Count == 1) chosen = hits[0];
+            if (budget.Reason != null) { status = "incomplete"; reason = budget.Reason; break; }
+            if (status == "ambiguous") { candidateHits.AddRange(hits); break; }
+            // nth 前跳过的深层节点可能包含更早匹配，不能声称序号有效。
+            if (depthLimited) { status = "incomplete"; reason = "depth_limit"; break; }
+            if (chosen == null && hits.Count == 1) { chosen = hits[0]; chosenDepth = hitDepths[0]; }
             if (chosen == null) break;
+            if (!budget.Visit()) { status = "incomplete"; reason = budget.Reason; break; }
             if (chosen.Uia != null && RuntimeId(chosen.Uia) != chosen.Id) throw new ElementNotAvailableException("locator ancestor replaced");
-            if (!matcher.Matches(QueryFields(chosen, true))) throw new ElementNotAvailableException("locator ancestor no longer matches");
+            bool? rechecked = matcher.Evaluate(chosen, budget, depth - chosenDepth, true);
+            if (!rechecked.HasValue) { status = "incomplete"; reason = budget.Reason; break; }
+            if (!rechecked.Value) throw new ElementNotAvailableException("locator ancestor no longer matches");
             trace.Add(new Dictionary<string, object> { { "step", stepIndex }, { "element_id", chosen.Id }, { "matches", matches }, { "selection", nth < 0 ? "unique" : "nth" } });
             if (nth >= 0) prefixSelected = true;
-            ancestors.Add(chosen); root = chosen; status = "resolved";
+            ancestors.Add(chosen); remainingDepths.Add(depth - chosenDepth); root = chosen; status = "resolved";
         }
-        // 未找到也要复查已选容器，避免把一次容器替换误认为目标消失。
+        // 未找到也复查已选容器；新鲜关系扫描仍共享预算，不借 changed 重试突破预算。
         ValidateWindow(window);
         for (int i = 0; i < ancestors.Count; i++) {
+            if (!budget.Visit()) { status = "incomplete"; reason = budget.Reason; break; }
             var target = ancestors[i];
             if (target.Uia != null && RuntimeId(target.Uia) != target.Id) throw new ElementNotAvailableException("locator ancestor unavailable");
-            if (!matchers[i].Matches(QueryFields(target, true))) throw new ElementNotAvailableException("locator ancestor changed");
+            bool? rechecked = matchers[i].Evaluate(target, budget, remainingDepths[i], true);
+            if (!rechecked.HasValue) { status = "incomplete"; reason = budget.Reason; break; }
+            if (!rechecked.Value) throw new ElementNotAvailableException("locator ancestor changed");
         }
         Dictionary<string, object> element = null;
-        if (status == "resolved") { element = Describe(root); Save(root, element, owner); }
-        if (window.Version != version) throw new ElementNotAvailableException("locator tree changed while resolving");
-        if (clock.ElapsedMilliseconds >= budget) { status = "incomplete"; reason = "time_limit"; element = null; candidates.Clear(); }
-        // nth 是明确的前缀选择，只有唯一/缺失判断要求穷尽范围；不把 nth 当作唯一。
+        if (status == "resolved" && budget.Check()) { element = Describe(root); Save(root, element, owner); }
+        if (status == "ambiguous" && budget.Check()) foreach (var hit in candidateHits) { var row = Describe(hit); Save(hit, row, owner); candidates.Add(row); }
+        if (!budget.Check()) { status = "incomplete"; reason = budget.Reason; }
+        if (status == "incomplete") { element = null; candidates.Clear(); }
+        // nth 只证明明确的前缀选择，不声称唯一；截断不证明 absent。
         string coverage = status == "incomplete" || status == "ambiguous" || (status == "resolved" && prefixSelected) ? "partial" : "complete";
         var result = new Dictionary<string, object> {
             { "status", status }, { "step", Math.Min(stepIndex, path.Count - 1) }, { "element", element }, { "candidates", candidates }, { "trace", trace },
             { "coverage", new Dictionary<string, object> { { "status", coverage }, { "reason", reason ?? (prefixSelected ? "explicit_nth_prefix" : null) }, { "scope", "locator_steps" }, { "unrealized_items_traversed", false } } },
             { "consistency", new Dictionary<string, object> { { "mode", "live" }, { "source_atomic", false } } },
-            { "visited_nodes", visited }, { "native_calls", NativeCalls }, { "elapsed_ms", clock.ElapsedMilliseconds }, { "worker_generation", Generation },
+            { "visited_nodes", budget.Visited }, { "native_calls", NativeCalls }, { "elapsed_ms", clock.ElapsedMilliseconds }, { "worker_generation", Generation },
             { "window", new Dictionary<string, object> { { "handle", window.Hwnd.ToInt64().ToString() }, { "processId", (int)window.Pid }, { "title", window.Title } } }
         };
         if (Encoding.UTF8.GetByteCount(Json.Serialize(result)) > bytesLimit) throw new InvalidOperationException("locator result exceeds byte budget");

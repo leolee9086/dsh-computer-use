@@ -65,6 +65,11 @@ public class LocatorFixture {
         else if (text == "disable") { Right.IsEnabled = false; Console.WriteLine("disabled"); }
         else if (text == "enable") { Right.IsEnabled = true; Console.WriteLine("enabled"); }
         else if (text == "popup") { OpenPopup = true; Console.WriteLine("popup-enabled"); }
+        // 只把两个容器的 accessible name 改成同名；真实标签和子控件保持可观察。
+        else if (text == "relations-names" || text == "relations-reset") {
+            foreach (GroupBox group in Panels.Children) AutomationProperties.SetName(group, text == "relations-names" ? "Panel" : (string)group.Header);
+            Console.WriteLine(text == "relations-names" ? "panels-same-name" : "panels-names-restored");
+        }
         else if (text == "regex-pathological") { AutomationProperties.SetName(Status, new string('a', 12000) + "!"); Console.WriteLine("regex-name-set"); }
         else if (text == "regex-reset") { AutomationProperties.SetName(Status, "Status"); Console.WriteLine("regex-name-reset"); }
         else if (text == "state") Console.WriteLine("actions:" + Actions + ";generation:" + Generation + ";value:" + Input.Text);

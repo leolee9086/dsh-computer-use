@@ -13,7 +13,7 @@ for (const file of ['../test/win32-locator-smoke.mjs', '../test/win32-locator-ap
   runElectronSmoke(executable, fileURLToPath(new URL(file, import.meta.url)), { cwd: root, timeoutMs: 180000 });
 }
 const sources = [];
-for (const file of ['locator-0.5.15-smoke-metrics.json', 'locator-0.5.15-app-metrics.json']) {
+for (const file of ['locator-0.5.16-smoke-metrics.json', 'locator-0.5.16-app-metrics.json']) {
   const bytes = await readFile(new URL(`../.local/${file}`, import.meta.url)), result = JSON.parse(bytes);
   assert.equal(result.fullAcceptance, true, `${file} did not accept its own tasks`);
   assert.ok(Date.parse(result.observedAt) >= Date.parse(observedAt), `${file} must come from this joint run`);
@@ -27,5 +27,5 @@ for (const file of ['locator-0.5.15-smoke-metrics.json', 'locator-0.5.15-app-met
 const result = { observedAt, fullAcceptance: true, stages: ['WPF locator and production matcher contracts', 'actual Sound device selection'],
   elapsed_ms: Math.round(performance.now() - started), sources };
 await mkdir(new URL('../.local/', import.meta.url), { recursive: true });
-await writeFile(new URL('../.local/locator-0.5.15-joint-metrics.json', import.meta.url), JSON.stringify(result, null, 2));
+await writeFile(new URL('../.local/locator-0.5.16-joint-metrics.json', import.meta.url), JSON.stringify(result, null, 2));
 console.log(JSON.stringify({ locator_acceptance: result }, null, 2));

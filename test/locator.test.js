@@ -79,6 +79,36 @@ test('boolean locator rejects malformed, unbounded or ambiguous expression shape
   assert.throws(() => locatorArgs([{ name: 'Apply', where: comparisons32 }]), /32 property/);
   assert.throws(() => locatorArgs([{ where: { any: Array.from({ length: 17 }, () => ({ name: 'Apply' })) } }]), /1\.\.16/);
 });
+test('relative queries retain their own scope and inclusion without losing the outer depth budget', () => {
+  const raw = [{ role: 'Group', scope: 'children', max_depth: 6,
+    has: { where: { all: [{ name: '\\AInput\\z', match: 'regex' }, { role: 'Edit' }] }, include_disabled: false, scope: 'children' },
+    has_not: { automation_id: 'missing', max_depth: 3 } }];
+  const [step] = locatorArgs(raw);
+  assert.equal(step.scope, 'children'); assert.equal(step.maxDepth, 6);
+  assert.equal(step.query.has.maxDepth, 1); assert.equal(step.query.has.query.includeDisabled, false);
+  assert.equal(step.query.has.query.includeOffscreen, true);
+  assert.deepEqual(step.query.has.query.where.all[0], { name: '\\AInput\\z', match: 'regex' });
+  assert.equal(step.query.hasNot.maxDepth, 3); assert.equal(step.query.hasNot.query.automationId, 'missing');
+  assert.equal(locatorArgs([{ role: 'Group', scope: 'children', has: { name: 'Input' } }])[0].maxDepth, 128);
+  assert.equal(locatorArgs([{ role: 'Group', scope: 'children', max_depth: 1, has_not: { name: 'Input' } }])[0].maxDepth, 1);
+  assert.equal(raw[0].has_not.automation_id, 'missing');
+});
+
+test('relative queries reject cross-window/nested shapes and share the step compiler limits', () => {
+  for (const has of [null, [], {}, { match: 'regex' }, { name: 'Input', nth: 0 }, { name: 'Input', window_id: '123' },
+    { name: 'Input', has_not: { name: 'Other' } }, { name: 'Input', include_disabled: 'false' }, { name: 'Input', max_depth: 0 },
+    { name: 'Input', constructor: 'unsupported' }]) {
+    assert.throws(() => locatorArgs([{ role: 'Group', has }]));
+  }
+  assert.throws(() => locatorArgs([{ has: { name: 'Input' } }]), /requires a name/);
+  const branch = count => ({ any: Array.from({ length: count }, () => ({ name: 'Input' })) });
+  const combined = { role: 'Group', where: branch(16), has: { where: branch(15) } };
+  assert.doesNotThrow(() => locatorArgs([combined]));
+  assert.throws(() => locatorArgs([{ ...combined, has_not: { name: 'Other' } }]), /32 property/);
+  const chain = count => ({ any: Array.from({ length: count }, () => ({ not: { not: { name: 'Input' } } })) });
+  assert.throws(() => locatorArgs([{ role: 'Group', where: chain(16), has: { where: chain(6) } }]), /64 expression/);
+});
+
 test('predicate source errors stop a wait instead of becoming absence or another attempt', async () => {
   let attempts = 0;
   const error = Object.assign(new Error('locator_regex_timeout'), { code: 'COMPUTER_OPERATION_FAILED', executionState: 'not_started' });

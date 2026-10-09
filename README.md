@@ -1,6 +1,6 @@
 # dsh-computer-use
 
-独立的 Cordis bundle，为 DeepSeek Harness 提供视觉、原生无障碍和 Windows 讲述人操作路径。0.5.15 注册 **27 个 `computer_*` 工具**；无障碍观测、层级定位、条件等待、阅读和语义动作可以独立使用，文本模型也能操作原生应用。
+独立的 Cordis bundle，为 DeepSeek Harness 提供视觉、原生无障碍和 Windows 讲述人操作路径。0.5.16 注册 **27 个 `computer_*` 工具**；无障碍观测、层级定位、条件等待、阅读和语义动作可以独立使用，文本模型也能操作原生应用。
 
 Windows 是经过本机运行时验证的主要后端。macOS AX、Linux AT-SPI 已实现并做契约测试，尚无这两个系统的原生运行时验收。接口覆盖与实测范围见 [EVIDENCE.md](EVIDENCE.md)；对标的官方接口见 [能力矩阵](references/CAPABILITY-MATRIX.md)。目前没有任务成功率基准，也没有 SOTA 等效结论。
 
@@ -94,13 +94,23 @@ MSAA 使用 `AccessibleObjectFromWindow` / `AccessibleChildren`，提供传统�
 {"window_id":"<已观测窗口ID>","locator":[{"automation_id":"right-panel"},{"name":"Apply","role":"Button"}]}
 ```
 
-`where` 在同一个节点上组合 `all`（AND）、`any`（OR）和 `not`。属性叶子接受上述五个字符串属性及自己的 `match`（默认 exact）；同一叶子的多个属性，以及 step 顶层属性与 `where`，都按 AND。`scope`、`max_depth`、`nth` 和是否包含禁用/屏幕外控件只放在 step。重叠 OR 在一个节点上只计一个候选；两个不同节点命中仍为 ambiguous。
+`where` 在同一个节点上组合 `all`（AND）、`any`（OR）和 `not`。属性叶子接受上述五个字符串属性及自己的 `match`（默认 exact）；同一叶子的多个属性，以及 step 顶层属性与 `where`，都按 AND。布尔表达式不接受范围、序号或 inclusion 选项。重叠 OR 在一个节点上只计一个候选；两个不同节点命中仍为 ambiguous。
 
 ```json
 {"window_id":"<已观测窗口ID>","locator":[{"automation_id":"right-panel"},{"role":"Button","where":{"all":[{"any":[{"name":"Apply"},{"name":"\\ACommit(?: changes)?\\z","match":"regex"}]},{"not":{"automation_id":"preview"}}]}}]}
 ```
 
-正则使用 **.NET** 语义，默认 IgnoreCase + CultureInvariant，允许内联 flags；JSON 中反斜杠须转义。每轮在访问窗口前编译全部 path 和分支，不会因短路而忽略无效正则。每次匹配最多 25ms，正则输入最多 16,000 个 UTF-16 单元；每步 `where` 深度最多 4、表达式节点最多 64、属性比较最多 32（含顶层属性），每个 all/any 含 1–16 项。无效表达式、正则语法/超时/输入上限都是来源错误，等待不把它们当成不存在或自动重试。
+`has` / `has_not` 将相对后代条件与外层属性/`where` 按 AND 组合。例如两个同名 Group 各含一个 Input，用后代是否启用选择其中一个容器：
+
+```json
+{"window_id":"<已观测窗口ID>","locator":[{"role":"Group","name":"Panel","has":{"role":"Edit","name":"Input","include_disabled":false},"has_not":{"name":"Loading"}},{"role":"Button","name":"Apply"}]}
+```
+
+内层需要属性或 `where`，支持独立的 inclusion、`scope` 和 `max_depth`，不接受 window、`nth` 或嵌套关系。内层查找严格排除候选自身，任意一个匹配后代即可证明 `has`，多个后代不会复制外层候选。`has_not` 只有查完声明范围且无匹配时通过；节点、时间或深度截断保持 incomplete，不能挑其它候选、选择 `nth` 或证明 absent。不会隐式展开树或实例化虚拟项。
+
+外层 `max_depth` 从该 step 的窗口/容器根计算，限制候选与关系的总深度；内层 `max_depth` 从候选计算，只能进一步收紧范围。外层 `scope:"children"` 只限制外层候选，携带关系时默认仍有总深度 128；显式总深度 1 无法查完有后代的候选关系。内层 `scope:"children"` 只查询直属孩子。每次原生解析的外层遍历、两个关系、选中目标和祖先的新鲜复查共用 `max_nodes` 与时间预算，重复访问也计数。
+
+正则使用 **.NET** 语义，默认 IgnoreCase + CultureInvariant，允许内联 flags；JSON 中反斜杠须转义。每轮在访问窗口前编译全部 path、关系和布尔分支，不会因短路或外层缺失而忽略无效正则。每次匹配最多 25ms，正则输入最多 16,000 个 UTF-16 单元；每个 `where` 深度最多 4，每 step 的外层与两个关系合计最多 64 表达式节点、32 属性比较（含顶层属性），每个 all/any 含 1–16 项。无效表达式、正则语法/超时/输入上限都是来源错误，等待不把它们当成不存在或自动重试。
 
 属性缺失或 null 为未知，NOT 未知仍为未知；最终无法判定时返回 `locator_property_unavailable`，不能用它证明缺席。已能证明的 any true / all false 可短路。MSAA 不提供 automation ID / framework ID，任何分支使用它们都会在遍历前拒绝。这个谓词合同适用于 locator、before/after、树路径和 scroll item；`computer_find` 保持原 exact/contains 查询合同。
 

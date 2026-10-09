@@ -77,10 +77,28 @@ try {
   assert.equal(overlapping.status, 'resolved'); assert.equal(overlapping.element.name, first.name);
   assert.equal(overlapping.trace.at(-1).matches, 1); assert.equal(overlapping.coverage.status, 'complete');
   evidence.samples.overlap = overlapping;
-  const target = [{ role: 'ListItem', where: { all: [either[0].where, { not: { name: second.name } }] } }];
-  const excluded = await json('computer_locate', { ...await fresh(), locator: target });
+  const leaf = { role: 'ListItem', where: { all: [either[0].where, { not: { name: second.name } }] } };
+  const excluded = await json('computer_locate', { ...await fresh(), locator: [leaf] });
   assert.equal(excluded.status, 'resolved'); assert.equal(excluded.element.name, first.name);
   assert.equal(excluded.trace.at(-1).matches, 1); evidence.samples.not = excluded;
+  // 先在本轮 provider 树找到真正含设备的 List，不能假设叶子有 Text 后代。
+  const lists = rows.filter(row => row.role === 'List' && flatten(row).some(child => child.element_id === first.element_id));
+  assert.equal(lists.length, 1, 'actual device List must be observed rather than invented');
+  const listRow = lists[0], missing = `DSH missing device ${evidence.observedAt}`;
+  assert.equal(devices.every(device => (device.children ?? []).length === 0), true, 'observed device rows are leaves');
+  const listSelector = { role: 'List', ...(listRow.name ? { name: listRow.name } : {}),
+    ...(listRow.automation_id ? { automation_id: listRow.automation_id } : {}),
+    has: { role: 'ListItem', where: overlap[0].where }, has_not: { role: 'ListItem', name: missing } };
+  const parent = await json('computer_locate', { ...await fresh(), locator: [listSelector] });
+  assert.equal(parent.status, 'resolved'); assert.equal(parent.element.element_id, listRow.element_id);
+  assert.equal(parent.trace.at(-1).matches, 1);
+  const leafSelf = await json('computer_locate', { ...await fresh(), locator: [{ role: 'ListItem', name: first.name, has: { name: first.name } }] });
+  assert.equal(leafSelf.status, 'not_found'); assert.equal(leafSelf.coverage.status, 'complete');
+  const negativeLeaves = await json('computer_locate', { ...await fresh(), locator: [{ ...either[0], has_not: { name: missing } }] });
+  assert.equal(negativeLeaves.status, 'ambiguous'); assert.equal(negativeLeaves.candidates.length, 2);
+  evidence.samples.relations = { source_snapshot_id: observed.snapshot_id, actual_list: { role: listRow.role, name: listRow.name,
+    automation_id: listRow.automation_id, element_id: listRow.element_id }, parent, leafSelf, negativeLeaves };
+  const target = [listSelector, leaf];
   const selectionBase = await fresh();
   evidence.samples.selectEvidence = { surface: 'native-windows', window_id: selectionBase.window_id, callId: `locator-app-${calls}` };
   const selected = await json('computer_act', { ...selectionBase, locator: target, operation: 'select',
@@ -116,7 +134,7 @@ try {
   // 通过与否在清理后落盘；外层 Electron 还要独立核对 after-cleanup 完成标记。
   evidence.fullAcceptance = completed;
   await mkdir(resolve(root, '.local'), { recursive: true });
-  const name = completed ? 'locator-0.5.15-app-metrics.json' : `locator-0.5.15-app-failure-${evidence.observedAt.replace(/[^0-9]/g, '')}.json`;
+  const name = completed ? 'locator-0.5.16-app-metrics.json' : `locator-0.5.16-app-failure-${evidence.observedAt.replace(/[^0-9]/g, '')}.json`;
   await writeFile(resolve(root, '.local', name), JSON.stringify(evidence, null, 2));
 }
 console.log(JSON.stringify({ actualApplication: evidence.actualApplication, fullAcceptance: evidence.fullAcceptance,
