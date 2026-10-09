@@ -1,5 +1,16 @@
 # 变更记录
 
+## 0.5.13 — 2026-10-09
+
+- Windows 顶层目录保留有可见面积的无标题菜单/Popup，增加 native class、thread 和实际 owner 链；`computer_windows:related` 从固定 HWND/PID/标题查询 owned、same_thread 或 same_process 范围。owned 允许跨进程，线程/进程相关性不冒充归属；工具总数仍为 25。
+- `computer_locate` / `computer_wait` / `computer_act` 支持 `window_query` 每轮发现新根；`after.window_query` 可直接确认动作创建的菜单、Popup 或对话框。报告实际候选和新 window/semantic ID，多根歧义停止，partial 零项/一项不证明缺席/唯一。
+- 原 anchor 身份变化和来源错误立即上报；仅明确候选新根替换的只读 not_started 变化在同一截止内重新枚举。前置、一次动作和后置共用截止，unknown/失败动作不重放。显式 `after.window_id` 且无新查询时清除继承查询，直接回已列窗口读结果。
+- Rust helper 改 Windows GUI subsystem；语义 worker 以 winexe 编译并将目标纳入缓存哈希，通过 GetStdHandle 的继承管道读取/写入 UTF-8 协议，避免新控制台干扰菜单前台。
+- 真实 Electron/ToolRuntime/官方 runner 四类验收通过：TrackPopupMenu、ToolStripDropDown、真正 WPF Primitives.Popup 及不同 PID 的 owned 对话框各两轮，实际业务计数精确增长。原生菜单另核对 WM_COMMAND、菜单进入/退出及返回计数；Forms/WPF 禁用根替换后新引用执行第三次动作。
+- 同名 owned 根歧义不动作、截断不能证明缺席、等待取消、anchor 改名源错误、关闭后的完整缺席及旧引用拒绝均有真实验收。新 `smoke:popups` 顺序运行四类夹具和真正系统声音属性查看；子集指标独立标明非完整验收。
+- 系统声音窗口两轮使用已观测的 Alt+P 打开属性，以真实 owner 链确认新 HWND、读标签页、Cancel 并重新定位原设备名称；没有 Apply/OK 或设置写入。首次属性 UIA Invoke 阻塞至截止返回 unknown 的失败保留，随后另起新实例走明确的助记键路径。
+- 原生菜单 UIA Invoke 曾无业务结果，成功路径显式使用 MSAA 默认动作；一次 WPF Open 定位超时的原因仍未确定。没有将这些失败称为稳定路径，详细证据及实际边界见 [EVIDENCE.md](EVIDENCE.md)。
+
 ## 0.5.12 — 2026-10-09
 
 - 新增 Windows `computer_read_control`，共 25 工具。使用新子 HWND 目录身份，有界读取标准 SysListView32 / WinForms ListView 的指定列、行文本和选择/焦点状态，不聚焦、选择或滚动；owner-data 虚拟控件和未知类明确拒绝。

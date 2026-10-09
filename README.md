@@ -1,6 +1,6 @@
 # dsh-computer-use
 
-独立的 Cordis bundle，为 DeepSeek Harness 提供视觉、原生无障碍和 Windows 讲述人操作路径。0.5.12 注册 **25 个 `computer_*` 工具**；无障碍观测、层级定位、条件等待、阅读和语义动作可以独立使用，文本模型也能操作原生应用。
+独立的 Cordis bundle，为 DeepSeek Harness 提供视觉、原生无障碍和 Windows 讲述人操作路径。0.5.13 注册 **25 个 `computer_*` 工具**；无障碍观测、层级定位、条件等待、阅读和语义动作可以独立使用，文本模型也能操作原生应用。
 
 Windows 是经过本机运行时验证的主要后端。macOS AX、Linux AT-SPI 已实现并做契约测试，尚无这两个系统的原生运行时验收。接口覆盖与实测范围见 [EVIDENCE.md](EVIDENCE.md)；对标的官方接口见 [能力矩阵](references/CAPABILITY-MATRIX.md)。目前没有任务成功率基准，也没有 SOTA 等效结论。
 
@@ -14,7 +14,7 @@ Windows 是经过本机运行时验证的主要后端。macOS AX、Linux AT-SPI 
 | 键盘/序列 | `computer_key`、`computer_type`、`computer_input` | Windows 支持扩展键、Insert/CapsLock、重复/按住，以及一条有界 down/move/up 序列；纯键盘也接受窗口或绑定窗口的语义证据。 |
 | 无障碍 | `computer_accessibility`、`computer_find`、`computer_read`、`computer_element` | 独立快照、元素查找、文本/选择/值/状态读取与控件模式操作。Windows UIA、MSAA 支持分页、分支展开和原生查询。 |
 | 定位与等待 | `computer_locate`、`computer_wait`、`computer_act` | Windows 窗口内逐级消歧，每轮重解容器与目标；共享截止的条件等待、一次动作及可选结果确认。 |
-| 窗口 | `computer_windows`、`computer_window_input` | Windows 列出含最小化状态的顶层窗口，枚举子 HWND、管理窗口，或向已观测子窗口发送限定点击/滚轮消息。 |
+| 窗口 | `computer_windows`、`computer_window_input` | Windows 列出含无标题弹窗和最小化状态的顶层窗口，从固定窗口查询 owner/线程/进程相关的新根，枚举子 HWND、管理窗口，或向已观测子窗口发送限定点击/滚轮消息。 |
 | 标准控件内容 | `computer_read_control` | Windows 从已观测子 HWND 有界读取标准 ListView 行、指定列文本及选择/焦点状态，不聚焦、选择或滚动。 |
 | 讲述人 | `computer_narrator` | 只读进程状态；向已运行的讲述人发送固定 Microsoft Standard 布局命令。 |
 | 能力 | `computer_status` | 返回平台能力和显示器几何。 |
@@ -95,7 +95,7 @@ MSAA 使用 `AccessibleObjectFromWindow` / `AccessibleChildren`，提供传统�
 
 `computer_wait` 每次轮询从相同 HWND/PID/标题重新解析整条链，容器或控件被替换后读取新目标。condition 支持 present/absent、enabled/disabled、visible/hidden、focused、value/text、selected、expanded/collapsed、toggled 和 stable；stable 同时比较元素身份与边界。唯一/缺失判断只覆盖暴露的有界树，不自动实例化虚拟项。查询和读取只在明确的执行前目标变化时重试；其它提供者错误上报。
 
-`computer_act` 先等待 before（默认 enabled），执行一次语义 operation，再按可选 after 查询结果。前置、动作和后置共用一个 `timeout_ms`（默认 10 秒，100ms–120 秒），包含排队与原生启动。动作失败或结果 unknown 都不重放；已完成动作与后置超时/错误分开报告。after 可指定另一条 locator 或本会话已经列出的另一个窗口；新弹窗应先重新列出窗口获取证据。
+`computer_act` 先等待 before（默认 enabled），执行一次语义 operation，再按可选 after 查询结果。前置、动作和后置共用一个 `timeout_ms`（默认 10 秒，100ms–120 秒），包含排队与原生启动。动作失败或结果 unknown 都不重放；已完成动作与后置超时/错误分开报告。after 可指定另一条 locator、本会话已经列出的另一个窗口，或用 `after.window_query` 等待动作创建的新根；后置结果发布新 `window_id` 和绑定该根的语义证据。
 
 ```json
 {"window_id":"<已观测窗口ID>","locator":[{"automation_id":"right-panel"},{"automation_id":"input"}],"operation":"set_value","value":"updated","after":{"condition":{"state":"value","value":"updated"}}}
@@ -104,6 +104,26 @@ MSAA 使用 `AccessibleObjectFromWindow` / `AccessibleChildren`，提供传统�
 电脑在执行期间可以被人继续操作。窗口绑定不随前台变化切换到另一个同名控件，目标操作前仍校验原生身份、结构版本、模式及 enabled/readonly 状态。UIA 拒绝当前父子列表中已移除的旧对象，即使旧 peer 仍能读属性或保留父链；等待会重新解析替换目标。MSAA 保持前述身份与事件校验范围。UIA/MSAA 不能把条件读取和后续动作做成源程序事务；人或应用在两者之间再次改变状态时，返回实际执行状态并确认结果。动作完成后被人改掉的值会导致后置确认失败，工具不会因此再次写入。需要保留某个现有值时，应显式给出相应 before 条件；这一读值条件也不提供原子比较后写入。
 
 `find_item` 返回的未实例化 WPF 项可能无法读取普通属性或 runtime ID。工作进程保存 ItemContainer 返回的准确对象，发布标明 `virtualized` / `properties_unavailable` 的独立引用，只允许 `realize`；实例化后重新定位再读/动作。普通可描述项保持完整引用。`computer_read(row,column)` 的 Grid.GetItem 结果也登记为独立 `cell_snapshot_id`，可用于单元格选择和后续按需读取。
+
+### 菜单、Popup 与外部对话框
+
+顶层窗口目录保留有可见面积的无标题窗口，并报告 `native_id`、`className`、`threadId`、`ownerId` 和 `ownerChain`。这些原生字段用于审查关系；控制仍使用本会话发布的 `window_id`。`computer_windows(operation:"related", window_id:..., window_query:...)` 提供有界只读关系目录，`computer_locate` / `computer_wait` / `computer_act` 的 `window_query` 可从同一已观测 anchor 每轮重新发现实际新根。
+
+| `window_query` 字段 | 合同 |
+| --- | --- |
+| `relation` | 默认 `owned` 检查实际 HWND owner 链，允许跨进程 owner；`same_thread` / `same_process` 只证明线程/进程相关性，不证明归属 |
+| `title` / `class_name` | 精确匹配；显式 `title:""` 匹配无标题菜单/Popup，class 必须来自实际观测或明确的目标类 |
+| `max_windows` | 默认 1024，范围 1–4096，限制检查的全部顶层 HWND 数，包含未命中的窗口；时间与节点早停报告 partial |
+
+```json
+{"window_id":"<已观测原窗口ID>","locator":[{"automation_id":"open"}],"operation":"invoke","after":{"window_query":{"relation":"owned","title":"<目标对话框标题>"},"locator":[{"name":"Cancel","role":"Button"}],"condition":{"state":"present"}}}
+```
+
+关系范围内多个新根报告 ambiguous，返回实际候选窗口，不挑第一项。partial 目录中的零项不能证明消失，一项不能证明唯一；等待消失还要求后续元素范围完整。候选新根在读取间被关闭或替换时，只对明确的 `COMPUTER_LOCATOR_CHANGED` / `not_started` 只读变化在同一截止内重新枚举。原 anchor 的 HWND/PID/标题变化、其它来源错误和取消都停止等待，不转成成功缺席，也不改绑到另一个同名窗口。
+
+`after.window_query` 未指定时继承当前查询；显式 `after.window_id` 且未指定查询时，直接读取该已列窗口并清除继承查询。因此弹窗动作后可以回原主窗口确认业务状态。新根获得独立窗口与语义引用；根关闭后旧引用不能再次操作，等待替换目标会重新定位。原生关系、控件条件与随后的动作不是源程序事务，仍需确认实际应用结果。
+
+真实四类验收覆盖 TrackPopupMenu、WinForms ToolStripDropDown、WPF Primitives.Popup 与跨进程 owned 对话框。原生菜单动作显式采用 MSAA 默认动作；该菜单的 UIA Invoke 曾无业务结果，未宣称稳定。真实系统声音属性窗口用已观测的 Alt+P 助记键打开，再从 owner 链发现新根、阅读标签页、Cancel 并读回设备名称；首次 UIA 模态 Invoke 超时返回 unknown 的失败证据保留，工具没有重放该动作。
 
 ## 视觉与原生输入
 
@@ -261,6 +281,8 @@ pnpm run smoke:visual "C:\path\to\DeepSeek Harness.exe"
 # 标准 ListView 的 32/64 位夹具和真正系统声音应用：
 pnpm run smoke:listview "C:\path\to\DeepSeek Harness.exe"
 pnpm run smoke:listview "C:\path\to\DeepSeek Harness.exe" app
+# 四类真实菜单/Popup/外部对话框与系统声音属性查看：
+pnpm run smoke:popups "C:\path\to\DeepSeek Harness.exe"
 pnpm run verify:profile
 # 修改 Rust 原生源码后：
 cargo build --release --manifest-path native/Cargo.toml
@@ -271,5 +293,7 @@ pnpm pack --pack-destination .local
 `verify` 检查所有 JS 文件并运行单元/提供者合同及真实 ToolRuntime 回归。`verify:profile` 使用独立临时 DSH home 检查真实 Loader、25 工具及提示词，清理后不影响既有 profile。`smoke:semantics` 用真实 Cordis 本地子进程服务测试万节点 UIA/MSAA、分页/分支/查询/引用/虚拟化、阻塞终止和恢复，并与旧采集算法测量同一提供者的调用量与响应大小。`smoke:snapshots` 验证两种后端万节点固定分页、未交付代次变化丢弃、查询未命中节点复核、静默插删/重排/属性更新、封存后原生采集零调用，以及历史结果不能绕过实时目标校验。`smoke:recovery` 验证查询未命中项静默变更后重采一次、持续变化三次尝试后失败、已交付游标不换结果、旧动作引用实时拒绝，以及相同覆盖范围下的按需缓存读取量。`smoke:matches` 验证真实 UIA/MSAA 在相邻及远端属性 getter 阻塞时仍可早停并封存首项；匹配前缀完整复读、每页一项的固定三页、未命中项及重排变更丢弃、无匹配时搜索完整范围，以及动作实时身份拒绝。`smoke:lifetimes` 将自建窗口的真实属性读取延迟 1200ms，并把测试进程私有的代次起点移到距期限 1000ms，验证分段内到期丢弃、旧游标拒绝、引用清除及同进程恢复；还验证未来的展示时间戳不会延长封存时效，不修改机器时钟或生产时效常量。`smoke:locators` 使用默认 WPF AutomationPeer 与真实 ToolRuntime，验证同名消歧、容器替换、动作一次及读回、取消、惰性树、600 项虚拟列表、Grid 单元格和独立 HWND 弹窗；并在等待期间模拟人工编辑、切窗和原目标替换，检查另一个同名窗口未被操作。Electron smoke 还将真实 ToolRuntime 与 WindowsComputer/原生工作进程接在一起，按默认 8 条语义观测上限读取 UIA/MSAA 各 13 页，检查采集变化丢弃、固定续页、历史动作消耗状态、会话隔离及变化恢复；也包含已有 WPF/WinForms 动作。每项验收需在模块及清理完成后返回完成标记，加载失败、提前退出或迟到异常均不能只凭退出码 0 判为通过。Windows 动作 smoke 只操作标题唯一、由自己创建的进程，结束后清理自己的进程和临时目录。`smoke:visual` 使用真实 ToolRuntime 和系统 OCR 读取自绘 WinForms，覆盖限定区域、方向/容差/计数、截断不能证明消失、定时变化、超时/失焦、遮挡后台读取和移动后相对区域；点击计数保持零。另已完成当前真实 SketchUp 2024 的 R/空格工具切换、中文状态读取及按钮高亮等待，未向画布输入或保存模型；该现场脚本与原始截图/结果仅保存在本地检查点，不是通用应用基准。
 
 `smoke:listview` 使用真实 Electron、ToolRuntime 和官方 managed subprocess，检查 32/64 位标准控件、UTF-16 与行/列预算、遮挡/禁用读取、零尺寸目录成员、超时/取消后的缓冲保留和后续分配拒绝。`app` 模式启动真正系统声音应用，逐字对照 UIA 的五个设备名称、重复读取选择/焦点与前台不变，然后清理本次声音进程。Explorer 桌面的 owner-data 拒绝也有实际证据；本机服务窗口读取遇到 Win32 access denied，声音窗口整树 MSAA 枚举失败，不能把这些路径算作成功。它们的限制与成功证据一起记录在 [EVIDENCE.md](EVIDENCE.md)。
+
+`smoke:popups` 顺序运行四类真实框架/provider 夹具和本次新开的系统声音窗口，两轮打开/动作计数、关闭后的完整缺席与旧引用拒绝、Forms/WPF 根替换、同名 owned 根歧义、部分范围、取消与 anchor 改名错误均检查。声音窗口只查看属性并 Cancel，不修改设置。调试时可设 `DSH_POPUP_MODES` 为 `native,forms,wpf,external` 的非重复子集；该路径跳过真实声音阶段、另存 subset 指标并标明 `fullAcceptance:false`，不能代替完整验收。
 
 `native:stage` 复制 release exe 并记录二进制与 Rust 源文件哈希；`prepack` 要求回归成功且产物清单匹配当前版本/源码。打包不含构建缓存或本地检查点。来源、许可与风险边界见 [UPSTREAM.md](references/UPSTREAM.md)、[LICENSE](LICENSE)、[SECURITY.md](SECURITY.md)，变更见 [CHANGELOG.md](CHANGELOG.md)。

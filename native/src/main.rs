@@ -18,6 +18,10 @@
 //! （见 src/tool.js 的 mapScreenshotPoint），所以区域裁剪只要如实回报边界，
 //! 点击/拖拽/滚动的坐标就自动继续正确。
 
+// 这是由宿主通过继承的 stdin/stdout 管道驱动的 helper。Windows 下分配或销毁
+// 隐藏控制台仍可能改变前台并结束活动菜单；观察进程必须不创建控制台窗口。
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
+
 mod color_search;
 mod image_match;
 mod image_template;
@@ -26,6 +30,7 @@ mod listview;
 mod ocr;
 mod visual;
 mod window_control;
+mod window_query;
 
 use std::io::{Read, Write};
 use std::path::Path;
@@ -502,6 +507,11 @@ struct WindowRecord {
     id: String,
     title: String,
     process_id: u32,
+    /// 类名和 UI 线程帮助审查新菜单/弹窗，线程相关性不等于 owner 关系。
+    class_name: String,
+    thread_id: u32,
+    owner_id: Option<String>,
+    owner_chain: Vec<String>,
     /// 进程名（不含 `.exe`）。取不到时是空串，与旧实现的行为一致。
     application: String,
     /// 是不是当前前台窗口。
@@ -1135,45 +1145,13 @@ fn process_name(process_id: u32) -> String {
 
 /// `EnumWindows` 的回调。回调不能捕获环境，待填的列表通过 `LPARAM` 递进来。
 ///
-/// 过滤条件：不可见 / 无标题 / 边界无效的窗口全部跳过，
-/// 否则列表里会塞满没有任何信息的空壳窗口。
+/// 保留可见、有面积的无标题窗口：标准菜单与 WPF Popup 的标题本来就可为空。
+/// 普通目录保留原先跳过消失项的行为；related-windows 对观测失败显式报错。
 unsafe extern "system" fn collect_visible_window(handle: HWND, parameter: LPARAM) -> BOOL {
     let records = &mut *(parameter.0 as *mut Vec<WindowRecord>);
-    if !IsWindowVisible(handle).as_bool() {
-        return TRUE;
+    if let Ok(Some(record)) = window_query::observe(handle) {
+        records.push(record);
     }
-    let title = window_title(handle);
-    if title.is_empty() {
-        return TRUE;
-    }
-    let mut rect = RECT::default();
-    if GetWindowRect(handle, &mut rect).is_err()
-        || rect.right <= rect.left
-        || rect.bottom <= rect.top
-    {
-        return TRUE;
-    }
-    // 注意：GetWindowThreadProcessId 的**返回值是线程 id**，进程 id 从第二个参数出来。
-    // 想拿进程 id 就必须传 out 参数（`focus_window` 那边要的是线程 id，所以传 None）。
-    let mut process_id: u32 = 0;
-    GetWindowThreadProcessId(handle, Some(&mut process_id));
-    if process_id == 0 {
-        return TRUE;
-    }
-    records.push(WindowRecord {
-        id: (handle.0 as isize).to_string(),
-        title,
-        process_id,
-        application: process_name(process_id),
-        focused: false,
-        minimized: IsIconic(handle).as_bool(),
-        bounds: Region {
-            x: rect.left,
-            y: rect.top,
-            width: rect.right - rect.left,
-            height: rect.bottom - rect.top,
-        },
-    });
     TRUE
 }
 
@@ -1615,6 +1593,7 @@ fn main() -> ExitCode {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => fail(error),
         },
+        "related-windows" => json_command(window_query::related),
         "read-listview" => json_command(listview::read),
         "child-windows" => json_command(window_control::children),
         "window-message" => json_command(window_control::perform_message),

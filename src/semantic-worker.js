@@ -25,7 +25,10 @@ export async function compileSemanticWorker(runner, signal) {
     readFile(new URL('./windows-uia.cs', import.meta.url), 'utf8'),
   ]);
   const source = legacy.replace('public class Startup', 'public class NativeUia');
-  const hash = createHash('sha256').update(worker).update(snapshot).update(locator).update(source).digest('hex').slice(0, 24);
+  // 保留继承的协议管道，使用 GUI 子系统禁止 worker 启动分配控制台、打断活动菜单。
+  // 编译选项属于缓存身份，不能复用旧 /target:exe 产物。
+  const target = '/target:winexe';
+  const hash = createHash('sha256').update(target).update(worker).update(snapshot).update(locator).update(source).digest('hex').slice(0, 24);
   let build = builds.get(hash);
   if (build === undefined) {
     build = (async () => {
@@ -41,7 +44,7 @@ export async function compileSemanticWorker(runner, signal) {
       const references = await Promise.all(['UIAutomationClient', 'UIAutomationTypes', 'WindowsBase', 'Accessibility'].map(assembly));
       const compiler = join(process.env.WINDIR ?? 'C:\\Windows', 'Microsoft.NET', 'Framework64', 'v4.0.30319', 'csc.exe');
       if (!existsSync(compiler)) throw new ComputerUseError('Windows .NET Framework C# compiler is unavailable');
-      await runner.run([compiler, '/nologo', '/noconfig', '/target:exe', '/platform:x64', '/main:SemanticWorker', `/out:${executable}`,
+      await runner.run([compiler, '/nologo', '/noconfig', target, '/platform:x64', '/main:SemanticWorker', `/out:${executable}`,
         '/r:System.dll', '/r:System.Core.dll', '/r:Microsoft.CSharp.dll', '/r:System.Web.Extensions.dll', ...references.map((path) => `/r:${path}`), workerPath, snapshotPath, locatorPath, uiaPath], { signal });
       return executable;
     })();

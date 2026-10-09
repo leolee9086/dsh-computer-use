@@ -2,6 +2,7 @@
 // 每轮从同一原生窗口解析所有容器，保证目标替换后仍按任务条件查找。
 import { setTimeout as delay } from 'node:timers/promises';
 import { ComputerUseError } from './errors.js';
+import { WINDOW_QUERY_SCHEMA } from './window-query.js';
 
 export const LOCATOR_SCHEMA = Object.freeze({
   type: 'array', minItems: 1, maxItems: 16,
@@ -22,7 +23,7 @@ export const CONDITION_SCHEMA = Object.freeze({ type: 'object', additionalProper
   stable_ms: { type: 'integer', minimum: 100, maximum: 10000 },
 } });
 export const LOCATOR_OPTIONS_SCHEMA = Object.freeze({
-  window_id: { type: 'string' }, locator: LOCATOR_SCHEMA,
+  window_id: { type: 'string' }, window_query: WINDOW_QUERY_SCHEMA, locator: LOCATOR_SCHEMA,
   backend: { type: 'string', enum: ['native', 'uia', 'msaa'] },
   timeout_ms: { type: 'integer', minimum: 100, maximum: 120000 },
   poll_ms: { type: 'integer', minimum: 20, maximum: 1000 },
@@ -85,7 +86,14 @@ export async function waitForLocator({ resolve, read, condition, timeoutMs = 100
     const remaining = () => Math.max(1, Math.floor(deadline - performance.now()));
     try {
       last = await resolve(remaining(), signal);
-      if (last.status === 'ambiguous') throw new ComputerUseError(`locator step ${last.step + 1} is ambiguous; refine the container or choose nth explicitly`, 'COMPUTER_LOCATOR_AMBIGUOUS');
+      if (last.status === 'ambiguous') {
+        const error = new ComputerUseError(last.scope === 'related_windows'
+          ? 'related window query is ambiguous; inspect candidates and refine title/class/relation'
+          : `locator step ${last.step + 1} is ambiguous; refine the container or choose nth explicitly`, 'COMPUTER_LOCATOR_AMBIGUOUS');
+        // 后置条件失败仍提供本轮候选，便于审查一次动作之后究竟出现了哪些新根。
+        error.locatorResult = last;
+        throw error;
+      }
       let fulfilled = false;
       const element = last.element;
       if (last.status === 'not_found' && last.coverage?.status === 'complete') fulfilled = ['absent', 'hidden'].includes(condition.state);

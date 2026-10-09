@@ -7,6 +7,7 @@ import { NARRATOR_COMMANDS, narratorAction } from './narrator.js';
 import { registerLocatorTools } from './locator-tools.js';
 import { registerVisualTools } from './visual-tools.js';
 import { registerControlTools } from './control-tools.js';
+import { WINDOW_QUERY_SCHEMA, windowQueryOptions } from './window-query.js';
 import { IMAGE_SEARCH_OPTIONS, imageSearchOptions, validateImageResult, imageClickPoint } from './image-match.js';
 import { INPUT_STEPS_SCHEMA, MODIFIERS, inputSequenceArgs, keyOptions } from './input-actions.js';
 import { accessibilityElementById, findAccessibilityElements } from './semantics.js';
@@ -448,7 +449,7 @@ function isObservationExecution(exec) {
     && exec.arguments !== null
     && typeof exec.arguments === 'object'
     && !Array.isArray(exec.arguments)
-    && ['list', 'children'].includes(exec.arguments.operation);
+    && ['list', 'children', 'related'].includes(exec.arguments.operation);
 }
 
 function policyDecision(policy, description) {
@@ -620,6 +621,18 @@ export function apply(ctx, rawConfig) {
       consistency: { mode: 'live', status: 'unverified', source_atomic: false } }, config.maxSemanticSnapshots);
     return { snapshot_id: snapshotId, captured_at: capturedAt, elements: rows, coverage };
   };
+  const publishWindows = (exec, nativeWindows) => {
+    const capturedAt = Date.now();
+    const records = nativeWindows.map(nativeWindow => ({ id: `window-${randomUUID()}`, nativeWindow }));
+    const ids = new Map(records.map(record => [record.nativeWindow.id, record.id]));
+    for (const record of records) record.window = { ...record.nativeWindow, id: record.id,
+      native_id: record.nativeWindow.id, owner_window_id: ids.get(record.nativeWindow.ownerId) ?? null };
+    rememberBounded(agentState(observations, exec).windowLists, `windows-${randomUUID()}`, {
+      capturedAt, windows: new Map(records.map(record => [record.id, record])),
+    }, config.maxObservationsPerAgent);
+    // native_id/ownerChain 是审查用 HWND；控制只接受本次发布的短期 window_id。
+    return { captured_at: capturedAt, windows: records.map(record => record.window) };
+  };
   const registerTool = (tools, definition) => tools.register({
     ...definition,
     async execute(rawArgs, exec) {
@@ -646,7 +659,7 @@ export function apply(ctx, rawConfig) {
 
   registerLocatorTools({ register: (definition) => registerTool(ctx.tools, definition), textTool,
     provider: () => computer(ctx), state: (exec) => agentState(observations, exec),
-    window: (id, exec) => freshWindow(observations, exec, id, config), publish: publishElements, control });
+    window: (id, exec) => freshWindow(observations, exec, id, config), publish: publishElements, publishWindows, control });
   registerVisualTools({ register: (definition) => registerTool(ctx.tools, definition), textTool,
     provider: () => computer(ctx), window: (id, exec) => freshWindow(observations, exec, id, config) });
   registerControlTools({ register: (definition) => registerTool(ctx.tools, definition), textTool,
@@ -1065,34 +1078,26 @@ export function apply(ctx, rawConfig) {
 
   registerTool(ctx.tools, textTool(
     'computer_windows',
-    'List native windows and receive short-lived session window_id values. Windows includes minimized windows (minimized:true); focus restores them. Windows also supports bounded child HWND enumeration, move/resize/minimize/maximize/restore/close. Identity records are reusable within their lifetime and revalidated natively before control. close requests application closure and does not prove it succeeded.',
+    'List native windows and receive short-lived session window_id values. Windows retains visible untitled menus/popups and reports native class/thread/owner chain. related queries actual visible top-level roots relative to a fresh window_id with explicit owner/thread/process scope and bounded coverage; correlation is not ownership. Also supports minimized windows, child HWND enumeration and management. Reobserve after controls; close requests closure without proving it succeeded.',
     {
       type: 'object', additionalProperties: false,
       required: ['operation'],
-      properties: { operation: { type: 'string', enum: ['list', 'focus', 'children', 'move', 'resize', 'minimize', 'maximize', 'restore', 'close'] }, window_id: { type: 'string' }, x: { type: 'integer' }, y: { type: 'integer' }, width: { type: 'integer', minimum: 1, maximum: 32768 }, height: { type: 'integer', minimum: 1, maximum: 32768 }, max_nodes: { type: 'integer', minimum: 1, maximum: 512 } },
+      properties: { operation: { type: 'string', enum: ['list', 'related', 'focus', 'children', 'move', 'resize', 'minimize', 'maximize', 'restore', 'close'] }, window_id: { type: 'string' }, window_query: WINDOW_QUERY_SCHEMA, timeout_ms: { type: 'integer', minimum: 1, maximum: 120000 }, x: { type: 'integer' }, y: { type: 'integer' }, width: { type: 'integer', minimum: 1, maximum: 32768 }, height: { type: 'integer', minimum: 1, maximum: 32768 }, max_nodes: { type: 'integer', minimum: 1, maximum: 512 } },
     },
     async (rawArgs, exec) => {
       const args = object(rawArgs);
-      const operation = enumValue(args, 'operation', ['list', 'focus', 'children', 'move', 'resize', 'minimize', 'maximize', 'restore', 'close']);
-      if (operation === 'list') {
-        const capturedAt = Date.now();
-        const records = (await computer(ctx).listWindows(exec.signal)).map((nativeWindow) => {
-          const id = `window-${randomUUID()}`;
-          return {
-            id,
-            nativeWindow,
-            window: { ...nativeWindow, id },
-          };
-        });
-        const state = agentState(observations, exec);
-        rememberBounded(state.windowLists, `windows-${randomUUID()}`, {
-          capturedAt,
-          windows: new Map(records.map((record) => [record.id, record])),
-        }, config.maxObservationsPerAgent);
-        return describeJson({ captured_at: capturedAt, windows: records.map((record) => record.window) });
-      }
+      const operation = enumValue(args, 'operation', ['list', 'related', 'focus', 'children', 'move', 'resize', 'minimize', 'maximize', 'restore', 'close']);
+      if (operation === 'list') return describeJson(publishWindows(exec, await computer(ctx).listWindows(exec.signal)));
       const windowId = requiredString(args, 'window_id');
       const record = freshWindow(observations, exec, windowId, config);
+      if (operation === 'related') {
+        const query = windowQueryOptions(args.window_query ?? {}), timeoutMs = optionalInteger(args, 'timeout_ms', 10000);
+        if (timeoutMs < 1 || timeoutMs > 120000) throw new Error('timeout_ms must be 1..120000');
+        const provider = computer(ctx);
+        if (provider.capabilities.relatedWindows !== true || typeof provider.relatedWindows !== 'function') throw new Error('related-window queries are unsupported on this backend');
+        const result = await provider.relatedWindows(record.nativeWindow, query, exec.signal, timeoutMs);
+        return describeJson({ ...result, anchor_window_id: windowId, ...publishWindows(exec, result.windows) });
+      }
       if (operation === 'children') {
         const maxNodes = optionalInteger(args, 'max_nodes', 256);
         if (maxNodes < 1 || maxNodes > 512) throw new Error('max_nodes must be 1..512');

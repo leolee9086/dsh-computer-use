@@ -13,6 +13,7 @@ import { assertFinitePoint } from './geometry.js';
 import { imageSearchOptions, validateImageResult } from './image-match.js';
 import { colorOptions, ocrOptions, integer, validateColorResult, validateOcrResult, validateOcrStatus } from './visual.js';
 import { validateListViewResult } from './listview.js';
+import { validateRelatedWindows } from './window-query.js';
 
 const KEY_CODES = {
   alt: 0x12,
@@ -191,7 +192,7 @@ function listedWindowTarget(raw) {
   if (raw === null || typeof raw !== 'object'
     || typeof raw.id !== 'string' || !/^-?\d+$/.test(raw.id)
     || !Number.isInteger(raw.processId) || raw.processId < 1
-    || typeof raw.title !== 'string' || raw.title.length === 0
+    || typeof raw.title !== 'string'
     || raw.bounds === null || typeof raw.bounds !== 'object'
     || !Number.isFinite(raw.bounds.x) || !Number.isFinite(raw.bounds.y)
     || !Number.isFinite(raw.bounds.width) || !Number.isFinite(raw.bounds.height)
@@ -339,6 +340,7 @@ export class WindowsComputer {
       ocrConfidence: false,
       visualWait: true,
       childWindows: true,
+      relatedWindows: true,
       standardListView: true,
       windowManagement: true,
       narrator: true,
@@ -388,9 +390,34 @@ export class WindowsComputer {
       bounds: numericBounds(window.bounds),
       ...(Number.isInteger(window.processId) ? { processId: window.processId } : {}),
       ...(typeof window.application === 'string' ? { application: window.application } : {}),
+      ...(typeof window.className === 'string' ? { className: window.className } : {}),
+      ...(Number.isInteger(window.threadId) ? { threadId: window.threadId } : {}),
+      ...(Array.isArray(window.ownerChain) ? { ownerId: window.ownerId, ownerChain: window.ownerChain } : {}),
       focused: window.focused === true,
       minimized: window.minimized === true,
     }));
+  }
+
+  async relatedWindows(rawTarget, options, signal, timeoutMs = 10000) {
+    const target = listedWindowTarget(rawTarget);
+    if (options.relation === 'same_thread' && (!Number.isInteger(rawTarget.threadId) || rawTarget.threadId < 1)) {
+      throw new ComputerUseError('same_thread requires a fresh window listing with native thread identity');
+    }
+    let result;
+    try {
+      result = await runNativeHelper(this.runner, requireHelperPath(this.config), ['related-windows'], {
+        window: { handle: target.id, processId: target.processId, title: target.title }, ...options, budgetMs: timeoutMs,
+      }, signal, 4 * 1024 * 1024, timeoutMs);
+    } catch (error) {
+      // 只对 helper 明确确认的候选根变化开放只读重查；固定 anchor 失效与其它源错误直接失败。
+      if (!signal?.aborted && /(?:^|dsh-screen: )related_window_changed:/.test(error.message)) {
+        const changed = new ComputerUseError(error.message, 'COMPUTER_LOCATOR_CHANGED');
+        changed.executionState = 'not_started';
+        throw changed;
+      }
+      throw error;
+    }
+    return validateRelatedWindows(result, { ...target, threadId: rawTarget.threadId }, options);
   }
 
   async focusWindow(rawTarget, signal) {

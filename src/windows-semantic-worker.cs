@@ -4,6 +4,8 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.IO;
+using Microsoft.Win32.SafeHandles;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
@@ -644,10 +646,18 @@ internal static partial class SemanticWorker
         }
         return new Dictionary<string, object> { { "ok", true } };
     }
+    [DllImport("kernel32.dll", SetLastError=true)] static extern IntPtr GetStdHandle(int kind);
+    static FileStream ProtocolStream(int kind, FileAccess access) {
+        var handle = GetStdHandle(kind);
+        if (handle == IntPtr.Zero || handle == new IntPtr(-1)) throw new InvalidOperationException("inherited semantic protocol pipe unavailable");
+        return new FileStream(new SafeFileHandle(handle, false), access);
+    }
     [MTAThread] public static void Main() {
-        Console.InputEncoding = new UTF8Encoding(false); Console.OutputEncoding = new UTF8Encoding(false);
+        // GUI 子系统下 .NET Console 会按无控制台初始化；协议直接使用宿主继承的管道。
+        using (var input = new StreamReader(ProtocolStream(-10, FileAccess.Read), new UTF8Encoding(false)))
+        using (var output = new StreamWriter(ProtocolStream(-11, FileAccess.Write), new UTF8Encoding(false)) { AutoFlush = true }) {
         StartLegacyEvents(); string line;
-        while ((line = Console.ReadLine()) != null) {
+        while ((line = input.ReadLine()) != null) {
             object id = null; ActionStarted = false; NativeCalls = 0;
             try {
                 var args = Json.Deserialize<Dictionary<string, object>>(line); id = args["id"];
@@ -658,7 +668,7 @@ internal static partial class SemanticWorker
                 if (acquiring && SnapshotMatchLimit(args) > 0 && consistency != "snapshot") throw new InvalidOperationException("query maxMatches requires snapshot consistency");
                 object result = Text(args, "kind") == "locate" ? Locate(args, owner) :
                     acquiring ? (consistency == "snapshot" ? AcquireSnapshot(args, owner) : Acquire(args, owner)) : Act(args, owner);
-                Console.WriteLine(Json.Serialize(new Dictionary<string, object> { { "id", id }, { "result", result }, { "execution_state", ActionStarted ? "completed" : "not_started" } }));
+                output.WriteLine(Json.Serialize(new Dictionary<string, object> { { "id", id }, { "result", result }, { "execution_state", ActionStarted ? "completed" : "not_started" } }));
             } catch (Exception error) {
                 var response = new Dictionary<string, object> { { "id", id }, { "error", error.GetType().FullName + " (0x" + error.HResult.ToString("X8") + "): " + error.Message }, { "execution_state", ActionStarted ? "unknown" : "not_started" } };
                 // 只读解析可以重新执行；动作未知时不发布可重试错误码。
@@ -673,8 +683,9 @@ internal static partial class SemanticWorker
                         { "processId", (int)changed.ObservedWindow.Pid }, { "title", changed.ObservedWindow.Title } };
                     response["native_calls"] = NativeCalls;
                 }
-                Console.WriteLine(Json.Serialize(response));
+                output.WriteLine(Json.Serialize(response));
             }
+        }
         }
     }
 }

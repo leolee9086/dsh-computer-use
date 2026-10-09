@@ -1,6 +1,6 @@
 {
-  "version": "0.5.12",
-  "executableSha256": "3e280c5edf2cf24ebd0b93c5642d8d8a71616e1380a4a251020c405c36ab0f00",
+  "version": "0.5.13",
+  "executableSha256": "92bc9da4d250856ffa2f5054557938b7458f6ff5754f1423d7b07bfbe98a87db",
   "sources": {
     "native/Cargo.lock": "eebd959a5d7dbdcd2d3761414ac199f38b0be90800da627206acbe57e8b63aaa",
     "native/Cargo.toml": "8f32c15bcf492ae2b315b9c8b9ba2b1267a9c48560ad3f6b26ba2d6c5e6671f8",
@@ -9,9 +9,10 @@
     "native/src/image_template.rs": "3a2e374216b69cf2fbfcae8159817ccdae36008ac4b36c7489545245d2a591a5",
     "native/src/input_sequence.rs": "f9d3c768570412984f6f63e74a1a8a3fcf7bed591f3a6d474cbbb67481581476",
     "native/src/listview.rs": "05b8d83f025b4ef78ce6591a52acfa75699a5e41af257f079ea7dad8fcbfb74e",
-    "native/src/main.rs": "03dad21eb7c8086ee762d6e9597bb73cfcc6b426dcd04fda927f6d1e5ed2033a",
+    "native/src/main.rs": "d0a4012e9e9fd7f33f731241f83ebb2f2e4d99ef04ae295759850292ba1ed044",
     "native/src/ocr.rs": "ea6875eee03cbf31a1796ce056ed23bb24ee2944ec8b166aab22ef639dab33cd",
     "native/src/visual.rs": "5f4d9b0833176b81ad2eb03d31b0b6a33f4a8ed94ad855e1aba15a0353f0d16e",
-    "native/src/window_control.rs": "534aa0161a0b8609d87b2037bb419b11323496755605084fdf0c5174b22bdde2"
+    "native/src/window_control.rs": "534aa0161a0b8609d87b2037bb419b11323496755605084fdf0c5174b22bdde2",
+    "native/src/window_query.rs": "b0b68fe35d49f56f0f3fc2d9d5cc9c8981b0540d8ef129f575a983e0419bb573"
   }
 }

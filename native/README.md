@@ -1,6 +1,8 @@
 # dsh-screen 原生桌面 helper
 
-Windows 捕获、输入与窗口控制后端，版本 0.5.0。单文件 Rust exe，不需要 PowerShell。Windows UIA/MSAA/Narrator 属于 Node 的独立 C# 桥，不在此 exe 内。
+Windows 捕获、输入与窗口控制后端；独立 Rust crate 版本仍为 0.5.0，bundle 与发布清单版本为 0.5.13。单文件 Rust exe，不需要 PowerShell。Windows UIA/MSAA/Narrator 属于 Node 的独立 C# 桥/语义工作进程，不在此 exe 内。
+
+Rust helper 使用 Windows GUI subsystem，语义 worker 以 `/target:winexe` 编译，目标类型参加缓存哈希。两者不分配控制台；worker 直接从 `GetStdHandle` 的继承 stdin/stdout 管道建立 UTF-8 reader/writer，不调用 AttachConsole 或换用备用传输。这样保留官方 managed subprocess 协议，避免弹窗观测期间分配/销毁 console 干扰前台菜单。
 
 ## 协议
 
@@ -9,7 +11,8 @@ Windows 捕获、输入与窗口控制后端，版本 0.5.0。单文件 Rust exe
 | 命令 | 请求 JSON | 结果 |
 | --- | --- | --- |
 | `list-displays` | 无 | 显示器 `id/name/primary/bounds` 数组 |
-| `list-windows` | 无 | `id/title/processId/application/focused/minimized/bounds` 数组，包含有标题的可枚举最小化窗口 |
+| `list-windows` | 无 | `id/title/processId/application/className/threadId/ownerId/ownerChain/focused/minimized/bounds` 数组，保留有可见面积的无标题与可枚举最小化窗口 |
+| `related-windows` | `{window,relation,title?,className?,maxNodes,budgetMs}` | 固定 anchor 的 `source/relation/anchorId/windows/visited/coverage/stopReason` 关系目录 |
 | `focus-window` | `{id,processId,title}` | 身份/前台确认后 `{ok:true}`，最小化目标先恢复 |
 | `action` | `{action,focus?}` | `{ok:true}`；错误前可能已有输入副作用 |
 | `screenshot --out <path>` | 下述捕获字段 | `path/width/height/sourceBounds/captureMode/bytes/displayId?` |
@@ -23,6 +26,14 @@ Windows 捕获、输入与窗口控制后端，版本 0.5.0。单文件 Rust exe
 | `manage-window` | `{window,action}` | 操作结果；关闭为 `posted:true,applicationResultVerified:false` |
 
 除 `focus-window` 的顶层 `id` 外，窗口身份目标 `focus` / `background` / `window` 使用 `{handle,processId,title}`。HWND 是十进制字符串，避免 JavaScript number 精度丢失。边界是实时读取的结果，不作为旧身份字段。原生调用复核句柄/进程/标题，并在需要前台时确认实际前台 HWND。
+
+## 顶层窗口关系与新根
+
+`related-windows` 的 `relation` 为 `owned`、`same_thread` 或 `same_process`。owned 查询候选的真实 `GW_OWNER` 链，允许不同 PID；线程和进程相同只表示相关性。title/className 精确匹配，空 title 合法。范围是有可见正面积的顶层窗口，anchor 自身排除；owner 链最多 32 项，循环或超限报错。原 HWND/PID/标题在枚举前后复核，候选身份、owner 链及线程在返回前复核。
+
+`maxNodes` 为 1–4096，计数包含未命中的全部顶层 HWND；`budgetMs` 为 1–120000，宿主同时用剩余总预算覆盖启动/输出。完整枚举报 `coverage:complete/stopReason:complete`；节点/时间早停分别报 `partial/node_budget` 或 `partial/time_budget`。部分零项不能证明缺席，一项不能证明唯一；枚举错误和 anchor 身份错误显式失败。候选在观测间被关闭或换代时，明确 `related_window_changed:` 错误由宿主映射为只读 `COMPUTER_LOCATOR_CHANGED/not_started`，等待可在同一截止内重查，控制不重放。其它来源错误不映射成缺席。
+
+公开 `window_query` 将 `max_windows/class_name` 转为本协议字段，定位和等待每轮从固定 anchor 发现实际新根，再在剩余预算内查询其语义树。新 window/element ID 来自本会话观测，原生 HWND 字段只用于审查；关闭根的旧语义引用不能恢复控制。目录、语义条件与动作之间不具有源应用事务保证。
 
 ## 捕获
 

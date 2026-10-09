@@ -133,6 +133,10 @@ export function apply(ctx) {
   assert.notEqual(marker, undefined, `profile probe did not emit its result\n${result.stdout}\n${result.stderr}`);
   const probe = JSON.parse(marker);
   assert.equal(probe.capabilities.platform, process.platform);
+  if (process.platform === 'win32') {
+    assert.equal(probe.capabilities.standardListView, true);
+    assert.equal(probe.capabilities.relatedWindows, true);
+  }
   assert.deepEqual(probe.tools, toolNames);
   assert.equal(probe.workflowPrompt, true);
   assert.equal(probe.observationAllowed, true);
