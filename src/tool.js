@@ -35,6 +35,8 @@ const TOOL_NAMES = new Set([
   'computer_drag',
   'computer_element',
   'computer_act',
+  'computer_tree',
+  'computer_scroll_find',
   'computer_key',
   'computer_input',
   'computer_move',

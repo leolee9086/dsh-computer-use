@@ -142,4 +142,137 @@ test('new wait tools respect observation policy and action respects control poli
   const window_id = await listed(probe), locator = [{ name: 'Apply' }];
   const observed = JSON.parse(await probe.execute('computer_wait', { window_id, locator })); assert.equal(observed.fulfilled, true);
   await assert.rejects(probe.execute('computer_act', { window_id, locator, operation: 'invoke' }), /denies desktop control/);
+  await assert.rejects(probe.execute('computer_tree', { window_id, locator, path: [{ name: 'Leaf' }] }), /denies desktop control/);
+  await assert.rejects(probe.execute('computer_scroll_find', { window_id, locator, item: [{ name: 'Item' }] }), /denies desktop control/);
+});
+
+// 故障只注入computer provider；不手写Cordis工具/权限/上下文服务。
+function dataResult(id, path, patterns = ['expand_collapse', 'selection_item']) {
+  return { ...resolved({ ...element(id), role: 'TreeItem', patterns }), worker_generation: 'worker',
+    trace: path.map((element_id, step) => ({ step, element_id, selection: 'unique' })) };
+}
+test('incomplete identity trace cannot prove tree branch replacement', async () => {
+  let rootReads = 0, dispatches = 0;
+  const probe = await context(computer(async (_handle, _signal, options) => {
+    if (options.locator.length === 1) return dataResult('tree', ['tree']);
+    if (++rootReads === 1) return dataResult('root', ['tree', 'root']);
+    return { status: 'incomplete', coverage: { status: 'partial', reason: 'time_limit' }, trace: [], worker_generation: 'worker' };
+  }, async action => {
+    if (action.kind === 'read') return { expand_state: 'Expanded' };
+    dispatches++; return { ok: true };
+  }));
+  const window_id = await listed(probe);
+  const result = JSON.parse(await probe.execute('computer_tree', { window_id, locator: [{ name: 'Tree' }], path: [{ name: 'Root' }, { name: 'Leaf' }], timeout_ms: 100 }));
+  assert.equal(result.status, 'timeout'); assert.equal(dispatches, 0); assert.equal(result.selection_state, 'not_started');
+});
+test('tree expansion obtains a fresh reference after its state read', async () => {
+  let queries = 0, stateReadAt = 0, dispatches = 0;
+  const probe = await context(computer(async (_handle, _signal, options) => {
+    queries++;
+    const row = options.locator.length === 1 ? dataResult('tree', ['tree'])
+      : options.locator.length === 2 ? dataResult('root', ['tree', 'root']) : dataResult('leaf', ['tree', 'root', 'leaf']);
+    row.element.native_token = `query-${queries}`; return row;
+  }, async action => {
+    if (action.kind === 'read') { stateReadAt = queries; return { expand_state: dispatches ? 'Expanded' : 'Collapsed', selected: dispatches === 2 }; }
+    if (action.kind === 'expand' && action.element.native_token === `query-${stateReadAt}`) {
+      throw Object.assign(new Error('state read invalidated the observed reference'), { code: 'COMPUTER_TARGET_STALE', executionState: 'not_started' });
+    }
+    dispatches++; return { ok: true };
+  }));
+  const window_id = await listed(probe);
+  const result = JSON.parse(await probe.execute('computer_tree', { window_id, locator: [{ name: 'Tree' }], path: [{ name: 'Root' }, { name: 'Leaf' }] }));
+  assert.equal(result.status, 'selected'); assert.equal(dispatches, 2);
+  assert.deepEqual(result.actions.map(action => action.operation), ['expand', 'select']);
+});
+test('tree workflow retains unknown expansion and never repeats it', async () => {
+  let dispatches = 0;
+  const probe = await context(computer(async (_handle, _signal, options) => options.locator.length === 1
+    ? dataResult('tree', ['tree']) : dataResult('root', ['tree', 'root']), async action => {
+    if (action.kind === 'read') return { expand_state: 'Collapsed' };
+    dispatches++; throw Object.assign(new Error('provider deadline after dispatch'), { executionState: 'unknown' });
+  }));
+  const window_id = await listed(probe);
+  const result = JSON.parse(await probe.execute('computer_tree', { window_id, locator: [{ name: 'Tree' }], path: [{ name: 'Root' }, { name: 'Leaf' }] }));
+  assert.equal(result.status, 'error'); assert.equal(result.selection_state, 'not_started'); assert.equal(dispatches, 1);
+  assert.equal(result.actions.length, 1); assert.equal(result.actions[0].execution_state, 'unknown');
+});
+test('tree workflow stops on branch replacement instead of expanding its namesake', async () => {
+  let dispatches = 0;
+  const probe = await context(computer(async (_handle, _signal, options) => {
+    if (options.locator.length === 1) return dataResult('tree', ['tree']);
+    return dispatches ? dataResult('new-root', ['tree', 'new-root']) : dataResult('root', ['tree', 'root']);
+  }, async action => {
+    if (action.kind === 'read') return { expand_state: 'Collapsed' };
+    dispatches++; return { ok: true };
+  }));
+  const window_id = await listed(probe);
+  const result = JSON.parse(await probe.execute('computer_tree', { window_id, locator: [{ name: 'Tree' }], path: [{ name: 'Root' }, { name: 'Leaf' }] }));
+  assert.equal(result.status, 'ancestor_changed'); assert.equal(dispatches, 1); assert.equal(result.selection_state, 'not_started');
+  assert.equal(result.actions[0].execution_state, 'completed');
+});
+test('scroll search checks container geometry when a provider reports an outside item onscreen', async () => {
+  let dispatches = 0;
+  const probe = await context(computer(async (_handle, _signal, options) => {
+    if (options.locator.length === 1) return dataResult('container', ['container'], ['scroll']);
+    return { ...dataResult('item', ['container', 'item'], ['invoke']),
+      element: { ...element('item'), bounds: { x: 10, y: dispatches ? 10 : 500, width: 20, height: 20 } } };
+  }, async action => {
+    if (action.kind === 'read') return { scroll: { vertical: dispatches ? 50 : 0 } };
+    dispatches++; return { ok: true };
+  }));
+  const window_id = await listed(probe);
+  const result = JSON.parse(await probe.execute('computer_scroll_find', { window_id, locator: [{ name: 'Container' }], item: [{ name: 'Item' }], page_wait_ms: 100 }));
+  assert.equal(result.status, 'found'); assert.equal(dispatches, 1); assert.equal(result.scrolls, 1);
+  assert.equal(result.pages[0].viewport_intersects, false); assert.equal(result.pages[1].viewport_intersects, true);
+  assert.equal(result.global_absence_proven, false);
+});
+test('explicit scroll search rejects missing patterns without input or a global absence claim', async () => {
+  let dispatches = 0;
+  const probe = await context(computer(async (_handle, _signal, options) => options.locator.length === 1
+    ? dataResult('container', ['container'], []) : { ...absent(), trace: [{ element_id: 'container' }], worker_generation: 'worker' },
+  async () => { dispatches++; }));
+  const window_id = await listed(probe);
+  const result = JSON.parse(await probe.execute('computer_scroll_find', { window_id, locator: [{ name: 'Container' }], item: [{ name: 'Missing' }], page_wait_ms: 100 }));
+  assert.equal(result.status, 'unsupported'); assert.equal(result.global_absence_proven, false); assert.equal(dispatches, 0);
+});
+test('explicit scroll search retains an unknown scroll without replaying it', async () => {
+  let dispatches = 0;
+  const probe = await context(computer(async (_handle, _signal, options) => options.locator.length === 1
+    ? dataResult('container', ['container'], ['scroll']) : { ...absent(), trace: [{ element_id: 'container' }], worker_generation: 'worker' },
+  async action => {
+    if (action.kind === 'read') return { scroll: { vertical: 0 } };
+    dispatches++; throw Object.assign(new Error('provider stopped after scroll dispatch'), { executionState: 'unknown' });
+  }));
+  const window_id = await listed(probe);
+  const result = JSON.parse(await probe.execute('computer_scroll_find', { window_id, locator: [{ name: 'Container' }], item: [{ name: 'Missing' }] }));
+  assert.equal(result.status, 'error'); assert.equal(dispatches, 1); assert.equal(result.actions.length, 1);
+  assert.equal(result.actions[0].execution_state, 'unknown'); assert.equal(result.global_absence_proven, false);
+});
+test('cancelling a scroll workflow after dispatch stops at one provider action', async () => {
+  const controller = new AbortController(); let dispatches = 0, queries = 0;
+  const probe = await context(computer(async (_handle, _signal, options) => {
+    queries++;
+    return options.locator.length === 1 ? dataResult('container', ['container'], ['scroll'])
+      : { ...absent(), trace: [{ element_id: 'container' }], worker_generation: 'worker' };
+  }, async action => {
+    if (action.kind === 'read') return { scroll: { vertical: 0 } };
+    dispatches++; controller.abort(new Error('cancel after scroll')); return { ok: true };
+  }));
+  const window_id = await listed(probe);
+  // 正式 ToolRuntime 将已取消调用统一结算为 aborted，不能声称内部返回值已经交付。
+  await assert.rejects(probe.execute('computer_scroll_find', { window_id, locator: [{ name: 'Container' }], item: [{ name: 'Missing' }] },
+    { ...probe.exec, signal: controller.signal }), /tool call aborted/);
+  assert.equal(dispatches, 1); const stoppedAt = queries;
+  await delay(30); assert.equal(queries, stoppedAt); assert.equal(dispatches, 1);
+});
+test('explicit scroll search propagates source errors preserving no-input state', async () => {
+  let dispatches = 0;
+  const probe = await context(computer(async (_handle, _signal, options) => {
+    if (options.locator.length === 1) return dataResult('container', ['container'], ['scroll']);
+    throw new Error('real source disconnected');
+  }, async () => { dispatches++; }));
+  const window_id = await listed(probe);
+  const result = JSON.parse(await probe.execute('computer_scroll_find', { window_id, locator: [{ name: 'Container' }], item: [{ name: 'Missing' }] }));
+  assert.equal(result.status, 'error'); assert.match(result.error.message, /source disconnected/); assert.equal(dispatches, 0);
+  assert.equal(result.global_absence_proven, false);
 });

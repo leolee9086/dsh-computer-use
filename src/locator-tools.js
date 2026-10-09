@@ -2,6 +2,7 @@
 import { LOCATOR_OPTIONS_SCHEMA, LOCATOR_SCHEMA, CONDITION_SCHEMA, locatorArgs, conditionArgs, waitForLocator } from './locator.js';
 import { ELEMENT_OPERATIONS, PATTERN_BY_OPERATION, SEMANTIC_PARAMETERS, semanticActionArgs } from './accessibility-actions.js';
 import { WINDOW_QUERY_SCHEMA, windowQueryOptions } from './window-query.js';
+import { registerDataTools } from './data-tools.js';
 
 function object(raw, label) {
   if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) throw new Error(`${label} must be an object`);
@@ -74,6 +75,7 @@ export function registerLocatorTools({ register, textTool, provider, state, wind
   const wait = (prepared, condition, timeoutMs, exec, resolve = prepared.makeResolve()) => waitForLocator({ resolve, read: prepared.read,
     condition, timeoutMs, pollMs: prepared.pollMs, signal: exec.signal });
   const base = { type: 'object', additionalProperties: false, required: ['window_id', 'locator'], properties: LOCATOR_OPTIONS_SCHEMA };
+  registerDataTools({ register, textTool, prepare, report, provider, control });
 
   register(textTool('computer_locate',
     'Resolve a native container/target locator from a listed window. Optional window_query re-resolves a related new root from that fixed anchor. Multiple roots are ambiguous; partial window scans cannot prove uniqueness or absence. Each locator step is unique unless nth is explicit. Includes disabled/offscreen elements and does not traverse unrealized items.',

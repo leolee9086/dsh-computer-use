@@ -4,7 +4,7 @@ import { pathToFileURL } from 'node:url';
 
 // Electron 的外层可执行文件可能在内层 Node 失败时仍返回0。
 // 完成标记必须在测试模块和清理都结束后打印；晚到的异常另留失败标记。
-export function runElectronSmoke(executable, file, { timeoutMs = 120000, expectElectron = true, reportOutput = true, cwd } = {}) {
+export function runElectronSmoke(executable, file, { timeoutMs = 120000, expectElectron = true, reportOutput = true, cwd, env = {} } = {}) {
   const entry = pathToFileURL(resolve(file)).href;
   const complete = `DshComputerUseSmokeComplete:${entry}`;
   const failed = `DshComputerUseSmokeFailed:${entry}`;
@@ -22,7 +22,7 @@ try {
 `;
   const result = spawnSync(resolve(executable), ['--input-type=module', '--eval', bootstrap, entry], {
     cwd,
-    env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', DSH_EXPECT_ELECTRON: expectElectron ? '1' : '0' },
+    env: { ...process.env, ...env, ELECTRON_RUN_AS_NODE: '1', DSH_EXPECT_ELECTRON: expectElectron ? '1' : '0' },
     stdio: ['ignore', 'pipe', 'pipe'], encoding: 'utf8', windowsHide: true,
     timeout: timeoutMs, maxBuffer: 8 * 1024 * 1024,
   });

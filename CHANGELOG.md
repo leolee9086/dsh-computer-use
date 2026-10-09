@@ -1,5 +1,14 @@
 # 变更记录
 
+## 0.5.14 — 2026-10-09
+
+- 新增 Windows `computer_tree` 和 `computer_scroll_find`，共 27 工具。树路径按直属 TreeItem 逐层展开、重定位与确认，所需祖先各展开一次、末项选择一次；窗口、容器与已观察分支身份固定，移除/替换停止并保留已发生步骤，缺失分支有界超时且零选择。
+- 显式滚动查找使用固定 ScrollPattern 容器、页/次数/总截止预算，每次滚动后读实际百分比确认变化。返回项须与新读视口有正面积交集；默认 WPF peer 的 offscreen:false 单独不能证明在视口。流程不激活项，partial 不算缺失，达到滚动边界/次数不证明虚拟数据全局不存在。
+- 新增真实 WPF 默认 peers、生产 WindowsComputer、Cordis ToolRuntime 和官方 runner 数据任务验收：惰性树及缺失/替换，600 项 ItemContainer 精确查找/Realize/选择，非首屏 Grid 独立 cell 引用选择与业务状态核对，ScrollPattern 查找后单次 Invoke 和实际 Click 计数；不支持、截断、滚动次数与 200ms 取消均检查。
+- 真实系统信息两轮从收拢的系统摘要按三层路径选择显示/声音设备，每轮仅展开根与组件各一次、选择一次；独立 SelectionItem 和树选择集核对，无关分支保持收拢。真正系统 PowerShell Out-GridView 的 600 行任务独立读取 579/480 cell、重新定位行选择并核对唯一选择集，一次 ValuePattern 写入后确认筛选只剩指定行。Text cell 的 grid_item 不被猜成 selection_item。
+- `smoke:data` 默认顺序联合夹具、真实树应用和真实 Grid 应用，清理后完成标记及源证据时间/SHA-256 均核对。子集与结构探查不冒充完整验收；Grid 筛选测试的定位、读取和轮询共用真实总截止。
+- 保留实际 MMC ordinary spawn EACCES、启动期只读来源变化及一次零动作 ancestor_changed 的失败证据；未提升权限或重放未知动作。更新工作流提示词与真实 Loader 名单，原生源码/二进制保持 0.5.13 已验收内容。详细结果及应用范围见 [EVIDENCE.md](EVIDENCE.md)。
+
 ## 0.5.13 — 2026-10-09
 
 - Windows 顶层目录保留有可见面积的无标题菜单/Popup，增加 native class、thread 和实际 owner 链；`computer_windows:related` 从固定 HWND/PID/标题查询 owned、same_thread 或 same_process 范围。owned 允许跨进程，线程/进程相关性不冒充归属；工具总数仍为 25。

@@ -76,7 +76,7 @@ function sameText(actual, expected, mode) { return typeof actual === 'string' &&
 
 // resolve/read 都只能读取；动作由工具在此函数之外执行一次。
 // 总截止包括查询、读取和轮询。原生调用接收剩余时间，worker 卡住时会被终止。
-export async function waitForLocator({ resolve, read, condition, timeoutMs = 10000, pollMs = 100, signal }) {
+export async function waitForLocator({ resolve, read, condition, timeoutMs = 10000, pollMs = 100, signal, stopOnCompleteMissing = false }) {
   if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 120000) throw new Error('wait budget must be 1..120000 ms');
   if (!Number.isInteger(pollMs) || pollMs < 20 || pollMs > 1000) throw new Error('poll_ms must be 20..1000');
   const started = performance.now(), deadline = started + timeoutMs;
@@ -137,6 +137,11 @@ export async function waitForLocator({ resolve, read, condition, timeoutMs = 100
         }
       } else stable = undefined;
       if (fulfilled && performance.now() <= deadline) return { fulfilled: true, attempts, elapsed_ms: Math.round(performance.now() - started), last };
+      // 显式滚动流程检查的是当前页；完整缺失可结束本页读取，随后决定是否滚动。
+      // 普通条件等待仍默认继续轮询，虚拟数据的全局缺失也没有在这里得到证明。
+      if (stopOnCompleteMissing && last.status === 'not_found' && last.coverage?.status === 'complete' && performance.now() <= deadline) {
+        return { fulfilled: false, reason: 'not_found', attempts, elapsed_ms: Math.round(performance.now() - started), last };
+      }
     } catch (error) {
       if (!changed(error)) throw error;
       last = { status: 'changed', error: error.message }; stable = undefined;
