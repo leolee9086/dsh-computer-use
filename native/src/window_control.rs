@@ -25,7 +25,9 @@ pub fn checked_window(target: &FocusTarget) -> Result<HWND, String> {
     }
     Ok(handle)
 }
-fn bounds(handle: HWND) -> Result<Region, String> {
+/// HWND 目录保留零面积子窗口：Explorer 的内部辅助窗口也是真实身份，
+/// 不能因为它没有像素区域就丢掉整棵子 HWND 目录。捕获另行要求正面积。
+fn directory_bounds(handle: HWND) -> Result<Region, String> {
     let mut rect = RECT::default();
     unsafe { GetWindowRect(handle, &mut rect) }.map_err(|e| format!("读取窗口边界失败: {e}"))?;
     let region = Region {
@@ -34,6 +36,13 @@ fn bounds(handle: HWND) -> Result<Region, String> {
         width: rect.right - rect.left,
         height: rect.bottom - rect.top,
     };
+    if region.width < 0 || region.height < 0 {
+        return Err("窗口边界反向".into());
+    }
+    Ok(region)
+}
+fn bounds(handle: HWND) -> Result<Region, String> {
+    let region = directory_bounds(handle)?;
     if region.width < 1 || region.height < 1 {
         return Err("窗口边界为空".into());
     }
@@ -159,7 +168,7 @@ unsafe extern "system" fn collect_child(handle: HWND, data: LPARAM) -> BOOL {
             title: window_title(handle),
             visible: IsWindowVisible(handle).as_bool(),
             enabled: IsWindowEnabled(handle).as_bool(),
-            bounds: bounds(handle)?,
+            bounds: directory_bounds(handle)?,
             client_bounds: client_bounds(handle)?,
         })
     })();
@@ -229,18 +238,18 @@ pub enum MessageAction {
         delta_y: i32,
     },
 }
-fn checked_child(request: &MessageRequest) -> Result<HWND, String> {
-    let root = checked_window(&request.window)?;
-    let child = &request.child;
+/// 内容读取只核对身份；禁用/隐藏不是数据协议失效。动作另行检查状态。
+pub fn checked_child_identity(window: &FocusTarget, child: &ChildWindow) -> Result<HWND, String> {
+    let root = checked_window(window)?;
     let value: isize = child.id.parse().map_err(|_| "子窗口句柄无效")?;
     let handle = HWND(value as *mut core::ffi::c_void);
     let mut pid = 0;
     unsafe {
-        if child.root_id != request.window.handle
+        if child.root_id != window.handle
             || !IsChild(root, handle).as_bool()
             || GetWindowThreadProcessId(handle, Some(&mut pid)) == 0
             || pid != child.process_id
-            || pid != request.window.process_id as u32
+            || pid != window.process_id as u32
             || class_name(handle) != child.class_name
             || window_title(handle) != child.title
             || (GetParent(handle).map_err(|e| e.to_string())?.0 as isize).to_string()
@@ -248,9 +257,15 @@ fn checked_child(request: &MessageRequest) -> Result<HWND, String> {
         {
             return Err("子窗口身份已变更（父窗口/进程/类名/标题）".into());
         }
-        if !IsWindowVisible(handle).as_bool() || !IsWindowEnabled(handle).as_bool() {
-            return Err("子窗口不可见或已禁用".into());
-        }
+    }
+    Ok(handle)
+}
+fn checked_child(request: &MessageRequest) -> Result<HWND, String> {
+    let handle = checked_child_identity(&request.window, &request.child)?;
+    if !unsafe { IsWindowVisible(handle) }.as_bool()
+        || !unsafe { IsWindowEnabled(handle) }.as_bool()
+    {
+        return Err("子窗口不可见或已禁用".into());
     }
     Ok(handle)
 }

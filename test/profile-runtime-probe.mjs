@@ -54,6 +54,7 @@ const toolNames = [
   'computer_narrator',
   'computer_ocr',
   'computer_read',
+  'computer_read_control',
   'computer_screenshot',
   'computer_scroll',
   'computer_status',

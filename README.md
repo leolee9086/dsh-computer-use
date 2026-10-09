@@ -1,6 +1,6 @@
 # dsh-computer-use
 
-独立的 Cordis bundle，为 DeepSeek Harness 提供视觉、原生无障碍和 Windows 讲述人操作路径。0.5.11 注册 **24 个 `computer_*` 工具**；无障碍观测、层级定位、条件等待、阅读和语义动作可以独立使用，文本模型也能操作原生应用。
+独立的 Cordis bundle，为 DeepSeek Harness 提供视觉、原生无障碍和 Windows 讲述人操作路径。0.5.12 注册 **25 个 `computer_*` 工具**；无障碍观测、层级定位、条件等待、阅读和语义动作可以独立使用，文本模型也能操作原生应用。
 
 Windows 是经过本机运行时验证的主要后端。macOS AX、Linux AT-SPI 已实现并做契约测试，尚无这两个系统的原生运行时验收。接口覆盖与实测范围见 [EVIDENCE.md](EVIDENCE.md)；对标的官方接口见 [能力矩阵](references/CAPABILITY-MATRIX.md)。目前没有任务成功率基准，也没有 SOTA 等效结论。
 
@@ -15,6 +15,7 @@ Windows 是经过本机运行时验证的主要后端。macOS AX、Linux AT-SPI 
 | 无障碍 | `computer_accessibility`、`computer_find`、`computer_read`、`computer_element` | 独立快照、元素查找、文本/选择/值/状态读取与控件模式操作。Windows UIA、MSAA 支持分页、分支展开和原生查询。 |
 | 定位与等待 | `computer_locate`、`computer_wait`、`computer_act` | Windows 窗口内逐级消歧，每轮重解容器与目标；共享截止的条件等待、一次动作及可选结果确认。 |
 | 窗口 | `computer_windows`、`computer_window_input` | Windows 列出含最小化状态的顶层窗口，枚举子 HWND、管理窗口，或向已观测子窗口发送限定点击/滚轮消息。 |
+| 标准控件内容 | `computer_read_control` | Windows 从已观测子 HWND 有界读取标准 ListView 行、指定列文本及选择/焦点状态，不聚焦、选择或滚动。 |
 | 讲述人 | `computer_narrator` | 只读进程状态；向已运行的讲述人发送固定 Microsoft Standard 布局命令。 |
 | 能力 | `computer_status` | 返回平台能力和显示器几何。 |
 
@@ -179,6 +180,25 @@ helper 不主动请求前台，应用的消息处理仍可能自行激活窗口�
 
 开发时已验证：Low 完整性标签的 exe 对 Medium 目标执行 PrintWindow 会报 Win32 错误 5；相同字节部署到新临时目录、继承 Medium 后捕获成功。插件不会自动修改标签、提升权限或静默搬迁；可通过 host 配置 `nativeHelperPath` 明确选择部署产物。显式路径不存在会报错。
 
+### 标准 ListView 内容读取
+
+用新 `computer_windows(operation:"children")` 目录中的 `child_window_id` 调用 `computer_read_control`，必填 `columns` 指定 1–32 个唯一的零基列号（0–255），按指定顺序返回。支持 `SysListView32` 和标准 WinForms ListView 类；`LVS_OWNERDATA` 虚拟列表、未知类和无法确定的列直接拒绝，改用控件实际提供的 UIA/ItemContainer。目录允许零尺寸辅助 HWND，捕获和定向动作仍要求有效边界。读取前后复核 root/parent/PID/class/title；只读路径可读禁用控件，不主动改变选择、焦点、滚动或前台。
+
+```json
+{"child_window_id":"<新目录中的子窗口ID>","columns":[2,0],"start_row":0,"max_rows":100}
+```
+
+| 预算参数 | 默认 | 上限 |
+| --- | --- | --- |
+| `max_rows` | 100 | 512 |
+| `max_cells` | 1000 | 4096 |
+| `max_chars` / `max_cell_chars` | 32000 / 1000 个 UTF-16 单元 | 262144 / 4000 |
+| `timeout_ms` / `message_timeout_ms` | 10000 / 200 ms | 120000 / 1000 ms |
+
+`start_row` 默认 0。总截止包含排队和 helper 启动，消息截止不超出剩余总预算。结果区分 `coverage`、`stopReason`、来源错误和失败行/列，报告实际 `cellsRead/charsRead`。`nextRow` 只跨过完整行；末行可能只有部分列或文本，续读要重新取得目录，并从该行开始。容量边界保守标为 incomplete；末尾被截成一半的 UTF-16 代理对缩短为合法前缀，其它畸形 UTF-16 报错。读取末尾复核行数，变化报告 `sourceCountChanged`；这不是源应用事务快照。报告不产生语义元素或点击凭据。
+
+文本消息使用目标位宽的 `LVITEMW` 和固定 8192 字节远端缓冲。具名事件先交给目标，再分配缓冲；guard 按 PID 与进程创建时间隔离，并跨 helper 路径、版本和会话共享。超时、取消或未确认文本使该进程隔离：`remoteBufferQuarantined` 或 `remote_buffer_busy_or_quarantined` 后不可重试分配，缓冲和一个目标事件句柄由目标退出回收。`ReplyMessage` 可提前触发完成回调，因此还验证返回长度、首个 NUL 与 UTF-16。遵守协议的标准控件适用；恶意控件先写正确文本再继续使用指针的行为无法由此证明安全。权限拒绝如实报错，产品不自动提权。
+
 ### Windows 讲述人
 
 `computer_narrator(operation:"status")` 只检查当前 Windows 登录会话中的 Narrator 进程，不启动讲述人或改设置。命令要求讲述人已运行以及有效的窗口绑定证据；可选 Insert / CapsLock modifier，命令按 Microsoft **Standard** 布局发送。
@@ -238,6 +258,9 @@ pnpm run smoke:electron "C:\path\to\DeepSeek Harness.exe"
 pnpm run smoke:images "C:\path\to\DeepSeek Harness.exe"
 # 限定区域找色、系统 OCR 和视觉条件等待：
 pnpm run smoke:visual "C:\path\to\DeepSeek Harness.exe"
+# 标准 ListView 的 32/64 位夹具和真正系统声音应用：
+pnpm run smoke:listview "C:\path\to\DeepSeek Harness.exe"
+pnpm run smoke:listview "C:\path\to\DeepSeek Harness.exe" app
 pnpm run verify:profile
 # 修改 Rust 原生源码后：
 cargo build --release --manifest-path native/Cargo.toml
@@ -245,6 +268,8 @@ pnpm run native:stage
 pnpm pack --pack-destination .local
 ```
 
-`verify` 检查所有 JS 文件并运行单元/提供者合同及真实 ToolRuntime 回归。`verify:profile` 使用独立临时 DSH home 检查真实 Loader、24 工具及提示词，清理后不影响既有 profile。`smoke:semantics` 用真实 Cordis 本地子进程服务测试万节点 UIA/MSAA、分页/分支/查询/引用/虚拟化、阻塞终止和恢复，并与旧采集算法测量同一提供者的调用量与响应大小。`smoke:snapshots` 验证两种后端万节点固定分页、未交付代次变化丢弃、查询未命中节点复核、静默插删/重排/属性更新、封存后原生采集零调用，以及历史结果不能绕过实时目标校验。`smoke:recovery` 验证查询未命中项静默变更后重采一次、持续变化三次尝试后失败、已交付游标不换结果、旧动作引用实时拒绝，以及相同覆盖范围下的按需缓存读取量。`smoke:matches` 验证真实 UIA/MSAA 在相邻及远端属性 getter 阻塞时仍可早停并封存首项；匹配前缀完整复读、每页一项的固定三页、未命中项及重排变更丢弃、无匹配时搜索完整范围，以及动作实时身份拒绝。`smoke:lifetimes` 将自建窗口的真实属性读取延迟 1200ms，并把测试进程私有的代次起点移到距期限 1000ms，验证分段内到期丢弃、旧游标拒绝、引用清除及同进程恢复；还验证未来的展示时间戳不会延长封存时效，不修改机器时钟或生产时效常量。`smoke:locators` 使用默认 WPF AutomationPeer 与真实 ToolRuntime，验证同名消歧、容器替换、动作一次及读回、取消、惰性树、600 项虚拟列表、Grid 单元格和独立 HWND 弹窗；并在等待期间模拟人工编辑、切窗和原目标替换，检查另一个同名窗口未被操作。Electron smoke 还将真实 ToolRuntime 与 WindowsComputer/原生工作进程接在一起，按默认 8 条语义观测上限读取 UIA/MSAA 各 13 页，检查采集变化丢弃、固定续页、历史动作消耗状态、会话隔离及变化恢复；也包含已有 WPF/WinForms 动作。每项验收需在模块及清理完成后返回完成标记，加载失败、提前退出或迟到异常均不能只凭退出码 0 判为通过。Windows 动作 smoke 只操作标题唯一、由自己创建的进程，结束后清理自己的进程和临时目录。`smoke:visual` 使用真实 ToolRuntime 和系统 OCR 读取自绘 WinForms，覆盖限定区域、方向/容差/计数、截断不能证明消失、定时变化、超时/失焦、遮挡后台读取和移动后相对区域；点击计数保持零。另已完成当前真实 SketchUp 2024 的 R/空格工具切换、中文状态读取及按钮高亮等待，未向画布输入或保存模型；该现场脚本与原始截图/结果仅保存在本地检查点，不是通用应用基准。
+`verify` 检查所有 JS 文件并运行单元/提供者合同及真实 ToolRuntime 回归。`verify:profile` 使用独立临时 DSH home 检查真实 Loader、25 工具及提示词，清理后不影响既有 profile。`smoke:semantics` 用真实 Cordis 本地子进程服务测试万节点 UIA/MSAA、分页/分支/查询/引用/虚拟化、阻塞终止和恢复，并与旧采集算法测量同一提供者的调用量与响应大小。`smoke:snapshots` 验证两种后端万节点固定分页、未交付代次变化丢弃、查询未命中节点复核、静默插删/重排/属性更新、封存后原生采集零调用，以及历史结果不能绕过实时目标校验。`smoke:recovery` 验证查询未命中项静默变更后重采一次、持续变化三次尝试后失败、已交付游标不换结果、旧动作引用实时拒绝，以及相同覆盖范围下的按需缓存读取量。`smoke:matches` 验证真实 UIA/MSAA 在相邻及远端属性 getter 阻塞时仍可早停并封存首项；匹配前缀完整复读、每页一项的固定三页、未命中项及重排变更丢弃、无匹配时搜索完整范围，以及动作实时身份拒绝。`smoke:lifetimes` 将自建窗口的真实属性读取延迟 1200ms，并把测试进程私有的代次起点移到距期限 1000ms，验证分段内到期丢弃、旧游标拒绝、引用清除及同进程恢复；还验证未来的展示时间戳不会延长封存时效，不修改机器时钟或生产时效常量。`smoke:locators` 使用默认 WPF AutomationPeer 与真实 ToolRuntime，验证同名消歧、容器替换、动作一次及读回、取消、惰性树、600 项虚拟列表、Grid 单元格和独立 HWND 弹窗；并在等待期间模拟人工编辑、切窗和原目标替换，检查另一个同名窗口未被操作。Electron smoke 还将真实 ToolRuntime 与 WindowsComputer/原生工作进程接在一起，按默认 8 条语义观测上限读取 UIA/MSAA 各 13 页，检查采集变化丢弃、固定续页、历史动作消耗状态、会话隔离及变化恢复；也包含已有 WPF/WinForms 动作。每项验收需在模块及清理完成后返回完成标记，加载失败、提前退出或迟到异常均不能只凭退出码 0 判为通过。Windows 动作 smoke 只操作标题唯一、由自己创建的进程，结束后清理自己的进程和临时目录。`smoke:visual` 使用真实 ToolRuntime 和系统 OCR 读取自绘 WinForms，覆盖限定区域、方向/容差/计数、截断不能证明消失、定时变化、超时/失焦、遮挡后台读取和移动后相对区域；点击计数保持零。另已完成当前真实 SketchUp 2024 的 R/空格工具切换、中文状态读取及按钮高亮等待，未向画布输入或保存模型；该现场脚本与原始截图/结果仅保存在本地检查点，不是通用应用基准。
+
+`smoke:listview` 使用真实 Electron、ToolRuntime 和官方 managed subprocess，检查 32/64 位标准控件、UTF-16 与行/列预算、遮挡/禁用读取、零尺寸目录成员、超时/取消后的缓冲保留和后续分配拒绝。`app` 模式启动真正系统声音应用，逐字对照 UIA 的五个设备名称、重复读取选择/焦点与前台不变，然后清理本次声音进程。Explorer 桌面的 owner-data 拒绝也有实际证据；本机服务窗口读取遇到 Win32 access denied，声音窗口整树 MSAA 枚举失败，不能把这些路径算作成功。它们的限制与成功证据一起记录在 [EVIDENCE.md](EVIDENCE.md)。
 
 `native:stage` 复制 release exe 并记录二进制与 Rust 源文件哈希；`prepack` 要求回归成功且产物清单匹配当前版本/源码。打包不含构建缓存或本地检查点。来源、许可与风险边界见 [UPSTREAM.md](references/UPSTREAM.md)、[LICENSE](LICENSE)、[SECURITY.md](SECURITY.md)，变更见 [CHANGELOG.md](CHANGELOG.md)。

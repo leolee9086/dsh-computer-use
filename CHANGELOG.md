@@ -1,5 +1,14 @@
 # 变更记录
 
+## 0.5.12 — 2026-10-09
+
+- 新增 Windows `computer_read_control`，共 25 工具。使用新子 HWND 目录身份，有界读取标准 SysListView32 / WinForms ListView 的指定列、行文本和选择/焦点状态，不聚焦、选择或滚动；owner-data 虚拟控件和未知类明确拒绝。
+- 行、单元格、UTF-16 文本、消息与总截止独立受限，返回完整行前缀、尾行部分内容、nextRow、实际计数和来源错误。容量边界保守标 incomplete；截断代理对缩短为合法前缀，其它畸形 UTF-16 报错。末尾行数复核不提供源程序事务保证。
+- 64 位 helper 按目标 32/64 位编码 LVITEMW；分配前将具名 guard 交给目标，固定 8192 字节缓冲及一个目标事件句柄。超时/取消/kill 或未确认文本时保留至目标退出，跨 helper 路径、版本和会话拒绝后续分配。ReplyMessage 可早回复，回调后继续校验长度、首个 NUL 和 UTF-16；恶意控件先写正确文本再继续使用指针的行为不能由此证明安全。
+- 修复 Explorer 零尺寸 SysHeader32 导致整份子 HWND 目录失败的问题：保留零尺寸辅助 HWND，负尺寸仍拒绝，原捕获和动作边界检查保留。
+- 真实 Electron、ToolRuntime 与官方 subprocess 的 32/64 位夹具验收通过，包括标准/托管类、中文与代理对、各类预算、禁用/遮挡读取、选择焦点与前台保持、延迟回调、早回复 0/777 隔离、后续分配拒绝及取消/总截止。实际系统声音应用的五行逐字匹配独立 UIA 证据，重复读取内容、选择和焦点一致；测试进程结束后完成清理。
+- 实际 Explorer 桌面 owner-data 拒绝、服务窗口 Win32 access denied、声音整树 MSAA 枚举失败如实保留。增加 smoke:listview 的夹具/app 入口、25 工具 Loader 名单、提示词、原生协议与风险文档；证据与复现范围见 [EVIDENCE.md](EVIDENCE.md)。
+
 ## 0.5.11 — 2026-10-08
 
 - 新增 Windows `computer_find_color`、`computer_ocr`、`computer_wait_visual`，共 24 工具。必填有界区域支持虚拟桌面绝对坐标或完整窗口相对坐标，固定窗口身份并每轮重读边界；screen 要求已在前台，PrintWindow 读取后台渲染，均不暗中提窗或输入。

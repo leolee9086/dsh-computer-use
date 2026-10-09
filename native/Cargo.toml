@@ -37,6 +37,10 @@ windows = { version = "0.58", features = [
     #   - SetFocus 在 Win32::UI::Input::KeyboardAndMouse
     "Win32_UI_WindowsAndMessaging",
     "Win32_System_Threading",
+    # 标准 ListView 的跨进程缓冲与存活于目标进程的有界隔离标记。
+    "Win32_System_Memory",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_Security",
     "Win32_UI_Input_KeyboardAndMouse",
     # 系统 OCR 通过已缓存的 WinRT 绑定调用，不另装识别器或语言数据。
     "Win32_System_WinRT",

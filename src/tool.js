@@ -6,6 +6,7 @@ import { acquisitionArgs, queryArgs, SEMANTIC_ACQUISITION_SCHEMA } from './seman
 import { NARRATOR_COMMANDS, narratorAction } from './narrator.js';
 import { registerLocatorTools } from './locator-tools.js';
 import { registerVisualTools } from './visual-tools.js';
+import { registerControlTools } from './control-tools.js';
 import { IMAGE_SEARCH_OPTIONS, imageSearchOptions, validateImageResult, imageClickPoint } from './image-match.js';
 import { INPUT_STEPS_SCHEMA, MODIFIERS, inputSequenceArgs, keyOptions } from './input-actions.js';
 import { accessibilityElementById, findAccessibilityElements } from './semantics.js';
@@ -21,6 +22,7 @@ const OBSERVATION_TOOLS = new Set([
   'computer_ocr',
   'computer_wait_visual',
   'computer_read',
+  'computer_read_control',
   'computer_screenshot',
   'computer_status',
 ]);
@@ -256,6 +258,16 @@ function freshWindow(states, exec, windowId, config) {
     return window;
   }
   throw new Error(`window '${windowId}' is unavailable in this session; list native windows before focusing one`);
+}
+
+function freshChildWindow(states, exec, childId, config) {
+  for (const list of agentState(states, exec).childWindowLists.values()) {
+    const child = list.windows.get(childId);
+    if (child === undefined) continue;
+    if (list.consumedAt !== undefined || Date.now() - list.capturedAt > config.maxObservationAgeMs) throw new Error('child window observation expired or consumed; list children again');
+    return { list, child };
+  }
+  throw new Error('child window is unavailable in this session; list children first');
 }
 
 /** A semantic observation can stand on its own, or retain its exact image binding. */
@@ -637,6 +649,8 @@ export function apply(ctx, rawConfig) {
     window: (id, exec) => freshWindow(observations, exec, id, config), publish: publishElements, control });
   registerVisualTools({ register: (definition) => registerTool(ctx.tools, definition), textTool,
     provider: () => computer(ctx), window: (id, exec) => freshWindow(observations, exec, id, config) });
+  registerControlTools({ register: (definition) => registerTool(ctx.tools, definition), textTool,
+    provider: () => computer(ctx), child: (id, exec) => freshChildWindow(observations, exec, id, config) });
 
   // 文件采集无需附件或模型服务，工具始终注册；图像投送才解析附件服务。
   {
@@ -1121,14 +1135,7 @@ export function apply(ctx, rawConfig) {
     async (rawArgs, exec) => {
       const args = object(rawArgs);
       const childId = requiredString(args, 'child_window_id');
-      let found;
-      for (const list of agentState(observations, exec).childWindowLists.values()) {
-        const child = list.windows.get(childId);
-        if (child === undefined) continue;
-        if (list.consumedAt !== undefined || Date.now() - list.capturedAt > config.maxObservationAgeMs) throw new Error('child window observation expired or consumed; list children again');
-        found = { list, child }; break;
-      }
-      if (found === undefined) throw new Error('child window is unavailable in this session; list children first');
+      const found = freshChildWindow(observations, exec, childId, config);
       const operation = enumValue(args, 'operation', ['click', 'scroll']);
       const x = optionalInteger(args, 'x'); const y = optionalInteger(args, 'y');
       const action = { kind: operation, x, y };

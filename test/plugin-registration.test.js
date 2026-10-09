@@ -65,6 +65,7 @@ test('tool plugin registers the complete model-facing tool set', () => {
     'computer_narrator',
     'computer_ocr',
     'computer_read',
+    'computer_read_control',
     'computer_screenshot',
     'computer_scroll',
     'computer_status',

@@ -22,6 +22,7 @@ mod color_search;
 mod image_match;
 mod image_template;
 mod input_sequence;
+mod listview;
 mod ocr;
 mod visual;
 mod window_control;
@@ -1614,6 +1615,7 @@ fn main() -> ExitCode {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => fail(error),
         },
+        "read-listview" => json_command(listview::read),
         "child-windows" => json_command(window_control::children),
         "window-message" => json_command(window_control::perform_message),
         "manage-window" => json_command(window_control::manage),
@@ -1706,11 +1708,11 @@ fn main() -> ExitCode {
             Err(e) => fail(e),
         },
         "" => fail(
-            "用法：dsh-screen <list-displays|screenshot|find-image|find-color|ocr|ocr-languages|action|list-windows|focus-window|child-windows|window-message|manage-window|probe-pixels> \
+            "用法：dsh-screen <list-displays|screenshot|find-image|find-color|ocr|ocr-languages|action|list-windows|focus-window|child-windows|read-listview|window-message|manage-window|probe-pixels> \
              [--x N --y N --width N --height N]",
         ),
         other => fail(format!(
-            "未知命令 '{other}'（支持 list-displays / screenshot / find-image / find-color / ocr / ocr-languages / action / list-windows / focus-window / child-windows / window-message / manage-window / probe-pixels）"
+            "未知命令 '{other}'（支持 list-displays / screenshot / find-image / find-color / ocr / ocr-languages / action / list-windows / focus-window / child-windows / read-listview / window-message / manage-window / probe-pixels）"
         )),
     }
 }

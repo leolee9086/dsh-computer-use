@@ -12,6 +12,7 @@ import { ComputerUseError, unsupported } from './errors.js';
 import { assertFinitePoint } from './geometry.js';
 import { imageSearchOptions, validateImageResult } from './image-match.js';
 import { colorOptions, ocrOptions, integer, validateColorResult, validateOcrResult, validateOcrStatus } from './visual.js';
+import { validateListViewResult } from './listview.js';
 
 const KEY_CODES = {
   alt: 0x12,
@@ -338,6 +339,7 @@ export class WindowsComputer {
       ocrConfidence: false,
       visualWait: true,
       childWindows: true,
+      standardListView: true,
       windowManagement: true,
       narrator: true,
     });
@@ -430,6 +432,14 @@ export class WindowsComputer {
     return runNativeHelper(this.runner, requireHelperPath(this.config), ['child-windows'], {
       window: { handle: target.id, processId: target.processId, title: target.title }, maxNodes,
     }, signal);
+  }
+
+  async readListView(rawTarget, child, options, signal) {
+    const target = listedWindowTarget(rawTarget);
+    const result = await runNativeHelper(this.runner, requireHelperPath(this.config), ['read-listview'], {
+      window: { handle: target.id, processId: target.processId, title: target.title }, child, ...options,
+    }, signal, 4 * 1024 * 1024, options.budgetMs);
+    return validateListViewResult(result, options);
   }
 
   async performWindowMessage(rawTarget, child, action, signal) {

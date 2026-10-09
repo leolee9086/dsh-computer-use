@@ -19,6 +19,7 @@ Windows 捕获、输入与窗口控制后端，版本 0.5.0。单文件 Rust exe
 | `ocr-languages` | 无 | 已安装语言、`maxImageDimension` 与置信分数可用性 |
 | `child-windows` | `{window,maxNodes}` | 子 HWND `windows` 与 `truncated` |
 | `window-message` | `{window,child,action}` | `delivered/applicationResultVerified/foregroundChanged` |
+| `read-listview` | `{window,child,columns,startRow,maxRows,maxCells,maxChars,maxCellChars,budgetMs,messageTimeoutMs}` | 行/列文本、选择/焦点、实际计数、覆盖/停止原因/错误及远端隔离状态 |
 | `manage-window` | `{window,action}` | 操作结果；关闭为 `posted:true,applicationResultVerified:false` |
 
 除 `focus-window` 的顶层 `id` 外，窗口身份目标 `focus` / `background` / `window` 使用 `{handle,processId,title}`。HWND 是十进制字符串，避免 JavaScript number 精度丢失。边界是实时读取的结果，不作为旧身份字段。原生调用复核句柄/进程/标题，并在需要前台时确认实际前台 HWND。
@@ -108,11 +109,23 @@ RAII 记录本序列取得的按键/按钮，在正常结束或处理到的错�
 
 ## 子窗口与窗口管理
 
-`child-windows` 最大 512 节点。子记录包含 `id,parentId,rootId,processId,className,title,visible,enabled,bounds,clientBounds`；客户区边界给出当前屏幕原点和尺寸。
+`child-windows` 最大 512 节点。子记录包含 `id,parentId,rootId,processId,className,title,visible,enabled,bounds,clientBounds`；客户区边界给出当前屏幕原点和尺寸。真实辅助 HWND 可以宽/高为零，目录保留它们并继续枚举；负尺寸报错。捕获/manage 和定向动作保持原有效边界要求。
 
 `window-message` 接受枚举出的完整 child 身份，固定 action 为 `{kind:"click",x,y,button}` 或 `{kind:"scroll",x,y,deltaX,deltaY}`。坐标是**子窗口客户区物理像素**，不是 screenshot 像素。再次核对 root/parent/PID/class/title，消息使用 SendMessageTimeoutW 500ms；不接受任意消息编号。helper 不请求前台或移动全局指针，但应用可在处理消息时自行激活。`foregroundChanged` 是实际测量，`delivered:true` 不证明业务结果。
 
 `manage-window` action 为 move(x/y)、resize(width/height)、minimize/maximize/restore/close。move/resize 使用 NOACTIVATE/NOZORDER；其它窗口状态可能影响前台。close 只投递 WM_CLOSE，应用可能拒绝或弹出保存对话框。最小化后可通过新的 list-windows 记录确认状态，再明确恢复/聚焦。
+
+## 标准 ListView 文本协议
+
+`read-listview` 接受准确的顶层与子 HWND 身份，前后复核 root/parent/PID/class/title。只支持 `SysListView32` 和 `WindowsForms10.SysListView32.*`；`LVS_OWNERDATA` 与未知类直接拒绝。禁止任意消息编号，不聚焦、选择或滚动；禁用控件的只读内容可取。标量消息使用 `SendMessageTimeoutW`，文本用 `LVM_GETITEMTEXTW` 完成回调；列数来自同进程、真实子 `SysHeader32`，无可确定 header 时只接受列 0。
+
+请求必填所有预算：columns 为 1–32 个唯一列号 0–255，startRow 不超过 i32::MAX，maxRows 1–512、maxCells 1–4096、maxChars 1–262144、maxCellChars 1–4000（UTF-16 单元）。budgetMs 为 1–120000，messageTimeoutMs 为 1–1000 且受剩余总截止限制。宿主共用总截止，包括启动/排队；阻塞由官方 managed subprocess 终止。结果以完整行前缀计算 nextRow，尾行可能不完整；source_error 保留已读前缀和 failedRow/failedColumn。末尾行数变动报告 sourceCountChanged，读取不具有源程序事务性。
+
+64 位 helper 显式判断目标为 32/64 位，按目标宽度编码 `LVITEMW`。guard 名为 `Local\\DSHComputerUse_ListViewBuffer_<PID>_<creationTime>`，故意跨路径、包版本和会话共享。先复制一个事件句柄进目标，再分配固定 8192 字节；同目标有现存事件时拒绝新分配。pending 在文本发送前置位；超时、kill、取消或文本协议错误保留缓冲/guard 至目标退出，后续读取不累积远端分配。正常完成先释放缓冲，再关闭目标句柄；释放失败保留 guard，目标句柄关闭只尝试一次，防止 Drop 重试误关复用句柄。
+
+文本区域初始为 0xff。`ReplyMessage` 可能在实际处理结束前触发回调，返回后仍检查合法长度、首个 NUL 位置及 UTF-16 解码，成功才清除 pending。容量末尾孤立高代理只缩短一个单元得到合法前缀，其它畸形文本报错。早回复却未写文本的控件被拒绝并隔离。恶意控件先写正确文本再回复、之后继续使用指针的行为无法由这些检查证明安全；此路径依赖标准控件遵守消息协议。访问/完整性拒绝直接报告，不自动提权或改系统状态。
+
+复现：`pnpm run smoke:listview "C:\\path\\to\\DeepSeek Harness.exe"` 跑两种位宽；末尾加 `app` 核对实际系统声音应用。所有模块和清理结束后的完成标记才是通过依据。
 
 ## 构建、部署与验收
 
